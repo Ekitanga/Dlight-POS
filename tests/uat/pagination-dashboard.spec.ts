@@ -1,0 +1,186 @@
+import { test, expect } from '@playwright/test'
+
+const email = process.env.PREOPEN_EMAIL
+const password = process.env.PREOPEN_PASSWORD
+
+test('paginates large lists and clarifies dashboard metrics', async ({ page }) => {
+  test.skip(!email || !password, 'PREOPEN credentials are required')
+
+  await page.goto('/login')
+  await page.getByLabel('Email').fill(email!)
+  await page.getByLabel('Password').fill(password!)
+  await page.getByRole('button', { name: 'Sign In' }).click()
+  await expect(page).toHaveURL(/\/dashboard/)
+
+  await page.goto('/products')
+  await expect(page.locator('tbody tr')).toHaveCount(25)
+  await expect(page.getByText(/Showing 1-25 of \d+/)).toBeVisible()
+  await page.getByTitle('Next page').click()
+  await expect(page.getByText(/Page 2 of \d+/)).toBeVisible()
+
+  await page.goto('/inventory')
+  await expect(page.getByRole('heading', { name: 'Inventory' })).toBeVisible()
+  await expect(page.locator('tbody tr')).toHaveCount(25)
+  await expect(page.getByText(/Showing 1-25 of \d+/)).toBeVisible()
+
+  for (const [route, heading] of [
+    ['/orders', 'Orders'],
+    ['/customers', 'Customers'],
+    ['/deliveries', 'Deliveries'],
+    ['/receipts', 'Customer Receipts'],
+    ['/expenses', 'Expenses'],
+    ['/audit', 'Audit Logs'],
+    ['/reports', 'Business Intelligence']
+  ] as const) {
+    await page.goto(route)
+    await expect(page.getByRole('heading', { name: heading, exact: true })).toBeVisible()
+    await expect(page.getByText(/^Failed to load/)).toHaveCount(0)
+  }
+
+  await page.goto('/orders')
+  await expect(page.getByRole('columnheader', { name: 'Destination' })).toBeVisible()
+  await expect(page.getByText('Riverside', { exact: true })).toBeVisible()
+
+  await page.goto('/reports')
+  await expect(page.getByText('Gross Profit', { exact: true })).toBeVisible()
+  await expect(page.getByText('Inventory Value', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Performance Trends' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Business Leaders' })).toBeVisible()
+  await expect(page.locator('body')).not.toContainText(/T\d{2}:\d{2}:\d{2}\.\d{3}Z/)
+  await expect(page.locator('body')).not.toContainText(/\d+\.\d{6,}/)
+  const overviewOverflows = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)
+  expect(overviewOverflows).toBe(false)
+  await page.getByRole('button', { name: 'Rider Management' }).click()
+  await expect(page.getByRole('columnheader', { name: 'Average Delivery Fee' })).toBeVisible()
+  await expect(page.locator('body')).not.toContainText(/\d+\.\d{6,}/)
+  await page.getByRole('button', { name: 'Supplier Management' }).click()
+  await expect(page.getByRole('button', { name: 'Supplier Payables' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: /Supplier Id/i })).toHaveCount(0)
+  const productsHeader = page.getByRole('columnheader', { name: 'Products', exact: true })
+  await expect(productsHeader).toBeVisible()
+  const productsColumnIndex = await productsHeader.evaluate(element => Array.from(element.parentElement!.children).indexOf(element))
+  const productsCell = page.locator('tbody tr').first().locator('td').nth(productsColumnIndex)
+  const productsCellBox = await productsCell.boundingBox()
+  expect(productsCellBox?.width).toBeGreaterThan(300)
+  expect(productsCellBox?.height).toBeLessThan(90)
+  await page.getByRole('button', { name: 'Finance' }).click()
+  await page.getByRole('button', { name: 'Daily Reconciliation' }).click()
+  await expect(page.getByText('Actual cash counted')).toBeVisible()
+
+  await page.goto('/dashboard')
+  await expect(page.getByText('Delivery Margin', { exact: true })).toBeVisible()
+  await expect(page.getByText('Customer delivery fee - actual delivery cost')).toBeVisible()
+  await expect(page.getByText('Period Net Profit', { exact: true })).toBeVisible()
+  await page.getByLabel('Period').selectOption('specific')
+  await expect(page.getByLabel('Business date')).toBeVisible()
+  await page.getByLabel('Business date').fill('2026-06-28')
+  await expect(page.getByText('28 Jun 2026')).toBeVisible()
+  await page.getByLabel('Period').selectOption('custom')
+  await expect(page.getByLabel('From')).toBeVisible()
+  await expect(page.getByLabel('To')).toBeVisible()
+  await page.getByLabel('From').fill('2026-06-28')
+  await page.getByLabel('To').fill('2026-06-28')
+  await expect(page.getByText('28 Jun 2026')).toBeVisible()
+  await page.getByTitle('View Period Sales').click()
+  await expect(page).toHaveURL(/\/reports\?department=sales&report=sales&date_from=2026-06-28&date_to=2026-06-28/)
+  await expect(page.getByRole('button', { name: 'Sales Analysis' })).toBeVisible()
+
+  await page.goto('/dashboard')
+  await page.getByTitle('View Low Stock Alerts').click()
+  await expect(page).toHaveURL(/\/inventory\?filter=low_stock/)
+  await expect(page.getByText('Low-stock filter active.')).toBeVisible()
+
+  await page.goto('/dashboard')
+  await page.getByTitle('View Supplier Payables').click()
+  await expect(page).toHaveURL(/\/suppliers\?filter=outstanding/)
+  await expect(page.getByText('Outstanding filter active.')).toBeVisible()
+})
+
+test('keeps the business intelligence centre usable on mobile', async ({ page }) => {
+  test.skip(!email || !password, 'PREOPEN credentials are required')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/login')
+  await page.getByLabel('Email').fill(email!)
+  await page.getByLabel('Password').fill(password!)
+  await page.getByRole('button', { name: 'Sign In' }).click()
+  await expect(page).toHaveURL(/\/dashboard/)
+  await page.goto('/reports')
+
+  await expect(page.getByRole('heading', { name: 'Business Intelligence' })).toBeVisible()
+  await expect(page.getByText('Gross Profit', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Courier / COD' }).click()
+  await expect(page.getByRole('button', { name: 'Outstanding COD' })).toBeVisible()
+  const hasPageOverflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1)
+  expect(hasPageOverflow).toBe(false)
+})
+
+test('opens supplier balances as item-level payment workspaces', async ({ page }) => {
+  test.skip(!email || !password, 'PREOPEN credentials are required')
+  await page.goto('/login')
+  await page.getByLabel('Email').fill(email!)
+  await page.getByLabel('Password').fill(password!)
+  await page.getByRole('button', { name: 'Sign In' }).click()
+  await expect(page).toHaveURL(/\/dashboard/)
+  await page.goto('/suppliers')
+
+  const outstandingBalance = page.getByTitle('View pending supplier items').first()
+  test.skip(await outstandingBalance.count() === 0, 'No supplier with a pending balance exists in this database')
+  await expect(outstandingBalance).toBeVisible()
+  await outstandingBalance.click()
+  await expect(page.getByRole('button', { name: 'Pending Items' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Product' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Outstanding' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Record Selected Payment' })).toBeDisabled()
+  const selectAll = page.getByRole('checkbox', { name: 'Select all supplier items' })
+  await selectAll.check()
+  await expect(page.getByRole('button', { name: 'Record Selected Payment' })).toBeEnabled()
+  await expect(page.getByText(/Selected total/)).toBeVisible()
+  await page.getByRole('checkbox', { name: 'Clear all supplier items' }).uncheck()
+  await expect(page.getByRole('button', { name: 'Record Selected Payment' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Payment History' }).click()
+  await expect(
+    page.getByRole('columnheader', { name: 'Reference' }).or(page.getByText('No supplier payments recorded'))
+  ).toBeVisible()
+})
+
+test('shows the Speedaf remittance action on pending-payment orders', async ({ page }) => {
+  test.skip(!email || !password, 'PREOPEN credentials are required')
+  await page.goto('/login')
+  await page.getByLabel('Email').fill(email!)
+  await page.getByLabel('Password').fill(password!)
+  await page.getByRole('button', { name: 'Sign In' }).click()
+  await expect(page).toHaveURL(/\/dashboard/)
+  await page.goto('/orders')
+  await page.getByRole('button', { name: 'Pending Payment' }).click()
+  test.skip(await page.locator('tbody tr').count() === 0, 'No Speedaf order is currently awaiting remittance')
+  await expect(page.locator('tbody tr').first()).toBeVisible()
+  await page.locator('tbody tr').first().getByTitle('View order').click()
+  await expect(page.getByRole('heading', { name: 'Record Speedaf Remittance' })).toBeVisible()
+  await expect(page.getByText('Outstanding COD', { exact: true })).toBeVisible()
+  await expect(page.getByText('Enter the payment reference to enable confirmation.')).toBeVisible()
+  await expect(page.getByText('Mark Returned', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Confirm Payment' })).toBeDisabled()
+  await page.getByPlaceholder('Enter the M-Pesa transaction code or bank reference').fill('UAT-PREVIEW-ONLY')
+  await expect(page.getByRole('button', { name: 'Confirm Payment' })).toBeEnabled()
+})
+
+test('separates Speedaf COD from delivery-fee payment', async ({ page }) => {
+  test.skip(!email || !password, 'PREOPEN credentials are required')
+  await page.goto('/login')
+  await page.getByLabel('Email').fill(email!)
+  await page.getByLabel('Password').fill(password!)
+  await page.getByRole('button', { name: 'Sign In' }).click()
+  await expect(page).toHaveURL(/\/dashboard/)
+  await page.goto('/orders')
+  await page.getByRole('button', { name: 'New Order' }).click()
+  await page.getByRole('combobox', { name: 'Delivery Type' }).selectOption('courier')
+  await page.getByLabel('Customer Delivery Fee Charged').fill('350')
+  await page.getByLabel('Actual Courier Fee').fill('350')
+  const marginPreview = page.getByText('Delivery Margin Preview').locator('..').locator('..')
+  await expect(marginPreview).toContainText('KES 0')
+  await page.getByRole('combobox', { name: 'Speedaf Item Collection' }).selectOption('cod')
+  await expect(page.getByRole('combobox', { name: 'Delivery Fee Handling' })).toHaveValue('paid_to_courier')
+  await expect(page.getByRole('combobox', { name: 'Payment Method', exact: true })).toHaveCount(0)
+  await page.getByRole('combobox', { name: 'Delivery Fee Handling' }).selectOption('mpesa')
+  await expect(page.getByText(/Only the delivery fee of KES/)).toBeVisible()
+})

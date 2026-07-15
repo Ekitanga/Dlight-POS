@@ -1,0 +1,25 @@
+{
+  "name": "dlight-pos",
+  "version": "1.0.0",
+  "description": "Enterprise-grade Retail ERP, POS, Dropshipping & Business Management System",
+  "type": "module",
+  "private": true,
+  "packageManager": "npm@11.2.0",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev --workspace=packages/backend\" \"npm run dev --workspace=packages/frontend\"",
+    "dev:backend": "npm run dev --workspace=packages/backend",
+    "dev:frontend": "npm run dev --workspace=packages/frontend",
+    "build": "npm run build --workspace=packages/backend && npm run build --workspace=packages/frontend",
+    "lint": "npm run lint --workspace=packages/backend && npm run lint --workspace=packages/frontend",
+    "typecheck": "npm run typecheck --workspace=packages/backend && npm run typecheck --workspace=packages/frontend",
+    "test": "npm run test --workspace=packages/backend",
+    "test:uat": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "concurrently": "^8.2.2"
+  }
+}
