@@ -1,8 +1,8 @@
 import { Router } from 'express'
-import { query } from '../db'
-import { auditMiddleware } from '../middleware/audit'
-import { paginatedResponse, paginationFromQuery } from '../utils/pagination'
-import { logAudit } from '../utils/audit'
+import { query } from '../db/index.js'
+import { auditMiddleware } from '../middleware/audit.js'
+import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
+import { logAudit } from '../utils/audit.js'
 
 const router = Router()
 const allowedFrequencies = ['daily', 'monthly', 'one_off']

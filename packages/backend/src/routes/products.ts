@@ -1,8 +1,8 @@
 import { Router } from 'express'
 import { createHash } from 'node:crypto'
-import { query, transaction } from '../db'
-import { auditMiddleware } from '../middleware/audit'
-import { paginatedResponse, paginationFromQuery } from '../utils/pagination'
+import { query, transaction } from '../db/index.js'
+import { auditMiddleware } from '../middleware/audit.js'
+import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 
 const router = Router()
 

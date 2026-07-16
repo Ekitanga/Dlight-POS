@@ -1,7 +1,7 @@
 import { Router } from 'express'
-import { query } from '../db'
-import { authMiddleware } from '../middleware/auth'
-import { paginatedResponse, paginationFromQuery } from '../utils/pagination'
+import { query } from '../db/index.js'
+import { authMiddleware } from '../middleware/auth.js'
+import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 
 const router = Router()
 

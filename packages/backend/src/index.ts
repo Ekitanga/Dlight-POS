@@ -6,9 +6,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { apiRouter } from './routes'
-import { errorHandler } from './middleware/error'
-import { logger } from './middleware/logger'
+import { apiRouter } from './routes/index.js'
+import { errorHandler } from './middleware/error.js'
+import { logger } from './middleware/logger.js'
 
 dotenv.config()
 

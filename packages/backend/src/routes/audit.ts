@@ -1,6 +1,6 @@
 import { Router } from 'express'
-import { query } from '../db'
-import { paginatedResponse, paginationFromQuery } from '../utils/pagination'
+import { query } from '../db/index.js'
+import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 
 const router = Router()
 

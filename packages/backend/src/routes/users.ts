@@ -1,6 +1,6 @@
 import { Router } from 'express'
-import { query, transaction } from '../db'
-import { authMiddleware } from '../middleware/auth'
+import { query, transaction } from '../db/index.js'
+import { authMiddleware } from '../middleware/auth.js'
 import bcrypt from 'bcryptjs'
 
 const router = Router()

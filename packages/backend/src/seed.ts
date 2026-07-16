@@ -1,4 +1,4 @@
-import { transaction } from './db'
+import { transaction } from './db/index.js'
 import bcrypt from 'bcryptjs'
 
 async function seed() {

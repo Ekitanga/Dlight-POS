@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express'
-import { query } from '../db'
-import { logAudit } from '../utils/audit'
+import { query } from '../db/index.js'
+import { logAudit } from '../utils/audit.js'
 
 type EntityType = 'user' | 'product' | 'order' | 'supplier' | 'rider' | 'customer' | 'expense' | 'setting' | 'inventory'
 

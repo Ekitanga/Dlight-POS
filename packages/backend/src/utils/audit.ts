@@ -1,5 +1,5 @@
 import type { Request } from 'express'
-import { query } from '../db'
+import { query } from '../db/index.js'
 
 type AuditValues = Record<string, unknown> | unknown[] | null | undefined
 

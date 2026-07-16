@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import dotenv from 'dotenv'
-import { pool } from './db/pool'
-import { normalizeKenyanPhone } from './utils/phone'
+import { pool } from './db/pool.js'
+import { normalizeKenyanPhone } from './utils/phone.js'
 
 dotenv.config({ path: '../../.env' })
 if (!pool) throw new Error('Test database is not configured')

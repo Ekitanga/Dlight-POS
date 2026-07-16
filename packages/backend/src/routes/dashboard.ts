@@ -1,6 +1,6 @@
 import { Router } from 'express'
-import { query } from '../db'
-import { recognizedExpensesSql } from '../lib/expenseRecognition'
+import { query } from '../db/index.js'
+import { recognizedExpensesSql } from '../lib/expenseRecognition.js'
 
 const router = Router()
 

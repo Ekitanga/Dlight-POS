@@ -1,7 +1,7 @@
 import { Router } from 'express'
-import { query, transaction } from '../db'
-import { paginatedResponse, paginationFromQuery } from '../utils/pagination'
-import { logAudit } from '../utils/audit'
+import { query, transaction } from '../db/index.js'
+import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
+import { logAudit } from '../utils/audit.js'
 
 const router = Router()
 
