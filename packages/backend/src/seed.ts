@@ -6,13 +6,15 @@ async function seed() {
   if (!adminPassword || adminPassword.length < 12) {
     throw new Error('SEED_ADMIN_PASSWORD must be set to at least 12 characters')
   }
+  const adminEmail = process.env.SEED_ADMIN_EMAIL || 'admin@dlight.com'
+  const adminName = process.env.SEED_ADMIN_NAME || 'Admin'
   const passwordHash = await bcrypt.hash(adminPassword, 12)
   await transaction(async (client) => {
     await client.query(
       `INSERT INTO users (email, password_hash, full_name, role)
-       VALUES ('admin@dlight.com', $1, 'Admin', 'admin')
+       VALUES ($2, $1, $3, 'admin')
        ON CONFLICT (email) DO NOTHING`,
-      [passwordHash]
+      [passwordHash, adminEmail, adminName]
     )
 
     await client.query(`

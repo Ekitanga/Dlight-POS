@@ -135,6 +135,8 @@ Run this after the schema is applied. Replace the password with a private strong
 
 ```bash
 docker compose -f deploy/contabo/docker-compose.yml exec \
+  -e SEED_ADMIN_EMAIL='owner@example.com' \
+  -e SEED_ADMIN_NAME='Owner Name' \
   -e SEED_ADMIN_PASSWORD='CHANGE_TO_PRIVATE_STRONG_PASSWORD' \
   app node packages/backend/dist/seed.js
 ```
