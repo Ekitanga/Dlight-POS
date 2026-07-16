@@ -12,6 +12,7 @@
     "dev": "concurrently \"npm run dev --workspace=packages/backend\" \"npm run dev --workspace=packages/frontend\"",
     "dev:backend": "npm run dev --workspace=packages/backend",
     "dev:frontend": "npm run dev --workspace=packages/frontend",
+    "start": "node packages/backend/dist/index.js",
     "build": "npm run build --workspace=packages/backend && npm run build --workspace=packages/frontend",
     "lint": "npm run lint --workspace=packages/backend && npm run lint --workspace=packages/frontend",
     "typecheck": "npm run typecheck --workspace=packages/backend && npm run typecheck --workspace=packages/frontend",
