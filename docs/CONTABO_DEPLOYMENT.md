@@ -129,6 +129,18 @@ Then restart the app:
 docker compose -f deploy/contabo/docker-compose.yml restart app
 ```
 
+## Create First Admin Login
+
+Run this after the schema is applied. Replace the password with a private strong password that is not saved in chat or documentation:
+
+```bash
+docker compose -f deploy/contabo/docker-compose.yml exec \
+  -e SEED_ADMIN_PASSWORD='CHANGE_TO_PRIVATE_STRONG_PASSWORD' \
+  app node packages/backend/dist/seed.js
+```
+
+This creates the first administrator and default setup records if they do not already exist.
+
 ## Verify
 
 ```bash
