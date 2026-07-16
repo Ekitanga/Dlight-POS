@@ -16,6 +16,11 @@ const app = express()
 const port = process.env.PORT || 4000
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const frontendDistPath = path.resolve(__dirname, '..', '..', 'frontend', 'dist')
+const blockedStaticPaths = [
+  /^\/\./,
+  /^\/(?:config|settings|env)(?:\.|$)/i,
+  /^\/(?:js\/)?(?:config|env|settings)\.js$/i,
+]
 
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
@@ -31,7 +36,14 @@ app.get('/health', (_req, res) => {
 })
 
 if (process.env.NODE_ENV === 'production' && fs.existsSync(frontendDistPath)) {
-  app.use(express.static(frontendDistPath))
+  app.use((req, res, next) => {
+    if (blockedStaticPaths.some((pattern) => pattern.test(req.path))) {
+      res.status(404).json({ message: 'Not found' })
+      return
+    }
+    next()
+  })
+  app.use(express.static(frontendDistPath, { dotfiles: 'deny' }))
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api')) return next()
     res.sendFile(path.join(frontendDistPath, 'index.html'))
