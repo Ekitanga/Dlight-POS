@@ -131,6 +131,27 @@ docker compose -f deploy/contabo/docker-compose.yml up -d --build
 docker compose -f deploy/contabo/docker-compose.yml ps
 ```
 
+## Fast Bootstrap Option
+
+On a new VPS, the fastest deployment path is:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Ekitanga/Dlight-POS/main/deploy/contabo/bootstrap.sh -o /tmp/dlight-bootstrap.sh
+bash /tmp/dlight-bootstrap.sh
+```
+
+By default this uses:
+
+```text
+https://169-58-30-49.sslip.io
+```
+
+To use a branded domain later:
+
+```bash
+APP_DOMAIN=pos.dlightgiftshop.com bash /tmp/dlight-bootstrap.sh
+```
+
 ## Apply Database Schema
 
 Run this only on a fresh empty production database:
