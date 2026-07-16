@@ -6,7 +6,7 @@ This guide deploys Dlight POS on a Contabo Ubuntu VPS using Docker Compose, Post
 
 - VPS IP address: `169.58.30.49`
 - A domain or subdomain for the POS, for example `pos.dlightgiftshop.com`
-- DNS access for the domain
+- DNS access for the domain, or the temporary free `sslip.io` hostname below
 - Root login for first setup only
 
 Do not keep using the root password shared during setup. Change it after deployment and create a non-root administrator user.
@@ -22,6 +22,22 @@ Create this DNS record before running Caddy:
 If using another subdomain, point that subdomain to `169.58.30.49`.
 
 Free SSL will only work after DNS points correctly to the server.
+
+### No-DNS temporary hostname
+
+If the business domain is not ready, use the free automatic hostname:
+
+```text
+169-58-30-49.sslip.io
+```
+
+Set:
+
+```env
+APP_DOMAIN=169-58-30-49.sslip.io
+```
+
+This lets Caddy request a free Let's Encrypt certificate without creating DNS records. Replace it with the branded subdomain later.
 
 ## First Server Login
 
