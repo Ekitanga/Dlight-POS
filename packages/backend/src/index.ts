@@ -18,8 +18,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const frontendDistPath = path.resolve(__dirname, '..', '..', 'frontend', 'dist')
 const blockedStaticPaths = [
   /^\/\./,
-  /^\/(?:config|settings|env)(?:\.|$)/i,
-  /^\/(?:js\/)?(?:config|env|settings)\.js$/i,
+  /^\/(?:config|env)\.(?:js|json)$/i,
+  /^\/settings\.js$/i,
+  /^\/js\/(?:config|env|settings)\.js$/i,
 ]
 
 app.use(cors({
