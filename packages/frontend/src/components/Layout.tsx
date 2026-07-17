@@ -69,10 +69,15 @@ export function Layout({ children }: { children: React.ReactNode }) {
         lg:relative lg:translate-x-0 lg:w-64
       `}>
         <div className="brand-lockup flex h-16 items-center justify-between border-b px-4">
-          <div className="flex min-w-0 items-center gap-2">
+          <Link
+            to="/dashboard"
+            onClick={() => setMobileOpen(false)}
+            className="flex min-w-0 items-center gap-2 rounded-md"
+            aria-label="Go to dashboard"
+          >
             {branding?.logo_url && <img src={branding.logo_url} alt="" className="h-8 w-8 shrink-0 rounded object-contain" />}
             <h1 className="truncate text-[15px] font-semibold uppercase text-primary">{branding?.company_name || 'Dlight POS'}</h1>
-          </div>
+          </Link>
           <button 
             onClick={() => setMobileOpen(false)}
             className="lg:hidden p-1 rounded-lg hover:bg-muted"
@@ -142,10 +147,10 @@ export function Layout({ children }: { children: React.ReactNode }) {
           >
             <Menu className="h-5 w-5" />
           </button>
-          <div className="flex min-w-0 items-center gap-2">
+          <Link to="/dashboard" className="flex min-w-0 items-center gap-2 rounded-md" aria-label="Go to dashboard">
             {branding?.logo_url && <img src={branding.logo_url} alt="" className="h-7 w-7 rounded object-contain" />}
             <h2 className="truncate text-sm font-semibold uppercase text-primary">{branding?.company_name || 'Dlight POS'}</h2>
-          </div>
+          </Link>
           <ThemeToggle />
         </div>
         <div className="page-container mx-auto w-full min-w-0 max-w-[1440px] p-4 sm:p-6 lg:p-8">

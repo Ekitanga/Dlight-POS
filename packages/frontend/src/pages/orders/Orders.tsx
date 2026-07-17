@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useDeferredValue, useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Check, ChevronDown, Plus, Search, Eye, Edit, Package, X } from 'lucide-react'
+import { Check, ChevronDown, Plus, Search, Eye, Edit, Package, X, ExternalLink } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { PaginatedResponse, Pagination } from '../../components/Pagination'
@@ -150,6 +150,43 @@ function displayBusinessDate(value?: string | null, fallback?: string | null): s
   const parsedDate = dateOnly ? new Date(`${dateOnly}T00:00:00`) : new Date(rawValue)
   if (Number.isNaN(parsedDate.getTime())) return fallback ? displayBusinessDate(fallback) : '-'
   return parsedDate.toLocaleDateString()
+}
+
+const DEFAULT_SPEEDAF_TRACKING_URL = 'https://parcelsapp.com/en/tracking/'
+
+function orderTrackingUrl(order: Pick<Order, 'courier_name' | 'courier_tracking_number'>) {
+  const cleanedTrackingNumber = order.courier_tracking_number?.trim()
+  if (!cleanedTrackingNumber) return ''
+  if ((order.courier_name || '').toLowerCase().includes('speedaf')) {
+    return `${DEFAULT_SPEEDAF_TRACKING_URL}${encodeURIComponent(cleanedTrackingNumber)}`
+  }
+  return ''
+}
+
+function OrderTrackingLink({ order }: { order: Order }) {
+  const cleanedTrackingNumber = order.courier_tracking_number?.trim()
+  if (!cleanedTrackingNumber) return null
+
+  const url = orderTrackingUrl(order)
+  if (!url) {
+    return <p className="text-sm text-muted-foreground">Tracking: <span className="break-all">{cleanedTrackingNumber}</span></p>
+  }
+
+  return (
+    <p className="text-sm text-muted-foreground">
+      Tracking:{' '}
+      <a
+        href={url}
+        target="_blank"
+        rel="noreferrer"
+        className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
+        title={`Track ${cleanedTrackingNumber}`}
+      >
+        <span className="break-all">{cleanedTrackingNumber}</span>
+        <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+      </a>
+    </p>
+  )
 }
 
 interface ProductSearchSelectProps {
@@ -1227,9 +1264,7 @@ export function Orders() {
                     <p className="text-sm text-muted-foreground">
                       {selectedOrderDetail.order.rider_name || selectedOrderDetail.order.courier_name || 'Walk-in'}
                     </p>
-                    {selectedOrderDetail.order.courier_tracking_number && (
-                      <p className="text-sm text-muted-foreground">Tracking: {selectedOrderDetail.order.courier_tracking_number}</p>
-                    )}
+                    <OrderTrackingLink order={selectedOrderDetail.order} />
                   </div>
                 </div>
 

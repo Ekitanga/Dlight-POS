@@ -5,7 +5,7 @@ import axios from 'axios'
 import { useSearchParams } from 'react-router-dom'
 import {
   AlertCircle, Banknote, Bike, Boxes, Building2, CheckCircle2,
-  ChevronRight, ClipboardList, Download, FileSpreadsheet, Landmark, LockKeyhole,
+  ChevronRight, ClipboardList, Download, ExternalLink, FileSpreadsheet, Landmark, LockKeyhole,
   PackageCheck, Printer, ReceiptText, TrendingUp, Truck, Users, WalletCards
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
@@ -40,10 +40,15 @@ const departments = [
 
 const departmentReports: Record<string, Array<[string, string]>> = {
   sales: [['sales', 'Sales Analysis'], ['profit', 'Profit Summary']],
-  inventory: [['inventory', 'Inventory Analysis']],
+  inventory: [['inventory', 'Current Stock'], ['category-demand', 'Demand By Category'], ['product-demand', 'Restock Advice']],
   suppliers: [['supplier-payables', 'Supplier Payables'], ['supplier-settlements', 'Settlement History']],
   riders: [['rider-earnings', 'Rider Earnings'], ['rider-settlements', 'Settlement History']],
-  courier: [['cod-outstanding', 'Outstanding COD'], ['cod-ageing', 'COD Ageing']],
+  courier: [
+    ['speedaf-orders', 'Speedaf Orders'],
+    ['courier-cod-ledger', 'COD Ledger'],
+    ['cod-outstanding', 'Outstanding COD'],
+    ['cod-ageing', 'COD Ageing']
+  ],
   customers: [['customer-credit', 'Customer Credit']],
   finance: [['expenses', 'Approved Expenses'], ['reconciliation', 'Daily Reconciliation'], ['refunds', 'Pending Refunds']],
   audit: [['audit', 'Activity Log']]
@@ -52,22 +57,68 @@ const departmentReports: Record<string, Array<[string, string]>> = {
 const number = (value: unknown, maximumFractionDigits = 0) => formatNumber(value, maximumFractionDigits)
 const money = (value: unknown) => formatMoney(value)
 const label = (key: string) => key.replaceAll('_', ' ').replace(/\b\w/g, character => character.toUpperCase())
-const technicalKey = (key: string) => key === 'id' || key.endsWith('_id') || ['created_by', 'approved_by', 'closed_by'].includes(key)
+const reportLabelOverrides: Record<string, Record<string, string>> = {
+  inventory: {
+    sku: 'SKU',
+    product: 'Product',
+    category: 'Category',
+    available_stock: 'Stock Now',
+    reserved_stock: 'Reserved',
+    damaged_stock: 'Damaged',
+    returned_stock: 'Returned',
+    reorder_level: 'Minimum Stock',
+    stock_value: 'Stock Value'
+  },
+  'category-demand': {
+    category: 'Category',
+    units_sold: 'Sold',
+    orders: 'Orders',
+    revenue: 'Sales Value',
+    gross_profit: 'Gross Profit'
+  },
+  'product-demand': {
+    sku: 'SKU',
+    product: 'Product',
+    units_sold: 'Sold',
+    orders: 'Orders',
+    revenue: 'Sales Value',
+    gross_profit: 'Gross Profit',
+    available_stock: 'Stock Now',
+    average_daily_units: 'Avg Sold/Day',
+    suggested_stock_14_days: 'Needed For 14 Days',
+    suggested_stock_30_days: 'Needed For 30 Days',
+    reorder_gap: 'Add This Many',
+    recommendation: 'Action'
+  }
+}
+const reportLabel = (report: string, key: string) => reportLabelOverrides[report]?.[key] ?? label(key)
+const reportHelp: Record<string, string> = {
+  inventory: 'Current Stock shows what is physically available, reserved, damaged, returned, and the estimated stock value.',
+  'category-demand': 'Demand By Category shows which product categories sold most in the selected period.',
+  'product-demand': 'Restock Advice uses sales in the selected period to estimate stock needs. Needed For 14/30 Days is the stock level required to cover that many days. Add This Many is the extra quantity needed after comparing that estimate with Stock Now.'
+}
+const clientCourierReports = ['speedaf-orders', 'courier-cod-ledger']
+const technicalKey = (key: string) => key === 'id' || key === 'tracking_url' || key.endsWith('_id') || ['created_by', 'approved_by', 'closed_by'].includes(key)
 const dateKey = (key: string) => /(^date$|date$|_at$|last_purchase|last_delivery|last_transaction)/.test(key)
 const moneyKey = (key: string) => [
   'amount', 'sales', 'cost', 'profit', 'expense', 'paid', 'payable', 'earnings',
   'cash', 'mpesa', 'variance', 'balance', 'revenue', 'value', 'price', 'fee',
   'credit', 'subtotal', 'total', 'refund'
 ].some(term => key.includes(term)) && !/(method|status|date|count|number|margin)/.test(key)
-const countKey = (key: string) => /(^quantity$|quantity|orders|deliveries|units|days|level|count)/.test(key)
-const descriptiveKey = (key: string) => !countKey(key) && /(^name$|items|product$|products$|description|notes|details|reason)/.test(key)
+const countKey = (key: string) => /(^quantity$|quantity|orders|deliveries|units|days|level|count|available_stock|suggested_stock|reorder_gap)/.test(key)
+const descriptiveKey = (key: string) => !countKey(key) && /(^name$|items|product$|products$|description|notes|details|reason|recommendation|signal)/.test(key)
 const columnWidth = (key: string) => {
+  if (/recommendation|signal/.test(key)) return 180
   if (descriptiveKey(key)) return 340
+  if (/suggested_stock|average_daily_units|reorder_gap/.test(key)) return 150
+  if (/^sku$/.test(key)) return 150
   if (dateKey(key)) return 145
   if (moneyKey(key)) return 145
   if (countKey(key)) return 110
+  if (/tracking/.test(key)) return 190
+  if (/destination|address/.test(key)) return 220
   if (/supplier|customer|courier|rider/.test(key)) return 170
-  if (/status|method|reference|tracking/.test(key)) return 145
+  if (/status|method|reference/.test(key)) return 145
   return 135
 }
 const formatDate = (value: unknown) => {
@@ -159,6 +210,14 @@ export function Reports() {
     queryFn: async () => {
       if (report === 'audit') return (await axios.get(`/api/audit?page=1&page_size=100&${params}`)).data.data
       if (report === 'refunds') return (await axios.get('/api/orders/refunds/pending')).data
+      if (report === 'speedaf-orders') {
+        const response = await axios.get(`/api/couriers/speedaf/orders?page=1&page_size=500&${params}`)
+        return response.data.data
+      }
+      if (report === 'courier-cod-ledger') {
+        const response = await axios.get(`/api/couriers/cod/ledger?page=1&page_size=500&${params}`)
+        return response.data.data
+      }
       return (await axios.get(`/api/reports/${report}?${params}`)).data
     },
     enabled: department !== 'overview' && report !== 'reconciliation'
@@ -220,7 +279,7 @@ export function Reports() {
   }
   const exportExcel = () => {
     const businessRows = rawRows.map(row => Object.fromEntries(Object.entries(row).filter(([key]) => !technicalKey(key))))
-    const table = `<table><thead><tr>${headers.map(header => `<th>${label(header)}</th>`).join('')}</tr></thead><tbody>${businessRows.map(row => `<tr>${headers.map(header => `<td>${formatCell(header, row[header])}</td>`).join('')}</tr>`).join('')}</tbody></table>`
+    const table = `<table><thead><tr>${headers.map(header => `<th>${reportLabel(report, header)}</th>`).join('')}</tr></thead><tbody>${businessRows.map(row => `<tr>${headers.map(header => `<td>${formatCell(header, row[header])}</td>`).join('')}</tr>`).join('')}</tbody></table>`
     const url = URL.createObjectURL(new Blob([table], { type: 'application/vnd.ms-excel' }))
     const anchor = document.createElement('a')
     anchor.href = url
@@ -295,7 +354,7 @@ export function Reports() {
       <div className="flex flex-wrap items-center gap-2">
         {(departmentReports[department] || []).map(([key, title]) => <button key={key} type="button" onClick={() => { setReport(key); setPage(1) }} className={`rounded-lg px-3 py-2 text-sm ${report === key ? 'bg-foreground text-background' : 'border'}`}>{title}</button>)}
         <div className="ml-auto flex flex-wrap gap-2">
-          {!['audit', 'profit', 'reconciliation', 'refunds'].includes(report) && hasPermission('reports.export') && <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><Download className="h-4 w-4" />CSV</button>}
+          {!['audit', 'profit', 'reconciliation', 'refunds'].includes(report) && !clientCourierReports.includes(report) && hasPermission('reports.export') && <button onClick={exportCsv} className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><Download className="h-4 w-4" />CSV</button>}
           {rawRows.length > 0 && <button onClick={exportExcel} className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><FileSpreadsheet className="h-4 w-4" />Excel</button>}
           <button onClick={() => window.print()} className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><Printer className="h-4 w-4" />Print / PDF</button>
         </div>
@@ -309,14 +368,18 @@ export function Reports() {
         {message && <p className="text-sm sm:col-span-3">{message}</p>}
       </section>}
 
+      {reportHelp[report] && <p className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-sm leading-6 text-muted-foreground">{reportHelp[report]}</p>}
+
       <div className="overflow-x-auto rounded-lg border">
         {detailLoading ? <div className="p-10 text-center text-muted-foreground">Loading analysis...</div> :
           rawRows.length === 0 ? <div className="p-10 text-center text-muted-foreground">No records for this selection</div> :
           <table className="table-fixed text-sm" style={{ width: `${Math.max(tableWidth, 900)}px`, minWidth: '100%' }}>
             <colgroup>{headers.map(header => <col key={header} style={{ width: `${columnWidth(header)}px` }} />)}{['reconciliation', 'refunds'].includes(report) && <col style={{ width: '130px' }} />}</colgroup>
-            <thead className="bg-muted"><tr>{headers.map(header => <th key={header} className="whitespace-normal px-3 py-3 text-left leading-5">{label(header)}</th>)}{['reconciliation', 'refunds'].includes(report) && <th className="px-3 py-3">Action</th>}</tr></thead>
+            <thead className="bg-muted"><tr>{headers.map(header => <th key={header} className="whitespace-normal px-3 py-3 text-left leading-5">{reportLabel(report, header)}</th>)}{['reconciliation', 'refunds'].includes(report) && <th className="px-3 py-3">Action</th>}</tr></thead>
             <tbody>{visibleRows.map((row, index) => <tr key={String(row.id || index)} className="border-t align-top hover:bg-muted/40">{headers.map(header => {
               const value = formatCell(header, row[header])
+              const trackingUrl = typeof row.tracking_url === 'string' ? row.tracking_url : ''
+              const isTrackingCell = header.includes('tracking') && trackingUrl && String(row[header] ?? '').trim()
               return <td key={header} className="overflow-hidden px-3 py-3">
                 <div
                   title={descriptiveKey(header) ? String(row[header] ?? '') : undefined}
@@ -328,7 +391,12 @@ export function Reports() {
                     WebkitBoxOrient: 'vertical',
                     WebkitLineClamp: 3
                   } : undefined}
-                >{value}</div>
+                >{isTrackingCell ? (
+                  <a href={trackingUrl} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1 text-primary hover:underline">
+                    <span className="truncate">{value}</span>
+                    <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                  </a>
+                ) : value}</div>
               </td>
             })}
               {report === 'reconciliation' && <td className="px-3 py-2">{row.status === 'pending' && hasPermission('reports.reconcile') ? <button onClick={() => close.mutate(String(row.id))} className="inline-flex items-center gap-1 rounded-lg border px-2 py-1"><LockKeyhole className="h-4 w-4" />Close</button> : String(row.status)}</td>}

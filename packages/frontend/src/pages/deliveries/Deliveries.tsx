@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote } from 'lucide-react'
+import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote, ExternalLink } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { formatMoney } from '../../lib/format'
@@ -16,15 +16,24 @@ interface Delivery {
   customer_name?: string
   rider_id?: string
   rider_name?: string
+  courier_id?: string
+  courier_name?: string
+  courier_tracking_number?: string
+  tracking_url?: string
+  delivery_destination?: string
   delivery_status: string
   delivery_fee: number
   earned_amount: number
+  delivery_income?: number
+  delivery_cost?: number
+  courier_customer_fee?: number
+  courier_actual_fee?: number
   delivered_at?: string
   notes: string
   created_at: string
-  courier_name?: string
   order_status?: string
   courier_payment_type?: string
+  delivery_fee_payment_method?: string
   payment_status?: string
   cod_status?: string
   cod_amount?: number
@@ -36,6 +45,28 @@ interface StatusFormData {
   delivery_status: string
   earned_amount: number
   notes: string
+}
+
+function TrackingLink({ trackingNumber, trackingUrl }: { trackingNumber?: string; trackingUrl?: string }) {
+  const cleanedTrackingNumber = trackingNumber?.trim()
+  if (!cleanedTrackingNumber) return null
+
+  if (!trackingUrl) {
+    return <span className="break-all text-muted-foreground">{cleanedTrackingNumber}</span>
+  }
+
+  return (
+    <a
+      href={trackingUrl}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex max-w-full items-center gap-1 text-primary hover:underline"
+      title={`Track ${cleanedTrackingNumber}`}
+    >
+      <span className="truncate">{cleanedTrackingNumber}</span>
+      <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+    </a>
+  )
 }
 
 export function Deliveries() {
@@ -162,6 +193,44 @@ export function Deliveries() {
     return delivery.delivery_status.replace('_', ' ')
   }
 
+  const deliveryHandler = (delivery: Delivery) => {
+    if (delivery.rider_name) return delivery.rider_name
+    if (delivery.courier_name) return delivery.courier_name
+    return '-'
+  }
+
+  const deliveryDestination = (delivery: Delivery) => {
+    return delivery.delivery_destination || delivery.courier_tracking_number || delivery.customer_name || '-'
+  }
+
+  const customerDeliveryFee = (delivery: Delivery) => {
+    if (delivery.courier_name) {
+      return Number(delivery.courier_customer_fee ?? delivery.delivery_fee ?? 0)
+    }
+    return Number(delivery.delivery_fee ?? delivery.delivery_income ?? 0)
+  }
+
+  const actualDeliveryCost = (delivery: Delivery) => {
+    if (delivery.courier_name) {
+      return Number(delivery.courier_actual_fee ?? delivery.earned_amount ?? delivery.delivery_cost ?? 0)
+    }
+    return Number(delivery.earned_amount ?? delivery.delivery_cost ?? 0)
+  }
+
+  const isCourierPassThroughFee = (delivery: Delivery) => {
+    return Boolean(
+      (delivery.courier_id || delivery.courier_name) &&
+      ['paid_to_courier', 'pay_on_delivery'].includes(delivery.delivery_fee_payment_method || '')
+    )
+  }
+
+  const deliveryMargin = (delivery: Delivery) => {
+    if (isCourierPassThroughFee(delivery)) return 0
+    const income = Number(delivery.delivery_income ?? customerDeliveryFee(delivery) ?? 0)
+    const cost = Number(delivery.delivery_cost ?? actualDeliveryCost(delivery) ?? 0)
+    return income - cost
+  }
+
   const nextOrderStatus = (delivery: Delivery) => {
     const status = ['confirmed', 'packed'].includes(delivery.order_status || '') ? 'pending'
       : delivery.order_status === 'dispatched' ? 'in_transit'
@@ -210,8 +279,8 @@ export function Deliveries() {
               </div>}
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Delivery Cost</label>
-              <div className="rounded-lg border bg-muted px-3 py-2">{formatMoney(selectedDelivery.earned_amount)}</div>
+              <label className="block text-sm font-medium mb-1">Provider Charge</label>
+              <div className="rounded-lg border bg-muted px-3 py-2">{formatMoney(actualDeliveryCost(selectedDelivery))}</div>
             </div>
             <div className="md:col-span-2">
               <label className="block text-sm font-medium mb-1">Notes</label>
@@ -325,6 +394,9 @@ export function Deliveries() {
         </div>
       </div>
       {codOnly && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm"><strong>Outstanding COD filter active.</strong> Showing courier deliveries awaiting remittance.</div>}
+      <div className="rounded-lg border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+        Delivery fee shows what the client was charged. Provider charge shows the rider or courier cost. Business margin is only the amount Dlight gains or loses from delivery handling.
+      </div>
 
       {isLoading ? (
         <div className="space-y-2">
@@ -347,10 +419,12 @@ export function Deliveries() {
               <tr>
                 <th className="text-left px-4 py-3 font-medium">Order #</th>
                 <th className="text-left px-4 py-3 font-medium">Customer</th>
-                <th className="text-left px-4 py-3 font-medium">Rider</th>
+                <th className="text-left px-4 py-3 font-medium">Handled By</th>
+                <th className="text-left px-4 py-3 font-medium">Destination</th>
                 <th className="text-left px-4 py-3 font-medium">Status</th>
-                <th className="text-left px-4 py-3 font-medium">Fee</th>
-                <th className="text-left px-4 py-3 font-medium">Earned</th>
+                <th className="text-left px-4 py-3 font-medium">Customer Fee</th>
+                <th className="text-left px-4 py-3 font-medium">Provider Charge</th>
+                <th className="text-left px-4 py-3 font-medium">Business Margin</th>
                 <th className="text-right px-4 py-3 font-medium">Actions</th>
               </tr>
             </thead>
@@ -361,15 +435,28 @@ export function Deliveries() {
                   <tr key={delivery.id} className="border-t hover:bg-muted/50 transition-colors">
                     <td className="px-4 py-3 font-medium">{delivery.order_number || '-'}</td>
                     <td className="px-4 py-3 text-sm">{delivery.customer_name || '-'}</td>
-                    <td className="px-4 py-3 text-sm">{delivery.rider_name || '-'}</td>
+                    <td className="px-4 py-3 text-sm">{deliveryHandler(delivery)}</td>
+                    <td className="max-w-64 px-4 py-3 text-sm">
+                      <span className="block truncate" title={deliveryDestination(delivery)}>
+                        {deliveryDestination(delivery)}
+                      </span>
+                      {delivery.courier_tracking_number && (
+                        <span className="mt-1 block max-w-full text-xs">
+                          <TrackingLink trackingNumber={delivery.courier_tracking_number} trackingUrl={delivery.tracking_url} />
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3">
                       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium capitalize ${statusColors[delivery.delivery_status] || 'bg-muted text-muted-foreground'}`}>
                         <StatusIcon className="h-3 w-3" />
                         {deliveryStatusLabel(delivery)}
                       </span>
                     </td>
-                    <td className="px-4 py-3">{formatMoney(delivery.delivery_fee)}</td>
-                    <td className="px-4 py-3">{formatMoney(delivery.earned_amount)}</td>
+                    <td className="px-4 py-3">{formatMoney(customerDeliveryFee(delivery))}</td>
+                    <td className="px-4 py-3">{formatMoney(actualDeliveryCost(delivery))}</td>
+                    <td className={`px-4 py-3 font-medium ${deliveryMargin(delivery) < 0 ? 'text-destructive' : deliveryMargin(delivery) > 0 ? 'text-emerald-600' : ''}`}>
+                      {formatMoney(deliveryMargin(delivery))}
+                    </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
                         {hasPermission('deliveries.manage') && <button

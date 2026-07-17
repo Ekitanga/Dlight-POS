@@ -74,11 +74,21 @@ const isSpeedafPassThroughFee = (receipt: Receipt) =>
 const speedafCustomerFee = (receipt: Receipt) =>
   isSpeedafPassThroughFee(receipt) ? Number(receipt.courier_customer_fee || 0) : 0
 
-const mpesaSummaryParts = (receipt: Receipt) => [
-  receipt.mpesa_paybill ? `M-PESA Paybill: ${receipt.mpesa_paybill}` : '',
-  receipt.mpesa_account_number ? `Account: ${receipt.mpesa_account_number}` : '',
-  receipt.mpesa_till ? `Till: ${receipt.mpesa_till}` : ''
-].filter(Boolean)
+const mpesaInstructionRows = (receipt: Receipt) => [
+  receipt.mpesa_paybill ? { label: 'Paybill', value: receipt.mpesa_paybill } : null,
+  receipt.mpesa_account_number ? { label: 'Account', value: receipt.mpesa_account_number } : null,
+  receipt.mpesa_till ? { label: 'Till', value: receipt.mpesa_till } : null
+].filter((row): row is { label: string; value: string } => Boolean(row))
+
+const absoluteAssetUrl = (value?: string) => {
+  if (!value || value.includes('${')) return ''
+  if (/^(https?:|data:)/i.test(value)) return value
+  try {
+    return new URL(value, window.location.origin).href
+  } catch {
+    return ''
+  }
+}
 
 function ReceiptPaper({ receipt, variant }: { receipt: Receipt; variant: DocumentVariant }) {
   const balance = Math.max(0, Number(receipt.total_amount) - Number(receipt.paid_amount))
@@ -88,12 +98,12 @@ function ReceiptPaper({ receipt, variant }: { receipt: Receipt; variant: Documen
     ? Number(receipt.total_amount) + (receipt.delivery_fee_payment_method === 'pay_on_delivery' ? passThroughSpeedafFee : 0)
     : balance
   const documentTitle = isDeliveryReceipt ? 'Delivery Receipt' : receipt.receipt_header || 'Sales Receipt'
-  const hasMpesaInstructions = Boolean(receipt.mpesa_paybill || receipt.mpesa_account_number || receipt.mpesa_till)
-  const mpesaFooter = mpesaSummaryParts(receipt).join(' | ')
+  const logoUrl = absoluteAssetUrl(receipt.logo_url)
+  const mpesaRows = mpesaInstructionRows(receipt)
   return (
     <div className="mx-auto w-full max-w-[380px] bg-white p-6 text-[13px] leading-5 text-zinc-900 shadow-sm print:shadow-none">
       <header className="border-b border-dashed border-zinc-400 pb-4 text-center">
-        {receipt.logo_url && <img src={receipt.logo_url} alt="" className="mx-auto mb-2 max-h-16 max-w-36 object-contain" />}
+        {logoUrl && <img src={logoUrl} alt="" className="mx-auto mb-2 max-h-16 max-w-36 object-contain" />}
         <h3 className="text-lg font-bold">{receipt.company_name || 'Dlight Giftshop'}</h3>
         {receipt.company_address && <p>{receipt.company_address}</p>}
         {(receipt.company_phone || receipt.company_email) && <p>{[receipt.company_phone, receipt.company_email].filter(Boolean).join(' | ')}</p>}
@@ -115,7 +125,10 @@ function ReceiptPaper({ receipt, variant }: { receipt: Receipt; variant: Documen
       <section className="border-y border-dashed border-zinc-400 py-3">
         {(receipt.items || []).map((item, index) => (
           <div key={`${item.product_name}-${index}`} className="mb-2 last:mb-0">
-            <div className="flex justify-between gap-4 font-medium"><span>{item.product_name}</span><span>{money(receipt, item.total_price)}</span></div>
+            <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 font-medium">
+              <span className="break-words">{item.product_name}</span>
+              <span className="whitespace-nowrap text-right">{money(receipt, item.total_price)}</span>
+            </div>
             <div className="text-zinc-600">{item.quantity} x {money(receipt, item.unit_price)}</div>
           </div>
         ))}
@@ -142,12 +155,15 @@ function ReceiptPaper({ receipt, variant }: { receipt: Receipt; variant: Documen
                 Shop amount {money(receipt, receipt.total_amount)} + Speedaf fee {money(receipt, passThroughSpeedafFee)}
               </p>
             )}
-            {hasMpesaInstructions && (
+            {mpesaRows.length > 0 && (
               <div className="mt-3 border-t border-zinc-300 pt-3 text-left text-xs">
                 <div className="mb-1 font-bold uppercase">Pay via M-PESA</div>
-                {receipt.mpesa_paybill && <div className="flex justify-between gap-3"><span>Paybill</span><strong>{receipt.mpesa_paybill}</strong></div>}
-                {receipt.mpesa_paybill && receipt.mpesa_account_number && <div className="flex justify-between gap-3"><span>Account</span><strong>{receipt.mpesa_account_number}</strong></div>}
-                {receipt.mpesa_till && <div className="flex justify-between gap-3"><span>Till</span><strong>{receipt.mpesa_till}</strong></div>}
+                {mpesaRows.map(row => (
+                  <div key={row.label} className="flex justify-between gap-3">
+                    <span>{row.label}</span>
+                    <strong>{row.value}</strong>
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -169,7 +185,17 @@ function ReceiptPaper({ receipt, variant }: { receipt: Receipt; variant: Documen
 
       <footer className="border-t border-dashed border-zinc-400 pt-4 text-center">
         <p>{receipt.receipt_footer || 'Thank you for shopping with us.'}</p>
-        {!isDeliveryReceipt && mpesaFooter && <p className="mt-1 text-zinc-600">{mpesaFooter}</p>}
+        {!isDeliveryReceipt && mpesaRows.length > 0 && (
+          <div className="mt-3 border-t border-zinc-200 pt-3 text-left text-xs">
+            <div className="mb-1 text-center font-bold uppercase">M-PESA details</div>
+            {mpesaRows.map(row => (
+              <div key={row.label} className="flex justify-between gap-3">
+                <span>{row.label}</span>
+                <strong>{row.value}</strong>
+              </div>
+            ))}
+          </div>
+        )}
       </footer>
     </div>
   )
@@ -205,35 +231,62 @@ export function Receipts() {
       ? Number(receipt.total_amount) + (receipt.delivery_fee_payment_method === 'pay_on_delivery' ? passThroughSpeedafFee : 0)
       : balance
     const documentTitle = isDeliveryReceipt ? 'DELIVERY RECEIPT' : receipt.receipt_header || 'SALES RECEIPT'
-    const mpesaFooter = mpesaSummaryParts(receipt).map(escapeHtml).join(' | ')
-    const mpesaInstructions = [
-      receipt.mpesa_paybill ? `<div class="line"><span>Paybill</span><strong>${escapeHtml(receipt.mpesa_paybill)}</strong></div>` : '',
-      receipt.mpesa_paybill && receipt.mpesa_account_number ? `<div class="line"><span>Account</span><strong>${escapeHtml(receipt.mpesa_account_number)}</strong></div>` : '',
-      receipt.mpesa_till ? `<div class="line"><span>Till</span><strong>${escapeHtml(receipt.mpesa_till)}</strong></div>` : ''
-    ].join('')
+    const logoUrl = absoluteAssetUrl(receipt.logo_url)
+    const mpesaInstructions = mpesaInstructionRows(receipt)
+      .map(row => `<div class="line"><span>${escapeHtml(row.label)}</span><strong>${escapeHtml(row.value)}</strong></div>`)
+      .join('')
     const rows = (receipt.items || []).map(item => `
-      <div class="item"><div><strong>${escapeHtml(item.product_name)}</strong><strong>${escapeHtml(money(receipt, item.total_price))}</strong></div>
-      <small>${item.quantity} x ${escapeHtml(money(receipt, item.unit_price))}</small></div>`).join('')
+      <div class="item">
+        <div class="item-main">
+          <strong class="item-name">${escapeHtml(item.product_name)}</strong>
+          <strong class="item-total">${escapeHtml(money(receipt, item.total_price))}</strong>
+        </div>
+        <small>${item.quantity} x ${escapeHtml(money(receipt, item.unit_price))}</small>
+      </div>`).join('')
+    const paperWidth = receipt.receipt_paper_width || '80mm'
     return `<!doctype html><html><head><meta charset="utf-8"><title>Receipt - ${escapeHtml(receipt.order_number)}</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1">
       <style>
-        @page{size:${receipt.receipt_paper_width || '80mm'} auto;margin:4mm}
-        *{box-sizing:border-box}body{font:12px/1.45 Arial,sans-serif;color:#111;margin:0}
-        main{width:${receipt.receipt_paper_width || '80mm'};max-width:100%;margin:auto;padding:8px}
-        header,footer{text-align:center}.logo{max-width:120px;max-height:60px;object-fit:contain}
-        h1{font-size:18px;margin:4px 0}.muted{color:#555}.rule{border-top:1px dashed #777;margin:12px 0}
-        .line,.item>div{display:flex;justify-content:space-between;gap:12px}.item{margin:8px 0}
-        .total{font-size:15px;font-weight:700;border-top:1px solid #bbb;padding-top:6px;margin-top:6px}
-        p{margin:2px 0}@media print{button{display:none}}
+        :root{--paper:${escapeHtml(paperWidth)}}
+        @page{size:var(--paper) auto;margin:4mm}
+        *{box-sizing:border-box}
+        html,body{margin:0;min-height:100%;background:#f4f4f5}
+        body{color:#111827;font:13px/1.45 Arial,Helvetica,sans-serif;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        main{width:min(100%,var(--paper));max-width:420px;margin:0 auto;background:#fff;padding:16px 14px;box-shadow:0 10px 28px rgba(0,0,0,.08)}
+        header,footer{text-align:center}
+        .logo{display:block;max-width:88px;max-height:64px;object-fit:contain;margin:0 auto 8px}
+        h1{font-size:17px;line-height:1.2;margin:4px 0;text-transform:uppercase}
+        p{margin:2px 0}
+        .muted{color:#52525b}
+        .rule{border-top:1px dashed #9ca3af;margin:12px 0}
+        .notice{border:1px solid #111827;padding:7px;text-align:center;font-weight:700;text-transform:uppercase}
+        .soft-notice{border:1px solid #a1a1aa;background:#fafafa;padding:7px;text-align:center;font-weight:700;text-transform:uppercase}
+        .line{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start;margin:3px 0}
+        .line span:last-child,.line strong:last-child{text-align:right}
+        .item{margin:9px 0;break-inside:avoid}
+        .item-main{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:start}
+        .item-name{font-weight:700;word-break:break-word;overflow-wrap:anywhere}
+        .item-total{white-space:nowrap;text-align:right}
+        small{display:block;color:#52525b;margin-top:2px}
+        .total{font-size:15px;font-weight:700;border-top:1px solid #d4d4d8;padding-top:7px;margin-top:7px}
+        .amount-box{border:2px solid #111827;padding:10px;margin-top:10px;text-align:center}
+        .amount-box .amount{font-size:18px;font-weight:800}
+        .pay-box{border-top:1px solid #d4d4d8;margin-top:9px;padding-top:8px;text-align:left}
+        @media screen and (max-width:480px){
+          body{background:#fff;font-size:14px}
+          main{width:100%;max-width:none;min-height:100vh;padding:22px 20px;box-shadow:none}
+        }
+        @media print{body{background:#fff;font-size:12px}main{width:var(--paper);max-width:var(--paper);box-shadow:none;padding:0}.no-print{display:none}}
       </style></head><body><main>
-      <header>${receipt.logo_url ? `<img class="logo" src="${receipt.logo_url}" alt="">` : ''}
+      <header>${logoUrl ? `<img class="logo" src="${escapeHtml(logoUrl)}" alt="">` : ''}
         <h1>${escapeHtml(receipt.company_name || 'Dlight Giftshop')}</h1>
         ${receipt.company_address ? `<p>${escapeHtml(receipt.company_address)}</p>` : ''}
         <p>${escapeHtml([receipt.company_phone, receipt.company_email].filter(Boolean).join(' | '))}</p>
         ${receipt.kra_pin ? `<p>KRA PIN: ${escapeHtml(receipt.kra_pin)}</p>` : ''}
       </header><div class="rule"></div>
-      ${['cancelled', 'returned'].includes(receipt.order_status) ? `<p style="border:2px solid #111;padding:8px;text-align:center;font-weight:bold">${escapeHtml(receipt.order_status.toUpperCase())} - NOT A VALID SALE</p>` : ''}
+      ${['cancelled', 'returned'].includes(receipt.order_status) ? `<p class="notice">${escapeHtml(receipt.order_status.toUpperCase())} - NOT A VALID SALE</p>` : ''}
       <p style="text-align:center;font-weight:bold">${escapeHtml(documentTitle)}</p>
-      ${isDeliveryReceipt ? '<p style="border:1px solid #999;background:#fafafa;padding:7px;text-align:center;font-weight:bold">FOR DELIVERY</p>' : '<p style="border:1px solid #111;padding:7px;text-align:center;font-weight:bold">PAID</p>'}
+      ${isDeliveryReceipt ? '<p class="soft-notice">FOR DELIVERY</p>' : '<p class="notice">PAID</p>'}
       <div class="line"><span>${isDeliveryReceipt ? 'Order' : 'Receipt'}</span><strong>${escapeHtml(receipt.order_number)}</strong></div>
       <div class="line"><span>Date</span><span>${escapeHtml(new Date(receipt.created_at).toLocaleString())}</span></div>
       <p><strong>${escapeHtml(receipt.customer_name || 'Walk-in customer')}</strong></p>
@@ -246,18 +299,18 @@ export function Receipts() {
       ${Number(receipt.discount) > 0 ? `<div class="line"><span>Discount</span><span>-${escapeHtml(money(receipt, receipt.discount))}</span></div>` : ''}
       ${Number(receipt.tax) > 0 ? `<div class="line"><span>Tax</span><span>${escapeHtml(money(receipt, receipt.tax))}</span></div>` : ''}
       <div class="line total"><span>Total</span><span>${escapeHtml(money(receipt, receipt.total_amount))}</span></div>
-      ${isDeliveryReceipt ? `<div style="border:2px solid #111;padding:10px;margin-top:10px;text-align:center">
+      ${isDeliveryReceipt ? `<div class="amount-box">
         <strong style="font-size:11px">AMOUNT TO PAY</strong>
-        <div style="font-size:18px;font-weight:bold">${escapeHtml(money(receipt, amountToPay))}</div>
+        <div class="amount">${escapeHtml(money(receipt, amountToPay))}</div>
         ${passThroughSpeedafFee > 0 ? `<p class="muted">Shop amount ${escapeHtml(money(receipt, receipt.total_amount))} + Speedaf fee ${escapeHtml(money(receipt, passThroughSpeedafFee))}</p>` : ''}
-        ${mpesaInstructions ? `<div class="rule"></div><div style="text-align:left"><strong>PAY VIA M-PESA</strong>${mpesaInstructions}</div>` : ''}
+        ${mpesaInstructions ? `<div class="pay-box"><strong>PAY VIA M-PESA</strong>${mpesaInstructions}</div>` : ''}
       </div>` : receipt.receipt_show_payment_details !== false ? `<div class="line"><span>Paid</span><span>${escapeHtml(money(receipt, receipt.paid_amount))}</span></div>
         ${balance > 0 ? `<div class="line"><strong>Balance due</strong><strong>${escapeHtml(money(receipt, balance))}</strong></div>` : ''}
-        <div class="line"><span>Payment</span><span>${escapeHtml((receipt.payment_method || 'credit').replaceAll('_', ' '))}</span></div>` : ''}
+        <div class="line"><span>Payment</span><span>${escapeHtml((receipt.payment_method || 'credit').replaceAll('_', ' '))}</span></div>
+        ${mpesaInstructions ? `<div class="pay-box"><strong>M-PESA DETAILS</strong>${mpesaInstructions}</div>` : ''}` : ''}
       ${receipt.receipt_show_delivery_details !== false && receipt.delivery_type === 'courier' ? `<div class="rule"></div><div class="line"><span>Courier</span><span>${escapeHtml(receipt.courier_name || 'Courier')}</span></div>
         ${receipt.courier_tracking_number ? `<div class="line"><span>Tracking</span><strong>${escapeHtml(receipt.courier_tracking_number)}</strong></div>` : ''}` : ''}
-      <div class="rule"></div><footer><p>${escapeHtml(receipt.receipt_footer || 'Thank you for shopping with us.')}</p>
-      ${!isDeliveryReceipt && mpesaFooter ? `<p class="muted">${mpesaFooter}</p>` : ''}</footer>
+      <div class="rule"></div><footer><p>${escapeHtml(receipt.receipt_footer || 'Thank you for shopping with us.')}</p></footer>
       </main></body></html>`
   }
 
@@ -322,7 +375,10 @@ export function Receipts() {
           <div className="max-h-[92vh] w-full max-w-lg overflow-y-auto rounded-lg bg-muted shadow-xl">
             <div className="sticky top-0 z-10 flex items-center justify-between border-b bg-background px-4 py-3"><div><h2 className="font-semibold">{previewDocument.variant === 'delivery' ? 'Delivery Receipt Preview' : 'Sales Receipt Preview'}</h2><p className="text-xs text-muted-foreground">{previewDocument.receipt.order_number}</p></div><button onClick={() => setPreviewDocument(null)} className="rounded p-2 text-muted-foreground hover:bg-muted" title="Close"><X className="h-4 w-4" /></button></div>
             <div className="p-4"><ReceiptPaper receipt={previewDocument.receipt} variant={previewDocument.variant} /></div>
-            <div className="sticky bottom-0 flex justify-end gap-2 border-t bg-background p-4"><button onClick={() => downloadReceipt(previewDocument.receipt, previewDocument.variant)} className="inline-flex items-center gap-2 rounded-lg border px-4 py-2"><Download className="h-4 w-4" />Download</button><button onClick={() => printReceipt(previewDocument.receipt, previewDocument.variant)} className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground"><Printer className="h-4 w-4" />Print</button></div>
+            <div className="sticky bottom-0 flex flex-wrap justify-end gap-2 border-t bg-background p-4">
+              <button onClick={() => downloadReceipt(previewDocument.receipt, previewDocument.variant)} className="inline-flex items-center gap-2 rounded-lg border px-4 py-2"><Download className="h-4 w-4" />Download HTML</button>
+              <button onClick={() => printReceipt(previewDocument.receipt, previewDocument.variant)} className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground"><Printer className="h-4 w-4" />Print / Save PDF</button>
+            </div>
           </div>
         </div>
       )}

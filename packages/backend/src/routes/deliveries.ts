@@ -4,6 +4,28 @@ import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 import { logAudit } from '../utils/audit.js'
 
 const router = Router()
+const DEFAULT_TRACKING_URL_TEMPLATE = 'https://parcelsapp.com/en/tracking/{tracking_number}'
+
+function trackingUrl(template: string | null | undefined, trackingNumber: string | null | undefined) {
+  const cleanedTrackingNumber = String(trackingNumber || '').trim()
+  if (!cleanedTrackingNumber) return null
+
+  const safeTrackingNumber = encodeURIComponent(cleanedTrackingNumber)
+  const urlTemplate = String(template || DEFAULT_TRACKING_URL_TEMPLATE).trim() || DEFAULT_TRACKING_URL_TEMPLATE
+
+  if (urlTemplate.includes('{tracking_number}')) {
+    return urlTemplate.replace(/\{tracking_number\}/g, safeTrackingNumber)
+  }
+
+  return `${urlTemplate.replace(/\/$/, '')}/${safeTrackingNumber}`
+}
+
+function withTrackingUrl<T extends { courier_tracking_number?: string | null }>(row: T) {
+  return {
+    ...row,
+    tracking_url: trackingUrl(null, row.courier_tracking_number)
+  }
+}
 
 router.get('/', async (req, res) => {
   try {
@@ -11,7 +33,15 @@ router.get('/', async (req, res) => {
     const params: any[] = []
     const conditions: string[] = []
     if (search) {
-      conditions.push(`(o.order_number ILIKE $${params.length + 1} OR c.name ILIKE $${params.length + 1})`)
+      conditions.push(`(
+        o.order_number ILIKE $${params.length + 1}
+        OR c.name ILIKE $${params.length + 1}
+        OR COALESCE(o.delivery_address, '') ILIKE $${params.length + 1}
+        OR COALESCE(c.address, '') ILIKE $${params.length + 1}
+        OR COALESCE(d.courier_tracking_number, '') ILIKE $${params.length + 1}
+        OR COALESCE(r.name, '') ILIKE $${params.length + 1}
+        OR COALESCE(cr.name, '') ILIKE $${params.length + 1}
+      )`)
       params.push(`%${search}%`)
     }
     if (date_from) {
@@ -30,8 +60,10 @@ router.get('/', async (req, res) => {
       conditions.push("o.courier_payment_type='cod' AND COALESCE(cc.cod_amount-cc.remitted_amount,0)>0")
     }
     let sql = `SELECT d.*, o.order_number, o.status AS order_status, o.payment_status,
-        o.courier_payment_type, c.name AS customer_name, r.name AS rider_name,
-        cr.name AS courier_name, cc.status AS cod_status, cc.cod_amount,
+      o.courier_payment_type, o.delivery_fee_payment_method,
+        COALESCE(NULLIF(o.delivery_address, ''), c.address, '') AS delivery_destination,
+        c.name AS customer_name, r.name AS rider_name,
+           cr.name AS courier_name, cc.status AS cod_status, cc.cod_amount,
         cc.remitted_amount, (cc.cod_amount - cc.remitted_amount) AS cod_outstanding
        FROM deliveries d
        JOIN orders o ON d.order_id = o.id
@@ -51,7 +83,8 @@ router.get('/', async (req, res) => {
       sql += ' ORDER BY d.created_at DESC LIMIT 200'
     }
     const result = await query(sql, params)
-    res.json(pagination ? paginatedResponse(result.rows, total, pagination) : result.rows)
+    const rows = result.rows.map(withTrackingUrl)
+    res.json(pagination ? paginatedResponse(rows, total, pagination) : rows)
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }
@@ -244,7 +277,7 @@ router.put('/cod/:codId/status', async (req, res) => {
 router.get('/orders/:orderId/delivery', async (req, res) => {
   try {
     const result = await query('SELECT * FROM deliveries WHERE order_id = $1', [req.params.orderId])
-    res.json(result.rows[0] || null)
+    res.json(result.rows[0] ? withTrackingUrl(result.rows[0]) : null)
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }

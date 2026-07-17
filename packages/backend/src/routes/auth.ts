@@ -90,7 +90,7 @@ router.get('/me', authMiddleware, async (req, res) => {
   }
 })
 
-router.get('/branding', authMiddleware, async (_req, res) => {
+router.get('/branding', async (_req, res) => {
   try {
     const result = await query(
       `SELECT company_name, logo_url, appearance_mode, brand_preset, primary_color,

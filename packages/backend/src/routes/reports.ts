@@ -266,6 +266,156 @@ router.get('/inventory', async (req, res) => {
   }
 })
 
+router.get('/category-demand', async (req, res) => {
+  try {
+    const today = nairobiBusinessDate()
+    const dateFrom = String(req.query.date_from || today)
+    const dateTo = String(req.query.date_to || today)
+    const result = await query(`
+      WITH product_sales AS (
+        SELECT
+          COALESCE(c.name, 'Uncategorized') AS category,
+          p.name AS product,
+          SUM(oi.quantity)::int AS units_sold,
+          COUNT(DISTINCT o.id)::int AS orders,
+          COALESCE(SUM(oi.total_price),0) AS revenue,
+          COALESCE(SUM(oi.total_price - oi.unit_cost*oi.internal_quantity
+            - oi.supplier_cost*oi.supplier_quantity),0) AS gross_profit
+        FROM order_items oi
+        JOIN orders o ON o.id=oi.order_id
+        JOIN products p ON p.id=oi.product_id
+        LEFT JOIN categories c ON c.id=p.category_id
+        WHERE o.status IN ('delivered','collected_paid')
+          AND COALESCE(o.sale_date, o.created_at::date) BETWEEN $1 AND $2
+          AND p.deleted_at IS NULL
+        GROUP BY COALESCE(c.name, 'Uncategorized'), p.id
+      ), ranked AS (
+        SELECT *,
+          ROW_NUMBER() OVER (PARTITION BY category ORDER BY units_sold DESC, revenue DESC, product) AS product_rank
+        FROM product_sales
+      ), category_rollup AS (
+        SELECT
+          category,
+          COUNT(*)::int AS products_sold,
+          SUM(units_sold)::int AS units_sold,
+          SUM(orders)::int AS orders,
+          SUM(revenue) AS revenue,
+          SUM(gross_profit) AS gross_profit
+        FROM product_sales
+        GROUP BY category
+      ), top_products AS (
+        SELECT
+          category,
+          STRING_AGG(
+            (CASE WHEN LENGTH(product) > 72 THEN LEFT(product, 72) || '...' ELSE product END)
+              || ' x' || units_sold,
+            ', ' ORDER BY units_sold DESC, revenue DESC, product
+          ) AS top_products
+        FROM ranked
+        WHERE product_rank <= 5
+        GROUP BY category
+      )
+      SELECT
+        cr.category,
+        cr.products_sold,
+        cr.units_sold,
+        cr.orders,
+        cr.revenue,
+        cr.gross_profit,
+        CASE WHEN cr.revenue > 0 THEN ROUND(cr.gross_profit / cr.revenue * 100, 0) ELSE 0 END AS average_margin_percent,
+        COALESCE(tp.top_products, '-') AS top_products,
+        CASE
+          WHEN cr.units_sold >= 10 AND cr.gross_profit > 0 THEN 'Prioritise category'
+          WHEN cr.units_sold >= 4 THEN 'Stock winners only'
+          WHEN cr.units_sold > 0 THEN 'Monitor category'
+          ELSE 'Low movement'
+        END AS stocking_signal
+      FROM category_rollup cr
+      LEFT JOIN top_products tp ON tp.category=cr.category
+      ORDER BY cr.revenue DESC, cr.units_sold DESC, cr.category
+    `, [dateFrom, dateTo])
+    sendRows(req, res, result.rows)
+  } catch (error) {
+    console.error('Category demand report error:', error)
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
+router.get('/product-demand', async (req, res) => {
+  try {
+    const today = nairobiBusinessDate()
+    const dateFrom = String(req.query.date_from || today)
+    const dateTo = String(req.query.date_to || today)
+    const result = await query(`
+      WITH period AS (
+        SELECT $1::date AS date_from, $2::date AS date_to,
+          GREATEST(($2::date - $1::date + 1), 1)::numeric AS days
+      ), sales AS (
+        SELECT
+          p.id AS product_id,
+          COALESCE(c.name, 'Uncategorized') AS category,
+          p.name AS product,
+          COALESCE(NULLIF(p.sku, ''), '-') AS sku,
+          SUM(oi.quantity)::int AS units_sold,
+          COUNT(DISTINCT o.id)::int AS orders,
+          COALESCE(SUM(oi.total_price),0) AS revenue,
+          COALESCE(SUM(oi.total_price - oi.unit_cost*oi.internal_quantity
+            - oi.supplier_cost*oi.supplier_quantity),0) AS gross_profit
+        FROM order_items oi
+        JOIN orders o ON o.id=oi.order_id
+        JOIN products p ON p.id=oi.product_id
+        LEFT JOIN categories c ON c.id=p.category_id
+        WHERE o.status IN ('delivered','collected_paid')
+          AND COALESCE(o.sale_date, o.created_at::date) BETWEEN $1 AND $2
+          AND p.deleted_at IS NULL
+        GROUP BY p.id, COALESCE(c.name, 'Uncategorized')
+      ), stock AS (
+        SELECT
+          p.id AS product_id,
+          COALESCE(i.quantity - i.reserved_quantity, 0)::numeric AS available_stock
+        FROM products p
+        LEFT JOIN inventory i ON i.product_id=p.id
+        WHERE p.deleted_at IS NULL
+      ), scored AS (
+        SELECT
+          sales.*,
+          COALESCE(stock.available_stock,0) AS available_stock,
+          ROUND(sales.units_sold::numeric / period.days, 2) AS average_daily_units,
+          CEIL(sales.units_sold::numeric / period.days * 14)::int AS suggested_stock_14_days,
+          CEIL(sales.units_sold::numeric / period.days * 30)::int AS suggested_stock_30_days
+        FROM sales
+        CROSS JOIN period
+        LEFT JOIN stock ON stock.product_id=sales.product_id
+      )
+      SELECT
+        category,
+        product,
+        sku,
+        units_sold,
+        orders,
+        revenue,
+        gross_profit,
+        available_stock,
+        average_daily_units,
+        suggested_stock_14_days,
+        suggested_stock_30_days,
+        GREATEST(suggested_stock_14_days - available_stock, 0)::int AS reorder_gap,
+        CASE
+          WHEN units_sold > 0 AND available_stock <= 0 THEN 'Stock now'
+          WHEN suggested_stock_14_days - available_stock > 0 THEN 'Increase stock'
+          WHEN average_daily_units > 0 THEN 'Monitor demand'
+          ELSE 'Low movement'
+        END AS recommendation
+      FROM scored
+      ORDER BY category, units_sold DESC, revenue DESC, product
+    `, [dateFrom, dateTo])
+    sendRows(req, res, result.rows)
+  } catch (error) {
+    console.error('Product demand report error:', error)
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
 router.get('/supplier-payables', async (req, res) => {
   try {
     const params: any[] = []

@@ -17,7 +17,9 @@
     "lint": "npm run lint --workspace=packages/backend && npm run lint --workspace=packages/frontend",
     "typecheck": "npm run typecheck --workspace=packages/backend && npm run typecheck --workspace=packages/frontend",
     "test": "npm run test --workspace=packages/backend",
-    "test:uat": "playwright test"
+    "test:uat": "playwright test",
+    "seed:dummy": "node scripts/seed-dummy-business-data.mjs",
+    "cleanup:dummy": "node scripts/cleanup-dummy-business-data.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

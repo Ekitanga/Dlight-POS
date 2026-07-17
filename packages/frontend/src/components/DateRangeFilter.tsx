@@ -174,9 +174,9 @@ export function DateRangeFilter({
         </>
       )}
 
-      <div className={`flex items-center gap-2 text-sm text-muted-foreground ${compact ? 'sm:pt-5' : 'lg:pb-2'}`}>
+      <div className={`flex min-w-0 items-center gap-2 text-sm text-muted-foreground ${compact ? 'sm:pt-5' : 'lg:pb-2'}`}>
         <CalendarDays className="h-4 w-4 shrink-0" />
-        <span className="whitespace-nowrap">{selectedLabel(dateFrom, dateTo)}</span>
+        <span className="break-words">{selectedLabel(dateFrom, dateTo)}</span>
       </div>
 
       {includeClear && (dateFrom || dateTo) && (

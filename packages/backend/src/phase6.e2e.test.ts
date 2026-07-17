@@ -215,10 +215,22 @@ async function assertGlobalIntegrity() {
   `), 0)
 
   const expected = await row(`
-    SELECT COALESCE(SUM(total_amount),0) AS sales, COUNT(*)::int AS orders
+    SELECT COALESCE(SUM(
+      subtotal + CASE
+        WHEN delivery_type = 'courier'
+          AND courier_payment_type = 'cod'
+          AND delivery_fee_payment_method IN ('paid_to_courier', 'pay_on_delivery')
+        THEN 0
+        ELSE delivery_income
+      END
+    ),0) AS sales, COUNT(*)::int AS orders
     FROM orders WHERE status IN ('delivered','collected_paid')
   `)
-  const dashboard = await request('GET', '/dashboard/stats', admin.accessToken)
+  const dashboard = await request(
+    'GET',
+    '/dashboard/stats?date_from=2000-01-01&date_to=2100-01-01',
+    admin.accessToken
+  )
   const salesReport = await request('GET', '/reports/sales', admin.accessToken)
   const profit = await request('GET', '/reports/profit', admin.accessToken)
   const overview = await request(
