@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Plus, Search, Package, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Ban, History } from 'lucide-react'
+import { Plus, Search, Package, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Ban, History, ChevronsUpDown } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { PaginatedResponse, Pagination } from '../../components/Pagination'
@@ -62,6 +62,7 @@ export function Inventory() {
   const [search, setSearch] = useState('')
   const [showForm, setShowForm] = useState(false)
   const [historyProductId, setHistoryProductId] = useState<string | null>(null)
+  const [productSearch, setProductSearch] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
   const queryClient = useQueryClient()
@@ -92,7 +93,12 @@ export function Inventory() {
 
   const movements = movementsPage?.data || []
 
-  const { register, handleSubmit, reset, watch, formState: { errors } } = useForm<AdjustmentFormData>({
+  const filteredProducts = inventoryLookup.filter(item =>
+    item.product_name.toLowerCase().includes(productSearch.toLowerCase()) ||
+    (item.sku || '').toLowerCase().includes(productSearch.toLowerCase())
+  )
+
+  const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<AdjustmentFormData>({
     defaultValues: {
       product_id: '',
       type: 'stock_in',
@@ -152,17 +158,37 @@ export function Inventory() {
           <form onSubmit={handleSubmit(handleFormSubmit)} className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium mb-1">Product *</label>
-              <select
-                {...register('product_id', { required: 'Product is required' })}
-                className="w-full px-3 py-2 border rounded-lg"
-              >
-                <option value="">Select product</option>
-                {inventoryLookup.map(item => (
-                  <option key={item.product_id} value={item.product_id}>
-                    {item.product_name} | {item.sku || 'No SKU'} | {formatCurrency(item.selling_price)} | Stock: {item.quantity}
-                  </option>
-                ))}
-              </select>
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="Search product by name or SKU..."
+                  value={productSearch}
+                  onChange={(e) => { setProductSearch(e.target.value); setValue('product_id', '') }}
+                  className="w-full px-3 py-2 border rounded-lg pr-8"
+                />
+                <ChevronsUpDown className="absolute right-2 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
+              </div>
+              {productSearch && (
+                <div className="mt-1 border rounded-lg bg-card shadow-lg max-h-48 overflow-y-auto">
+                  {filteredProducts.length === 0 && (
+                    <p className="px-3 py-2 text-sm text-muted-foreground">No products found</p>
+                  )}
+                  {filteredProducts.map(item => (
+                    <button
+                      key={item.product_id}
+                      type="button"
+                      onClick={() => {
+                        setValue('product_id', item.product_id)
+                        setProductSearch('')
+                      }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-muted flex items-center justify-between"
+                    >
+                      <span className="font-medium">{item.product_name}</span>
+                      <span className="text-xs text-muted-foreground">{item.sku || '-'} | Stock: {item.quantity}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               {selectedProduct && (
                 <div className="mt-2 rounded-lg bg-muted px-3 py-2 text-xs text-muted-foreground">
                   <span className="font-medium text-foreground">{selectedProduct.sku || 'No SKU'}</span>
