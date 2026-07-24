@@ -105,6 +105,7 @@ const moneyKey = (key: string) => [
   'cash', 'mpesa', 'variance', 'balance', 'revenue', 'value', 'price', 'fee',
   'credit', 'subtotal', 'total', 'refund'
 ].some(term => key.includes(term)) && !/(method|status|date|count|number|margin)/.test(key)
+const phoneKey = (key: string) => /(^phone$|phone|mobile|tel|fax)/.test(key)
 const countKey = (key: string) => /(^quantity$|quantity|orders|deliveries|units|days|level|count|available_stock|suggested_stock|reorder_gap)/.test(key)
 const descriptiveKey = (key: string) => !countKey(key) && /(^name$|items|product$|products$|description|notes|details|reason|recommendation|signal)/.test(key)
 const columnWidth = (key: string) => {
@@ -115,6 +116,7 @@ const columnWidth = (key: string) => {
   if (dateKey(key)) return 145
   if (moneyKey(key)) return 145
   if (countKey(key)) return 110
+  if (phoneKey(key)) return 160
   if (/tracking/.test(key)) return 190
   if (/destination|address/.test(key)) return 220
   if (/supplier|customer|courier|rider/.test(key)) return 170
@@ -134,6 +136,7 @@ const formatCell = (key: string, value: unknown) => {
   if (key.includes('margin') || key.includes('percentage')) return `${number(value, 0)}%`
   if (moneyKey(key)) return money(value)
   if (countKey(key)) return number(value, 0)
+  if (phoneKey(key)) return String(value)
   if (typeof value === 'number' || /^-?\d+(\.\d+)?$/.test(String(value))) return number(value)
   return String(value).replaceAll('_', ' ')
 }
