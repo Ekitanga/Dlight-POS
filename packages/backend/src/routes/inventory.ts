@@ -44,59 +44,53 @@ router.post('/adjust', auditMiddleware('inventory', 'inventory_adjusted'), async
       const available = onHand - reserved
       const beforeQuantity = onHand
 
-      let afterQuantity = onHand
-      switch (type) {
-        case 'stock_in':
-          if (available < adjustmentQuantity) {
-            throw Object.assign(new Error('Insufficient available stock'), { statusCode: 400 })
-          }
-          afterQuantity = onHand + adjustmentQuantity
-          await client.query('UPDATE inventory SET quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
-          break
-        case 'stock_out':
-          if (available < adjustmentQuantity) {
-            throw Object.assign(new Error('Insufficient available stock'), { statusCode: 400 })
-          }
-          afterQuantity = onHand - adjustmentQuantity
-          await client.query('UPDATE inventory SET quantity = quantity - $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
-          break
-        case 'damaged':
-          if (available < adjustmentQuantity) {
-            throw Object.assign(new Error('Insufficient available stock'), { statusCode: 400 })
-          }
-          afterQuantity = onHand - adjustmentQuantity
-          await client.query('UPDATE inventory SET damaged_quantity = damaged_quantity + $1, quantity = quantity - $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
-          break
-        case 'lost':
-          if (available < adjustmentQuantity) {
-            throw Object.assign(new Error('Insufficient available stock'), { statusCode: 400 })
-          }
-          afterQuantity = onHand - adjustmentQuantity
-          await client.query('UPDATE inventory SET lost_quantity = lost_quantity + $1, quantity = quantity - $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
-          break
-        case 'reserved':
-          if (available < adjustmentQuantity) {
-            throw Object.assign(new Error('Insufficient available stock'), { statusCode: 400 })
-          }
-          await client.query('UPDATE inventory SET reserved_quantity = reserved_quantity + $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
-          break
-        case 'reservation_release':
-          if (reserved < adjustmentQuantity) {
-            throw Object.assign(new Error('Insufficient reserved stock'), { statusCode: 400 })
-          }
-          await client.query('UPDATE inventory SET reserved_quantity = reserved_quantity - $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
-          break
-        case 'return_sellable':
-          afterQuantity = onHand + adjustmentQuantity
-          await client.query('UPDATE inventory SET returned_quantity = returned_quantity + $1, quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
-          break
-        case 'return_damaged':
-          afterQuantity = onHand + adjustmentQuantity
-          await client.query('UPDATE inventory SET returned_quantity = returned_quantity + $1, damaged_quantity = damaged_quantity + $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
-          break
-        default:
-          throw Object.assign(new Error('Invalid adjustment type'), { statusCode: 400 })
-      }
+       let afterQuantity = onHand
+       switch (type) {
+         case 'stock_in':
+           afterQuantity = onHand + adjustmentQuantity
+           await client.query('UPDATE inventory SET quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
+           break
+         case 'stock_out':
+           if (available < adjustmentQuantity) {
+             throw Object.assign(new Error('Insufficient available stock'), { statusCode: 400 })
+           }
+           afterQuantity = onHand - adjustmentQuantity
+           await client.query('UPDATE inventory SET quantity = quantity - $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
+           break
+         case 'damaged':
+           if (available < adjustmentQuantity) {
+             throw Object.assign(new Error('Insufficient available stock'), { statusCode: 400 })
+           }
+           afterQuantity = onHand - adjustmentQuantity
+           await client.query('UPDATE inventory SET damaged_quantity = damaged_quantity + $1, quantity = quantity - $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
+           break
+         case 'lost':
+           if (available < adjustmentQuantity) {
+             throw Object.assign(new Error('Insufficient available stock'), { statusCode: 400 })
+           }
+           afterQuantity = onHand - adjustmentQuantity
+           await client.query('UPDATE inventory SET lost_quantity = lost_quantity + $1, quantity = quantity - $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
+           break
+         case 'reserved':
+           await client.query('UPDATE inventory SET reserved_quantity = reserved_quantity + $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
+           break
+         case 'reservation_release':
+           if (reserved < adjustmentQuantity) {
+             throw Object.assign(new Error('Insufficient reserved stock'), { statusCode: 400 })
+           }
+           await client.query('UPDATE inventory SET reserved_quantity = reserved_quantity - $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
+           break
+         case 'return_sellable':
+           afterQuantity = onHand + adjustmentQuantity
+           await client.query('UPDATE inventory SET returned_quantity = returned_quantity + $1, quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
+           break
+         case 'return_damaged':
+           afterQuantity = onHand + adjustmentQuantity
+           await client.query('UPDATE inventory SET returned_quantity = returned_quantity + $1, damaged_quantity = damaged_quantity + $1, last_updated = NOW() WHERE product_id = $2', [adjustmentQuantity, product_id])
+           break
+         default:
+           throw Object.assign(new Error('Invalid adjustment type'), { statusCode: 400 })
+       }
 
       await client.query(
         'INSERT INTO inventory_movements (product_id, type, quantity, before_quantity, after_quantity, reference_type, notes, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)',

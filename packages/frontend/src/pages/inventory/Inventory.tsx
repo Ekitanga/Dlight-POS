@@ -119,6 +119,9 @@ export function Inventory() {
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
       setShowForm(false)
       reset()
+    },
+    onError: (error: any) => {
+      alert(error?.response?.data?.error?.message || 'Adjustment failed')
     }
   })
 
