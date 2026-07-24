@@ -81,7 +81,7 @@ export function NotificationBell() {
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="relative inline-flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+        className="relative inline-flex h-10 w-10 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground transition-colors touch-manipulation"
         aria-label="Notifications"
       >
         <Bell className="h-5 w-5" />
@@ -93,7 +93,7 @@ export function NotificationBell() {
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-[60] mt-2 w-[calc(100vw-2rem)] max-w-[360px] origin-top-left rounded-xl border bg-card shadow-xl">
+        <div className="absolute left-0 top-full z-[60] mt-2 w-full sm:w-[360px] origin-top-left rounded-xl border bg-card shadow-xl">
           <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
             <p className="text-sm font-semibold whitespace-nowrap">Notifications</p>
             {unreadCount > 0 && (
@@ -113,13 +113,13 @@ export function NotificationBell() {
             {notifications.map(notification => (
               <div
                 key={notification.id}
-                className={`border-b border-l-[3px] px-4 py-3 last:border-b-0 ${!notification.is_read ? 'bg-muted/50' : 'bg-card'} ${accentForType(notification.type)}`}
+                className={`border-b border-l-[3px] px-3 sm:px-4 py-3 last:border-b-0 ${!notification.is_read ? 'bg-muted/50' : 'bg-card'} ${accentForType(notification.type)}`}
               >
-                <div className="flex items-start justify-between gap-3">
+                <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0 flex-1">
                     <p className="text-sm font-semibold text-foreground">{notification.title}</p>
                     <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground break-words">{notification.message}</p>
-                    <p className="mt-1.5 text-[10px] text-muted-foreground/80">
+                    <p className="mt-1 text-[10px] text-muted-foreground/80">
                       {new Date(notification.created_at).toLocaleString()}
                     </p>
                   </div>
@@ -127,7 +127,7 @@ export function NotificationBell() {
                     <button
                       type="button"
                       onClick={() => markRead.mutate(notification.id)}
-                      className="shrink-0 rounded-md border px-2 py-1 text-[11px] font-medium text-primary hover:bg-muted"
+                      className="shrink-0 rounded-md border px-2 py-1 text-[11px] font-medium text-primary hover:bg-muted active:bg-muted/50"
                     >
                       Read
                     </button>
