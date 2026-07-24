@@ -1,0 +1,3 @@
+ALTER TABLE inventory_movements
+    ADD COLUMN IF NOT EXISTS before_quantity INTEGER NOT NULL DEFAULT 0,
+    ADD COLUMN IF NOT EXISTS after_quantity INTEGER NOT NULL DEFAULT 0;

@@ -17,6 +17,7 @@ import { Receipts } from './pages/receipts/Receipts'
 import { Couriers } from './pages/couriers/Couriers'
 import { Reports } from './pages/reports/Reports'
 import { AuditLogs } from './pages/audit/AuditLogs'
+import { Notifications } from './pages/notifications/Notifications'
 
 function App() {
   const { user, hasPermission } = useAuthStore()
@@ -29,6 +30,8 @@ function App() {
       </Routes>
     )
   }
+  
+  const isAdminOrOwner = user.role === 'admin' || user.role === 'owner'
   
   return (
     <Layout>
@@ -50,6 +53,7 @@ function App() {
         <Route path="/settings" element={hasPermission('settings.view') ? <Settings /> : <Navigate to="/orders" replace />} />
         <Route path="/reports" element={hasPermission('reports.view') ? <Reports /> : <Navigate to="/orders" replace />} />
         <Route path="/audit" element={hasPermission('audit.view') ? <AuditLogs /> : <Navigate to="/orders" replace />} />
+        <Route path="/notifications" element={isAdminOrOwner ? <Notifications /> : <Navigate to="/orders" replace />} />
       </Routes>
     </Layout>
   )

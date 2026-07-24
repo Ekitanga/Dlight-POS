@@ -140,6 +140,8 @@ CREATE TABLE inventory_movements (
     product_id UUID NOT NULL REFERENCES products(id),
     type VARCHAR(30) NOT NULL CHECK (type IN ('stock_in', 'stock_out', 'adjustment', 'damaged', 'lost', 'reserved', 'reservation_release', 'return_sellable', 'return_damaged')),
     quantity INTEGER NOT NULL,
+    before_quantity INTEGER NOT NULL DEFAULT 0,
+    after_quantity INTEGER NOT NULL DEFAULT 0,
     reference_id UUID,
     reference_type VARCHAR(50),
     notes TEXT,
@@ -557,3 +559,17 @@ CREATE INDEX idx_products_barcode ON products(barcode);
 CREATE INDEX idx_suppliers_active ON suppliers(is_active);
 CREATE INDEX idx_riders_active ON riders(is_active);
 CREATE INDEX idx_inventory_product ON inventory(product_id);
+
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id),
+    title VARCHAR(255) NOT NULL,
+    message TEXT NOT NULL,
+    type VARCHAR(50) NOT NULL CHECK (type IN ('low_stock', 'order_status', 'inventory_adjustment', 'system')),
+    entity_type VARCHAR(50),
+    entity_id UUID,
+    is_read BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_notifications_user_created ON notifications(user_id, created_at DESC);

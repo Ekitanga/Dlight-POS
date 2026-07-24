@@ -18,7 +18,8 @@ import {
   UserCog,
   Receipt,
   BarChart3,
-  History
+  History,
+  Bell
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { ThemeToggle } from './ThemeToggle'
@@ -27,6 +28,7 @@ import { useQuery } from '@tanstack/react-query'
 import axios from 'axios'
 import { useEffect } from 'react'
 import { applyAppearance, AppearanceSettings } from '../lib/appearance'
+import { NotificationBell } from './NotificationBell'
 
 const mobilePrimaryPaths = ['/dashboard', '/orders', '/products', '/inventory']
 
@@ -44,6 +46,7 @@ const navItems = [
   { path: '/expenses', icon: CreditCard, label: 'Expenses', permission: 'expenses.view' },
   { path: '/reports', icon: BarChart3, label: 'Reports', permission: 'reports.view' },
   { path: '/audit', icon: History, label: 'Audit Logs', permission: 'audit.view' },
+  { path: '/notifications', icon: Bell, label: 'Notifications', permission: 'notifications.view' },
   { path: '/users', icon: UserCog, label: 'Users', permission: 'users.view' },
   { path: '/settings', icon: Settings, label: 'Settings', permission: 'settings.view' },
 ]
@@ -78,12 +81,15 @@ export function Layout({ children }: { children: React.ReactNode }) {
             {branding?.logo_url && <img src={branding.logo_url} alt="" className="h-8 w-8 shrink-0 rounded object-contain" />}
             <h1 className="truncate text-[15px] font-semibold uppercase text-primary">{branding?.company_name || 'Dlight POS'}</h1>
           </Link>
-          <button 
-            onClick={() => setMobileOpen(false)}
-            className="lg:hidden p-1 rounded-lg hover:bg-muted"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <div className="flex items-center gap-1">
+            <NotificationBell />
+            <button 
+              onClick={() => setMobileOpen(false)}
+              className="lg:hidden p-1 rounded-lg hover:bg-muted"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
         </div>
         
         <nav className="flex-1 overflow-y-auto px-3 py-4">

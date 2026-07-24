@@ -4,6 +4,7 @@ import { fallbackCustomerName, normalizeKenyanPhone } from '../utils/phone.js'
 import { auditMiddleware } from '../middleware/audit.js'
 import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 import { logAudit } from '../utils/audit.js'
+import { emitNotification } from '../utils/notifications.js'
 
 const router = Router()
 
@@ -153,13 +154,23 @@ async function reverseOpenOrderRecords(client: any, req: any, order: any) {
   for (const item of previousItems.rows) {
     const internalQuantity = toNumber(item.internal_quantity)
     if (internalQuantity > 0) {
+      const inventoryResult = await client.query(
+        'SELECT quantity FROM inventory WHERE product_id = $1 FOR UPDATE',
+        [item.product_id]
+      )
+      const beforeQuantity = inventoryResult.rows[0] ? toNumber(inventoryResult.rows[0].quantity) : 0
       await client.query(
         'UPDATE inventory SET quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2',
         [internalQuantity, item.product_id]
       )
+      const afterResult = await client.query(
+        'SELECT quantity FROM inventory WHERE product_id = $1',
+        [item.product_id]
+      )
+      const afterQuantity = afterResult.rows[0] ? toNumber(afterResult.rows[0].quantity) : beforeQuantity
       await client.query(
-        'INSERT INTO inventory_movements (product_id, type, quantity, reference_id, reference_type, notes, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)',
-        [item.product_id, 'stock_in', internalQuantity, order.id, 'order_edit', `Order edit reversal - ${order.order_number}`, req.user?.userId]
+        'INSERT INTO inventory_movements (product_id, type, quantity, before_quantity, after_quantity, reference_id, reference_type, notes, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)',
+        [item.product_id, 'stock_in', internalQuantity, beforeQuantity, afterQuantity, order.id, 'order_edit', `Order edit reversal - ${order.order_number}`, req.user?.userId]
       )
     }
   }
@@ -1126,6 +1137,18 @@ router.post('/', auditMiddleware('order', 'order_created'), async (req, res) => 
     })
 
     res.status(201).json(createdOrder)
+
+    const newOrderNumber = createdOrder.order_number
+    const newOrderId = createdOrder.id
+    const deliveryTypeLabel = createdOrder.delivery_type || 'walk_in'
+    const totalAmount = toNumber(createdOrder.total_amount)
+    void emitNotification({
+      title: `New order ${newOrderNumber}`,
+      message: `${newOrderNumber} | ${deliveryTypeLabel.toUpperCase()} | KSh ${totalAmount.toLocaleString()} | Created`,
+      type: 'order_status',
+      entityType: 'order',
+      entityId: newOrderId
+    }).catch(() => {})
   } catch (err) {
     console.error('Order creation error:', err)
     const statusCode = (err as any).statusCode || 500
@@ -1379,6 +1402,18 @@ router.put('/:id/status', async (req, res) => {
           completion_payment_method: completion_payment_method || null
         }
       })
+
+      const statusLabel = status === 'delivered' ? 'completed' : status
+      const previousStatusLabel = normalizedWorkflowStatus(previousStatus)
+      const deliveryTypeLabel = (order.delivery_type || 'walk_in').toUpperCase()
+      const totalAmount = toNumber(order.total_amount)
+      void emitNotification({
+        title: `Order ${order.order_number} → ${statusLabel.toUpperCase()}`,
+        message: `${order.order_number} | ${deliveryTypeLabel} | KSh ${totalAmount.toLocaleString()} | ${previousStatusLabel} → ${statusLabel}`,
+        type: 'order_status',
+        entityType: 'order',
+        entityId: id
+      }).catch(() => {})
 
       return result.rows[0]
     })

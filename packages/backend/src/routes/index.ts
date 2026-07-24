@@ -15,6 +15,7 @@ import { userRoutes } from './users.js'
 import { inventoryRoutes } from './inventory.js'
 import { reportRoutes } from './reports.js'
 import { auditRoutes } from './audit.js'
+import { notificationsRoutes } from './notifications.js'
 import { authMiddleware, requireAdmin, requireModulePermission } from '../middleware/auth.js'
 
 const router = Router()
@@ -35,5 +36,6 @@ router.use('/receipts', authMiddleware, requireModulePermission('receipts'), rec
 router.use('/users', authMiddleware, requireAdmin, requireModulePermission('users'), userRoutes)
 router.use('/inventory', authMiddleware, requireModulePermission('inventory'), inventoryRoutes)
 router.use('/audit', authMiddleware, requireModulePermission('audit'), auditRoutes)
+router.use('/notifications', authMiddleware, notificationsRoutes)
 
 export { router as apiRouter }

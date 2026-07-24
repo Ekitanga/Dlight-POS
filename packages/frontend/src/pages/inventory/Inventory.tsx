@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Plus, Search, Package, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Ban } from 'lucide-react'
+import { Plus, Search, Package, AlertTriangle, ArrowDownToLine, ArrowUpFromLine, Ban, History } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { PaginatedResponse, Pagination } from '../../components/Pagination'
@@ -21,6 +21,18 @@ interface InventoryItem {
   reorder_level: number
   available_stock: number
   selling_price: number
+}
+
+interface MovementRow {
+  id: string
+  type: string
+  quantity: number
+  before_quantity: number
+  after_quantity: number
+  notes?: string
+  created_by_name?: string
+  created_at: string
+  reference_type?: string
 }
 
 interface AdjustmentFormData {
@@ -49,6 +61,7 @@ export function Inventory() {
   const lowStockOnly = searchParams.get('filter') === 'low_stock'
   const [search, setSearch] = useState('')
   const [showForm, setShowForm] = useState(false)
+  const [historyProductId, setHistoryProductId] = useState<string | null>(null)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
   const queryClient = useQueryClient()
@@ -66,6 +79,18 @@ export function Inventory() {
     queryFn: async () => (await axios.get('/api/inventory')).data,
     enabled: showForm
   })
+
+  const { data: movementsPage } = useQuery<PaginatedResponse<MovementRow>>({
+    queryKey: ['inventory-movements', historyProductId],
+    queryFn: async () => {
+      if (!historyProductId) return { data: [], pagination: { total: 0, page: 1, page_size: 25, total_pages: 0 } }
+      const response = await axios.get(`/api/inventory/movements?product_id=${historyProductId}&page=1&page_size=50`)
+      return response.data
+    },
+    enabled: !!historyProductId
+  })
+
+  const movements = movementsPage?.data || []
 
   const { register, handleSubmit, reset, watch, formState: { errors } } = useForm<AdjustmentFormData>({
     defaultValues: {
@@ -238,6 +263,7 @@ export function Inventory() {
                 <th className="text-left px-4 py-3 font-medium">Returned</th>
                 <th className="text-left px-4 py-3 font-medium">Available</th>
                 <th className="text-left px-4 py-3 font-medium">Reorder Level</th>
+                <th className="text-left px-4 py-3 font-medium">History</th>
               </tr>
             </thead>
             <tbody>
@@ -255,11 +281,67 @@ export function Inventory() {
                     {item.available_stock}
                   </td>
                   <td className="px-4 py-3 text-sm">{item.reorder_level}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      type="button"
+                      onClick={() => setHistoryProductId(historyProductId === item.product_id ? null : item.product_id)}
+                      className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs hover:bg-muted ${historyProductId === item.product_id ? 'bg-muted' : ''}`}
+                    >
+                      <History className="h-3.5 w-3.5" />
+                      {historyProductId === item.product_id ? 'Hide' : 'View'}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
           {inventoryPage && <Pagination meta={inventoryPage.pagination} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1) }} />}
+        </div>
+      )}
+
+      {historyProductId && (
+        <div className="rounded-xl border bg-card shadow-sm">
+          <div className="border-b px-4 py-3">
+            <h3 className="font-semibold">Stock Movement History</h3>
+            <p className="text-xs text-muted-foreground">Recent adjustments for the selected product</p>
+          </div>
+          <div className="mobile-scroll-table overflow-x-auto">
+            <table className="w-full min-w-[760px] text-sm">
+              <thead className="bg-muted/80">
+                <tr>
+                  <th className="px-4 py-3 text-left">When</th>
+                  <th className="px-4 py-3 text-left">Type</th>
+                  <th className="px-4 py-3 text-right">Qty</th>
+                  <th className="px-4 py-3 text-right">Before</th>
+                  <th className="px-4 py-3 text-right">After</th>
+                  <th className="px-4 py-3 text-left">Notes</th>
+                  <th className="px-4 py-3 text-left">Actor</th>
+                </tr>
+              </thead>
+              <tbody>
+                {movements.length === 0 && (
+                  <tr><td colSpan={7} className="px-4 py-8 text-center text-muted-foreground">No movements recorded yet.</td></tr>
+                )}
+                {movements.map(movement => (
+                  <tr key={movement.id} className="border-t align-top hover:bg-muted/30">
+                    <td className="whitespace-nowrap px-4 py-3">{new Date(movement.created_at).toLocaleString()}</td>
+                    <td className="px-4 py-3">
+                      <span className="inline-flex rounded-full px-2.5 py-1 text-xs font-semibold bg-blue-100 text-blue-700 dark:bg-blue-950/50 dark:text-blue-200">
+                        {movement.type.replace(/_/g, ' ')}
+                      </span>
+                    </td>
+                    <td className={`px-4 py-3 text-right font-medium ${['stock_out', 'damaged', 'lost'].includes(movement.type) ? 'text-destructive' : 'text-green-600'}`}>
+                      {movement.type.startsWith('return') || movement.type === 'stock_in' ? '+' : '-'}{movement.quantity}
+                    </td>
+                    <td className="px-4 py-3 text-right">{movement.before_quantity}</td>
+                    <td className="px-4 py-3 text-right">{movement.after_quantity}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{movement.notes || '-'}</td>
+                    <td className="px-4 py-3 text-muted-foreground">{movement.created_by_name || '-'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>

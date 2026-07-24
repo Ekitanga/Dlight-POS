@@ -675,7 +675,7 @@ export function Orders() {
   }
 
   const canEditOrderDetails = (order: Order) => ['pending', 'confirmed'].includes(simplifiedStatus(order.status, order))
-  const canUpdateOrderStatus = () => hasPermission('orders.status') || hasPermission('orders.edit')
+  const canUpdateOrderStatus = () => hasPermission('orders.status')
 
   const editableDate = (value?: string | null) => {
     const dateOnly = String(value || '').match(/^(\d{4}-\d{2}-\d{2})/)?.[1]
