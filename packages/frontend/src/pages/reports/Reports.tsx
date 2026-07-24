@@ -137,7 +137,7 @@ const formatCell = (key: string, value: unknown) => {
   if (moneyKey(key)) return money(value)
   if (countKey(key)) return number(value, 0)
   if (phoneKey(key)) return String(value)
-  if (typeof value === 'number' || /^-?\d+(\.\d+)?$/.test(String(value))) return number(value)
+  if (typeof value === 'number') return number(value)
   return String(value).replaceAll('_', ' ')
 }
 function MetricCard({ title, value, icon, onClick, danger }: {
