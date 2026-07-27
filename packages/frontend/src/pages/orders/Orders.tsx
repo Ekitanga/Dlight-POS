@@ -847,7 +847,7 @@ export function Orders() {
                       } : null}
                     />
                     <label className="text-xs font-medium text-muted-foreground lg:contents"><span className="lg:hidden">Quantity</span><input type="number" {...register(`items.${index}.quantity` as const, { valueAsNumber: true, min: 1 })} className="mt-1 w-full px-3 py-2 border rounded-lg lg:mt-0" placeholder="Quantity" /></label>
-                    <label className="text-xs font-medium text-muted-foreground lg:contents"><span className="lg:hidden">Selling price</span><input type="number" {...register(`items.${index}.selling_price` as const, { valueAsNumber: true, min: 0 })} className="mt-1 w-full px-3 py-2 border rounded-lg lg:mt-0" placeholder="Selling price" /></label>
+                    <label className="text-xs font-medium text-muted-foreground lg:contents"><span className="lg:hidden">Selling price</span><input type="number" step="0.01" {...register(`items.${index}.selling_price` as const, { valueAsNumber: true, min: 0 })} onWheel={(e) => e.currentTarget.blur()} className="mt-1 w-full px-3 py-2 border rounded-lg lg:mt-0" placeholder="Selling price" /></label>
                     <select {...register(`items.${index}.fulfillment_source` as const)} className="px-3 py-2 border rounded-lg">
                       <option value="internal">Shop Stock</option>
                       <option value="supplier">Supplier Fulfilled</option>
@@ -863,7 +863,7 @@ export function Orders() {
                             <option key={supplier.id} value={supplier.id}>{supplier.name}</option>
                           ))}
                         </select>
-                        <input type="number" {...register(`items.${index}.supplier_cost` as const, { valueAsNumber: true, min: 0 })} className="px-3 py-2 border rounded-lg lg:col-span-3" placeholder="Supplier cost per item" />
+                        <input type="number" step="0.01" {...register(`items.${index}.supplier_cost` as const, { valueAsNumber: true, min: 0 })} onWheel={(e) => e.currentTarget.blur()} className="px-3 py-2 border rounded-lg lg:col-span-3" placeholder="Supplier cost per item" />
                       </>
                     )}
                   </div>
