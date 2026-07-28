@@ -153,10 +153,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
           >
             <Menu className="h-5 w-5" />
           </button>
-          <Link to="/dashboard" className="flex min-w-0 items-center gap-2 rounded-md" aria-label="Go to dashboard">
-            {branding?.logo_url && <img src={branding.logo_url} alt="" className="h-7 w-7 rounded object-contain" />}
-            <h2 className="truncate text-sm font-semibold uppercase text-primary">{branding?.company_name || 'Dlight POS'}</h2>
-          </Link>
+          <div className="flex items-center gap-1">
+            <NotificationBell />
+            <Link to="/dashboard" className="flex min-w-0 items-center gap-2 rounded-md" aria-label="Go to dashboard">
+              {branding?.logo_url && <img src={branding.logo_url} alt="" className="h-7 w-7 rounded object-contain" />}
+              <h2 className="truncate text-sm font-semibold uppercase text-primary">{branding?.company_name || 'Dlight POS'}</h2>
+            </Link>
+          </div>
           <ThemeToggle />
         </div>
         <div className="page-container mx-auto w-full min-w-0 max-w-[1440px] p-4 sm:p-6 lg:p-8">

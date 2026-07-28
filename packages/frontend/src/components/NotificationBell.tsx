@@ -86,14 +86,14 @@ export function NotificationBell() {
       >
         <Bell className="h-5 w-5" />
         {unreadCount > 0 && (
-          <span className="absolute -top-1 -right-1 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-destructive px-1 text-[11px] font-bold text-destructive-foreground ring-2 ring-background">
+          <span className="animate-pulse absolute -top-1 -right-1 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-destructive px-1 text-[11px] font-bold text-destructive-foreground ring-2 ring-background">
             {unreadCount > 9 ? '9+' : unreadCount}
           </span>
         )}
       </button>
 
       {open && (
-        <div className="absolute left-1/3 top-full z-[60] mt-2 -translate-x-1/2 w-[260px] sm:w-[320px] origin-top rounded-xl border bg-card shadow-xl">
+        <div className="absolute left-1/2 top-full z-[60] mt-2 -translate-x-1/2 w-[260px] sm:w-[320px] origin-top rounded-xl border bg-card shadow-xl">
           <div className="flex items-center justify-between gap-3 border-b px-4 py-3">
             <p className="text-sm font-semibold whitespace-nowrap">Notifications</p>
             {unreadCount > 0 && (

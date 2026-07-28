@@ -1131,9 +1131,9 @@ router.post('/', auditMiddleware('order', 'order_created'), async (req, res) => 
         await client.query('UPDATE orders SET payment_status = $1, paid_amount = $2 WHERE id = $3', ['paid', totalAmount, orderId])
       }
 
-      const finalOrder = await client.query('SELECT * FROM orders WHERE id = $1', [orderId])
-      const finalItems = await client.query('SELECT * FROM order_items WHERE order_id = $1', [orderId])
-      return { ...finalOrder.rows[0], items: finalItems.rows }
+    const finalOrder = await client.query('SELECT * FROM orders WHERE id = $1', [orderId])
+    const finalItems = await client.query('SELECT * FROM order_items WHERE order_id = $1', [orderId])
+    return { ...finalOrder.rows[0], items: finalItems.rows }
     })
 
     res.status(201).json(createdOrder)
@@ -1142,9 +1142,17 @@ router.post('/', auditMiddleware('order', 'order_created'), async (req, res) => 
     const newOrderId = createdOrder.id
     const deliveryTypeLabel = createdOrder.delivery_type || 'walk_in'
     const totalAmount = toNumber(createdOrder.total_amount)
+    const customerId = createdOrder.customer_id
+    const paymentMethod = createdOrder.payment_method || 'pending'
+    let customerName: string | null = null
+    if (customerId) {
+      const customerResult = await query('SELECT name FROM customers WHERE id = $1', [customerId])
+      customerName = customerResult.rows[0]?.name || null
+    }
+    const customerLabel = customerName ? customerName : 'Guest / Walk-in'
     void emitNotification({
       title: `New order ${newOrderNumber}`,
-      message: `${newOrderNumber} | ${deliveryTypeLabel.toUpperCase()} | KSh ${totalAmount.toLocaleString()} | Created`,
+      message: `${newOrderNumber} | ${customerLabel} | ${deliveryTypeLabel.toUpperCase()} | KSh ${totalAmount.toLocaleString()} | ${paymentMethod.toUpperCase()}`,
       type: 'order_status',
       entityType: 'order',
       entityId: newOrderId
@@ -1407,9 +1415,15 @@ router.put('/:id/status', async (req, res) => {
       const previousStatusLabel = normalizedWorkflowStatus(previousStatus)
       const deliveryTypeLabel = (order.delivery_type || 'walk_in').toUpperCase()
       const totalAmount = toNumber(order.total_amount)
+      let customerName: string | null = null
+      if (order.customer_id) {
+        const customerResult = await client.query('SELECT name FROM customers WHERE id = $1', [order.customer_id])
+        customerName = customerResult.rows[0]?.name || null
+      }
+      const customerLabel = customerName ? customerName : 'Guest / Walk-in'
       void emitNotification({
         title: `Order ${order.order_number} → ${statusLabel.toUpperCase()}`,
-        message: `${order.order_number} | ${deliveryTypeLabel} | KSh ${totalAmount.toLocaleString()} | ${previousStatusLabel} → ${statusLabel}`,
+        message: `${order.order_number} | ${customerLabel} | ${deliveryTypeLabel} | KSh ${totalAmount.toLocaleString()} | ${previousStatusLabel} → ${statusLabel}`,
         type: 'order_status',
         entityType: 'order',
         entityId: id
