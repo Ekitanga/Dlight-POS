@@ -12,6 +12,8 @@ import { useAuthStore } from '../../stores/authStore'
 import { Pagination } from '../../components/Pagination'
 import { DateRangeFilter, todayDate } from '../../components/DateRangeFilter'
 import { formatMoney, formatNumber } from '../../lib/format'
+import { CategoryDemandCharts } from '../../components/reports/CategoryDemandCharts'
+import { ProductDemandCharts } from '../../components/reports/ProductDemandCharts'
 
 type Row = Record<string, unknown>
 
@@ -88,6 +90,7 @@ const reportLabelOverrides: Record<string, Record<string, string>> = {
     suggested_stock_14_days: 'Needed For 14 Days',
     suggested_stock_30_days: 'Needed For 30 Days',
     reorder_gap: 'Add This Many',
+    days_of_stock_remaining: 'Days Left',
     recommendation: 'Action'
   }
 }
@@ -373,40 +376,46 @@ export function Reports() {
 
       {reportHelp[report] && <p className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-sm leading-6 text-muted-foreground">{reportHelp[report]}</p>}
 
-      <div className="overflow-x-auto rounded-lg border">
-        {detailLoading ? <div className="p-10 text-center text-muted-foreground">Loading analysis...</div> :
-          rawRows.length === 0 ? <div className="p-10 text-center text-muted-foreground">No records for this selection</div> :
-          <table className="table-fixed text-sm" style={{ width: `${Math.max(tableWidth, 900)}px`, minWidth: '100%' }}>
-            <colgroup>{headers.map(header => <col key={header} style={{ width: `${columnWidth(header)}px` }} />)}{['reconciliation', 'refunds'].includes(report) && <col style={{ width: '130px' }} />}</colgroup>
-            <thead className="bg-muted"><tr>{headers.map(header => <th key={header} className="whitespace-normal px-3 py-3 text-left leading-5">{reportLabel(report, header)}</th>)}{['reconciliation', 'refunds'].includes(report) && <th className="px-3 py-3">Action</th>}</tr></thead>
-            <tbody>{visibleRows.map((row, index) => <tr key={String(row.id || index)} className="border-t align-top hover:bg-muted/40">{headers.map(header => {
-              const value = formatCell(header, row[header])
-              const trackingUrl = typeof row.tracking_url === 'string' ? row.tracking_url : ''
-              const isTrackingCell = header.includes('tracking') && trackingUrl && String(row[header] ?? '').trim()
-              return <td key={header} className="overflow-hidden px-3 py-3">
-                <div
-                  title={descriptiveKey(header) ? String(row[header] ?? '') : undefined}
-                  className={descriptiveKey(header)
-                    ? 'overflow-hidden whitespace-normal break-words leading-5'
-                    : 'truncate whitespace-nowrap'}
-                  style={descriptiveKey(header) ? {
-                    display: '-webkit-box',
-                    WebkitBoxOrient: 'vertical',
-                    WebkitLineClamp: 3
-                  } : undefined}
-                >{isTrackingCell ? (
-                  <a href={trackingUrl} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1 text-primary hover:underline">
-                    <span className="truncate">{value}</span>
-                    <ExternalLink className="h-3.5 w-3.5 shrink-0" />
-                  </a>
-                ) : value}</div>
-              </td>
-            })}
-              {report === 'reconciliation' && <td className="px-3 py-2">{row.status === 'pending' && hasPermission('reports.reconcile') ? <button onClick={() => close.mutate(String(row.id))} className="inline-flex items-center gap-1 rounded-lg border px-2 py-1"><LockKeyhole className="h-4 w-4" />Close</button> : String(row.status)}</td>}
-              {report === 'refunds' && <td className="px-3 py-2"><button onClick={() => setSelectedRefund(row)} className="inline-flex items-center gap-1 rounded-lg border px-2 py-1">Record Refund<ChevronRight className="h-4 w-4" /></button></td>}</tr>)}</tbody>
-          </table>}
-        {rawRows.length > 0 && <Pagination meta={pagination} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1) }} />}
-      </div>
+      {report === 'category-demand' && rawRows.length > 0 ? (
+        <CategoryDemandCharts data={rawRows as any} />
+      ) : report === 'product-demand' && rawRows.length > 0 ? (
+        <ProductDemandCharts data={rawRows as any} />
+      ) : (
+        <div className="overflow-x-auto rounded-lg border">
+          {detailLoading ? <div className="p-10 text-center text-muted-foreground">Loading analysis...</div> :
+            rawRows.length === 0 ? <div className="p-10 text-center text-muted-foreground">No records for this selection</div> :
+            <table className="table-fixed text-sm" style={{ width: `${Math.max(tableWidth, 900)}px`, minWidth: '100%' }}>
+              <colgroup>{headers.map(header => <col key={header} style={{ width: `${columnWidth(header)}px` }} />)}{['reconciliation', 'refunds'].includes(report) && <col style={{ width: '130px' }} />}</colgroup>
+              <thead className="bg-muted"><tr>{headers.map(header => <th key={header} className="whitespace-normal px-3 py-3 text-left leading-5">{reportLabel(report, header)}</th>)}{['reconciliation', 'refunds'].includes(report) && <th className="px-3 py-3">Action</th>}</tr></thead>
+              <tbody>{visibleRows.map((row, index) => <tr key={String(row.id || index)} className="border-t align-top hover:bg-muted/40">{headers.map(header => {
+                const value = formatCell(header, row[header])
+                const trackingUrl = typeof row.tracking_url === 'string' ? row.tracking_url : ''
+                const isTrackingCell = header.includes('tracking') && trackingUrl && String(row[header] ?? '').trim()
+                return <td key={header} className="overflow-hidden px-3 py-3">
+                  <div
+                    title={descriptiveKey(header) ? String(row[header] ?? '') : undefined}
+                    className={descriptiveKey(header)
+                      ? 'overflow-hidden whitespace-normal break-words leading-5'
+                      : 'truncate whitespace-nowrap'}
+                    style={descriptiveKey(header) ? {
+                      display: '-webkit-box',
+                      WebkitBoxOrient: 'vertical',
+                      WebkitLineClamp: 3
+                    } : undefined}
+                  >{isTrackingCell ? (
+                    <a href={trackingUrl} target="_blank" rel="noreferrer" className="inline-flex max-w-full items-center gap-1 text-primary hover:underline">
+                      <span className="truncate">{value}</span>
+                      <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                    </a>
+                  ) : value}</div>
+                </td>
+              })}
+                {report === 'reconciliation' && <td className="px-3 py-2">{row.status === 'pending' && hasPermission('reports.reconcile') ? <button onClick={() => close.mutate(String(row.id))} className="inline-flex items-center gap-1 rounded-lg border px-2 py-1"><LockKeyhole className="h-4 w-4" />Close</button> : String(row.status)}</td>}
+                {report === 'refunds' && <td className="px-3 py-2"><button onClick={() => setSelectedRefund(row)} className="inline-flex items-center gap-1 rounded-lg border px-2 py-1">Record Refund<ChevronRight className="h-4 w-4" /></button></td>}</tr>)}</tbody>
+            </table>}
+          {rawRows.length > 0 && <Pagination meta={pagination} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1) }} />}
+        </div>
+      )}
     </>}
 
     {selectedRefund && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="w-full max-w-md space-y-4 rounded-lg bg-background p-6 shadow-xl">

@@ -382,7 +382,12 @@ router.get('/product-demand', async (req, res) => {
           COALESCE(stock.available_stock,0) AS available_stock,
           ROUND(sales.units_sold::numeric / period.days, 2) AS average_daily_units,
           CEIL(sales.units_sold::numeric / period.days * 14)::int AS suggested_stock_14_days,
-          CEIL(sales.units_sold::numeric / period.days * 30)::int AS suggested_stock_30_days
+          CEIL(sales.units_sold::numeric / period.days * 30)::int AS suggested_stock_30_days,
+          CASE
+            WHEN (sales.units_sold::numeric / period.days) > 0
+            THEN ROUND(COALESCE(stock.available_stock,0) / (sales.units_sold::numeric / period.days), 1)
+            ELSE NULL
+          END AS days_of_stock_remaining
         FROM sales
         CROSS JOIN period
         LEFT JOIN stock ON stock.product_id=sales.product_id
@@ -400,6 +405,7 @@ router.get('/product-demand', async (req, res) => {
         suggested_stock_14_days,
         suggested_stock_30_days,
         GREATEST(suggested_stock_14_days - available_stock, 0)::int AS reorder_gap,
+        days_of_stock_remaining,
         CASE
           WHEN units_sold > 0 AND available_stock <= 0 THEN 'Stock now'
           WHEN suggested_stock_14_days - available_stock > 0 THEN 'Increase stock'
