@@ -144,7 +144,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
         />
       )}
 
-      <main className="app-main min-w-0 flex-1 overflow-auto overflow-x-hidden pb-32 lg:pb-0 lg:pl-0">
+      <main className="app-main min-w-0 flex-1 overflow-auto overflow-x-hidden pb-40 lg:pb-0 lg:pl-0">
         <div className="mobile-topbar sticky top-0 z-30 flex h-14 items-center justify-between border-b bg-card/95 px-3 backdrop-blur lg:hidden">
           <button
             onClick={() => setMobileOpen(true)}
