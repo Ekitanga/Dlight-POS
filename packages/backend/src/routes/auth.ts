@@ -7,14 +7,17 @@ const router = Router()
 const loginAttempts = new Map<string, { count: number; resetAt: number }>()
 const LOGIN_WINDOW_MS = 15 * 60 * 1000
 const LOGIN_LIMIT = 5
+const DEV_BYPASS_LOGIN_LIMIT = String(process.env.DEV_BYPASS_LOGIN_LIMIT || '').toLowerCase() === 'true'
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body
   const attemptKey = req.ip || req.socket.remoteAddress || 'unknown'
   const now = Date.now()
-  const attempt = loginAttempts.get(attemptKey)
-  if (attempt && attempt.resetAt > now && attempt.count >= LOGIN_LIMIT) {
-    return res.status(429).json({ error: { message: 'Too many login attempts. Try again later.' } })
+  if (!DEV_BYPASS_LOGIN_LIMIT) {
+    const attempt = loginAttempts.get(attemptKey)
+    if (attempt && attempt.resetAt > now && attempt.count >= LOGIN_LIMIT) {
+      return res.status(429).json({ error: { message: 'Too many login attempts. Try again later.' } })
+    }
   }
   if (!email || !password) {
     return res.status(400).json({ error: { message: 'Email and password are required' } })
