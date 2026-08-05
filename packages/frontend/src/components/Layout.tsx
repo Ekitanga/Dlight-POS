@@ -1,12 +1,12 @@
 import React from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { 
-  LayoutDashboard, 
-  Package, 
-  Users, 
-  Truck, 
-  CreditCard, 
-  Settings, 
+import {
+  LayoutDashboard,
+  Package,
+  Users,
+  Truck,
+  CreditCard,
+  Settings,
   LogOut,
   Store,
   PackageCheck,
@@ -19,7 +19,8 @@ import {
   Receipt,
   BarChart3,
   History,
-  Bell
+  Bell,
+  Wallet
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { ThemeToggle } from './ThemeToggle'
@@ -47,6 +48,7 @@ const navItems = [
   { path: '/reports', icon: BarChart3, label: 'Reports', permission: 'reports.view' },
   { path: '/audit', icon: History, label: 'Audit Logs', permission: 'audit.view' },
   { path: '/notifications', icon: Bell, label: 'Notifications', permission: 'notifications.view' },
+  { path: '/commissions', icon: Wallet, label: 'Commission', permission: 'commission.view' },
   { path: '/users', icon: UserCog, label: 'Users', permission: 'users.view' },
   { path: '/settings', icon: Settings, label: 'Settings', permission: 'settings.view' },
 ]
@@ -93,7 +95,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
         </div>
         
         <nav className="flex-1 overflow-y-auto px-3 py-4">
-          {navItems.filter(item => hasPermission(item.permission)).map((item) => {
+          {navItems.filter(item => {
+            if (item.permission === 'commission.view') {
+              return hasPermission('commission.view') || hasPermission('commission.own_view')
+            }
+            return hasPermission(item.permission)
+          }).map((item) => {
             const Icon = item.icon
             const active = location.pathname === item.path
             return (

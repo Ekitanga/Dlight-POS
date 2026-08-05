@@ -18,6 +18,7 @@ import { Couriers } from './pages/couriers/Couriers'
 import { Reports } from './pages/reports/Reports'
 import { AuditLogs } from './pages/audit/AuditLogs'
 import { Notifications } from './pages/notifications/Notifications'
+import { Commissions } from './pages/commissions/Commissions'
 
 function App() {
   const { user, hasPermission } = useAuthStore()
@@ -54,6 +55,7 @@ function App() {
         <Route path="/reports" element={hasPermission('reports.view') ? <Reports /> : <Navigate to="/orders" replace />} />
         <Route path="/audit" element={hasPermission('audit.view') ? <AuditLogs /> : <Navigate to="/orders" replace />} />
         <Route path="/notifications" element={isAdminOrOwner ? <Notifications /> : <Navigate to="/orders" replace />} />
+        <Route path="/commissions" element={hasPermission('commission.view') || hasPermission('commission.own_view') ? <Commissions /> : <Navigate to="/orders" replace />} />
       </Routes>
     </Layout>
   )
