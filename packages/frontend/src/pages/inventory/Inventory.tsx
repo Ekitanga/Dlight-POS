@@ -21,6 +21,40 @@ interface InventoryItem {
   reorder_level: number
   available_stock: number
   selling_price: number
+  cost_price: number
+}
+
+interface ValuationSummary {
+  shop_stock_value: number
+  available_stock_value: number
+  reserved_stock_value: number
+  damaged_stock_value: number
+  expected_sales_value: number
+  potential_gross_margin: number
+  missing_cost_count: number
+}
+
+interface CategoryRow {
+  category: string
+  product_count: number
+  total_units: number
+  available_units: number
+  reserved_units: number
+  damaged_units: number
+  cost_value: number
+  expected_sales: number
+  potential_margin: number
+}
+
+interface MissingCostProduct {
+  product_id: string
+  product_name: string
+  sku: string
+  cost_price: number
+  quantity: number
+  reserved_quantity: number
+  available_stock: number
+  category_name: string | null
 }
 
 interface MovementRow {
@@ -79,6 +113,11 @@ export function Inventory() {
     queryKey: ['inventory-lookup'],
     queryFn: async () => (await axios.get('/api/inventory')).data,
     enabled: showForm
+  })
+  const { data: valuation } = useQuery<{ summary: ValuationSummary; categoryBreakdown: CategoryRow[]; missingCostProducts: MissingCostProduct[] }>({
+    queryKey: ['inventory-valuation'],
+    queryFn: async () => (await axios.get('/api/inventory/valuation')).data,
+    staleTime: 30000
   })
 
   const { data: movementsPage } = useQuery<PaginatedResponse<MovementRow>>({
@@ -262,6 +301,119 @@ export function Inventory() {
         />
       </div>
       {lowStockOnly && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm"><strong>Low-stock filter active.</strong> Showing products at or below their reorder level.</div>}
+
+      {valuation && (
+        <div className="space-y-6">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+            <div className="rounded-lg border bg-card p-4">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Shop Stock at Cost</div>
+              <div className="mt-2 text-xl font-bold">{formatCurrency(valuation.summary.shop_stock_value)}</div>
+            </div>
+            <div className="rounded-lg border bg-card p-4">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Available Stock Value</div>
+              <div className="mt-2 text-xl font-bold">{formatCurrency(valuation.summary.available_stock_value)}</div>
+            </div>
+            <div className="rounded-lg border bg-card p-4">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Reserved Stock Value</div>
+              <div className="mt-2 text-xl font-bold">{formatCurrency(valuation.summary.reserved_stock_value)}</div>
+            </div>
+            <div className="rounded-lg border bg-card p-4">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Expected Sales Value</div>
+              <div className="mt-2 text-xl font-bold">{formatCurrency(valuation.summary.expected_sales_value)}</div>
+            </div>
+            <div className="rounded-lg border bg-card p-4">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Potential Gross Margin</div>
+              <div className="mt-2 text-xl font-bold text-green-600">{formatCurrency(valuation.summary.potential_gross_margin)}</div>
+            </div>
+            <div className="rounded-lg border bg-card p-4">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Damaged Stock Value</div>
+              <div className="mt-2 text-xl font-bold text-destructive">{formatCurrency(valuation.summary.damaged_stock_value)}</div>
+            </div>
+          </div>
+
+          {valuation.summary.missing_cost_count > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-amber-600" />
+                <div>
+                  <strong className="text-amber-800">Products Missing Cost Price:</strong>
+                  <span className="text-amber-700 ml-1">{valuation.summary.missing_cost_count} product{valuation.summary.missing_cost_count !== 1 ? 's' : ''} with stock have no cost price set. Their value is excluded from totals below.</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {valuation.categoryBreakdown.length > 0 && (
+            <div className="rounded-lg border bg-card overflow-hidden">
+              <div className="px-4 py-3 border-b">
+                <h3 className="font-semibold">Stock Value By Category</h3>
+                <p className="text-xs text-muted-foreground mt-1">Breakdown of shop stock at cost, expected sales, and potential margin</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted">
+                    <tr>
+                      <th className="text-left px-4 py-3">Category</th>
+                      <th className="text-right px-4 py-3">Products</th>
+                      <th className="text-right px-4 py-3">Total Units</th>
+                      <th className="text-right px-4 py-3">Cost Value</th>
+                      <th className="text-right px-4 py-3">Expected Sales</th>
+                      <th className="text-right px-4 py-3">Potential Margin</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {valuation.categoryBreakdown.map((row, idx) => (
+                      <tr key={idx} className="border-t align-top hover:bg-muted/40">
+                        <td className="px-4 py-3 font-medium">{row.category}</td>
+                        <td className="px-4 py-3 text-right">{row.product_count}</td>
+                        <td className="px-4 py-3 text-right">{Number(row.total_units).toLocaleString()}</td>
+                        <td className="px-4 py-3 text-right font-medium">{formatCurrency(row.cost_value)}</td>
+                        <td className="px-4 py-3 text-right">{formatCurrency(row.expected_sales)}</td>
+                        <td className="px-4 py-3 text-right text-green-600 font-medium">{formatCurrency(row.potential_margin)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {valuation.missingCostProducts.length > 0 && (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/5 overflow-hidden">
+              <div className="px-4 py-3 border-b border-destructive/20">
+                <h3 className="font-semibold text-destructive">Products Missing Cost Price</h3>
+                <p className="text-xs text-muted-foreground mt-1">These products are excluded from stock valuation because their cost is zero or unset</p>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted">
+                    <tr>
+                      <th className="text-left px-4 py-3">Product</th>
+                      <th className="text-left px-4 py-3">SKU</th>
+                      <th className="text-left px-4 py-3">Category</th>
+                      <th className="text-right px-4 py-3">Cost Price</th>
+                      <th className="text-right px-4 py-3">In Stock</th>
+                      <th className="text-right px-4 py-3">Available</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {valuation.missingCostProducts.map((product) => (
+                      <tr key={product.product_id} className="border-t align-top hover:bg-muted/40">
+                        <td className="px-4 py-3 font-medium">{product.product_name}</td>
+                        <td className="px-4 py-3 text-muted-foreground">{product.sku || '-'}</td>
+                        <td className="px-4 py-3">{product.category_name || '-'}</td>
+                        <td className="px-4 py-3 text-right text-destructive font-medium">{formatCurrency(product.cost_price)}</td>
+                        <td className="px-4 py-3 text-right">{product.quantity}</td>
+                        <td className="px-4 py-3 text-right">{product.available_stock}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {isLoading ? (
         <div className="space-y-2">

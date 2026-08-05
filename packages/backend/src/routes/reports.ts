@@ -99,7 +99,7 @@ router.get('/overview', async (req, res) => {
           COALESCE((SELECT SUM(cc.amount) FROM customer_credits cc),0) AS customer_credit,
           COALESCE((SELECT SUM(cc.cod_amount - cc.remitted_amount) FROM cod_collections cc
             WHERE cc.status NOT IN ('closed','remitted','returned')),0) AS pending_cod,
-          COALESCE((SELECT SUM(GREATEST(i.quantity-i.reserved_quantity,0) * p.cost_price)
+          COALESCE((SELECT SUM(i.quantity * p.cost_price)
             FROM inventory i JOIN products p ON p.id=i.product_id
             WHERE p.deleted_at IS NULL AND p.is_active=TRUE),0) AS inventory_value
       `, params),

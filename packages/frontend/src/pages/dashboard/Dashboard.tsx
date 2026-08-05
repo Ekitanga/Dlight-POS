@@ -38,6 +38,13 @@ interface Stats {
   lowStockCount: number
   grossProfit: number
   netProfit: number
+  shopStockValue: number
+  availableStockValue: number
+  reservedStockValue: number
+  damagedStockValue: number
+  expectedSalesValue: number
+  potentialGrossMargin: number
+  missingCostCount: number
 }
 
 interface StatsCardProps {
@@ -154,6 +161,13 @@ export function Dashboard() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+        <StatsCard
+          title="Shop Stock Value"
+          subtitle="Total purchase cost of all shop-owned stock"
+          value={formatMoney(stats?.shopStockValue)}
+          icon={<Package className="h-6 w-6" />}
+          onClick={hasPermission('inventory.view') ? () => navigate('/inventory') : undefined}
+        />
         <StatsCard
           title="Today's Operating Profit"
           subtitle="Today's sales profit after delivery costs and recognized expenses"

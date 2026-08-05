@@ -66,6 +66,29 @@ router.get('/stats', async (req, res) => {
         (SELECT COUNT(*) FROM products p JOIN inventory i ON p.id = i.product_id
           WHERE p.deleted_at IS NULL AND p.is_active = TRUE
             AND (i.quantity - i.reserved_quantity) <= p.reorder_level) as low_stock_count,
+        (SELECT COALESCE(SUM(i.quantity * p.cost_price), 0)
+          FROM inventory i JOIN products p ON p.id = i.product_id
+          WHERE p.deleted_at IS NULL AND p.is_active = TRUE) as shop_stock_value,
+        (SELECT COALESCE(SUM(GREATEST(i.quantity - i.reserved_quantity, 0) * p.cost_price), 0)
+          FROM inventory i JOIN products p ON p.id = i.product_id
+          WHERE p.deleted_at IS NULL AND p.is_active = TRUE) as available_stock_value,
+        (SELECT COALESCE(SUM(i.reserved_quantity * p.cost_price), 0)
+          FROM inventory i JOIN products p ON p.id = i.product_id
+          WHERE p.deleted_at IS NULL AND p.is_active = TRUE) as reserved_stock_value,
+        (SELECT COALESCE(SUM(i.damaged_quantity * p.cost_price), 0)
+          FROM inventory i JOIN products p ON p.id = i.product_id
+          WHERE p.deleted_at IS NULL AND p.is_active = TRUE) as damaged_stock_value,
+        (SELECT COALESCE(SUM(GREATEST(i.quantity - i.reserved_quantity, 0) * p.selling_price), 0)
+          FROM inventory i JOIN products p ON p.id = i.product_id
+          WHERE p.deleted_at IS NULL AND p.is_active = TRUE) as expected_sales_value,
+        (SELECT COALESCE(SUM(
+          GREATEST(i.quantity - i.reserved_quantity, 0) * p.selling_price
+          - GREATEST(i.quantity - i.reserved_quantity, 0) * p.cost_price
+        ), 0)
+          FROM inventory i JOIN products p ON p.id = i.product_id
+          WHERE p.deleted_at IS NULL AND p.is_active = TRUE) as potential_gross_margin,
+        (SELECT COUNT(*) FROM products p JOIN inventory i ON p.id = i.product_id
+          WHERE p.deleted_at IS NULL AND p.is_active = TRUE AND p.cost_price <= 0 AND i.quantity > 0) as missing_cost_count,
         (SELECT COALESCE(SUM(
           o2.subtotal + ${o2Income}
           - COALESCE((SELECT SUM(CASE WHEN oi.fulfillment_type = 'internal' THEN oi.unit_cost * oi.internal_quantity ELSE oi.supplier_cost * oi.supplier_quantity END) FROM order_items oi WHERE oi.order_id = o2.id), 0)
@@ -116,7 +139,14 @@ router.get('/stats', async (req, res) => {
       riderPayables: parseFloat(row.rider_payables),
       lowStockCount: parseInt(row.low_stock_count),
       grossProfit: parseFloat(row.gross_profit),
-      netProfit: parseFloat(row.net_profit)
+      netProfit: parseFloat(row.net_profit),
+      shopStockValue: parseFloat(row.shop_stock_value),
+      availableStockValue: parseFloat(row.available_stock_value),
+      reservedStockValue: parseFloat(row.reserved_stock_value),
+      damagedStockValue: parseFloat(row.damaged_stock_value),
+      expectedSalesValue: parseFloat(row.expected_sales_value),
+      potentialGrossMargin: parseFloat(row.potential_gross_margin),
+      missingCostCount: parseInt(row.missing_cost_count)
     })
   } catch (err) {
     console.error('Dashboard error:', err)
@@ -139,7 +169,14 @@ router.get('/stats', async (req, res) => {
       riderPayables: 0,
       lowStockCount: 0,
       grossProfit: 0,
-      netProfit: 0
+      netProfit: 0,
+      shopStockValue: 0,
+      availableStockValue: 0,
+      reservedStockValue: 0,
+      damagedStockValue: 0,
+      expectedSalesValue: 0,
+      potentialGrossMargin: 0,
+      missingCostCount: 0
     })
   }
 })

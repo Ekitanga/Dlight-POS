@@ -245,4 +245,73 @@ router.get('/', async (req, res) => {
   }
 })
 
+router.get('/valuation', async (req, res) => {
+  try {
+    const summary = await query(`
+      SELECT
+        COALESCE(SUM(i.quantity * p.cost_price), 0) AS shop_stock_value,
+        COALESCE(SUM(GREATEST(i.quantity - i.reserved_quantity, 0) * p.cost_price), 0) AS available_stock_value,
+        COALESCE(SUM(i.reserved_quantity * p.cost_price), 0) AS reserved_stock_value,
+        COALESCE(SUM(i.damaged_quantity * p.cost_price), 0) AS damaged_stock_value,
+        COALESCE(SUM(GREATEST(i.quantity - i.reserved_quantity, 0) * p.selling_price), 0) AS expected_sales_value,
+        COALESCE(SUM(
+          GREATEST(i.quantity - i.reserved_quantity, 0) * p.selling_price
+          - GREATEST(i.quantity - i.reserved_quantity, 0) * p.cost_price
+        ), 0) AS potential_gross_margin,
+        COUNT(CASE WHEN p.cost_price <= 0 AND i.quantity > 0 THEN 1 END) AS missing_cost_count
+      FROM inventory i
+      JOIN products p ON p.id = i.product_id
+      WHERE p.deleted_at IS NULL AND p.is_active = TRUE
+    `)
+
+    const categoryBreakdown = await query(`
+      SELECT
+        COALESCE(c.name, 'Uncategorized') AS category,
+        COUNT(DISTINCT p.id) AS product_count,
+        SUM(i.quantity) AS total_units,
+        SUM(GREATEST(i.quantity - i.reserved_quantity, 0)) AS available_units,
+        SUM(i.reserved_quantity) AS reserved_units,
+        SUM(i.damaged_quantity) AS damaged_units,
+        COALESCE(SUM(i.quantity * p.cost_price), 0) AS cost_value,
+        COALESCE(SUM(GREATEST(i.quantity - i.reserved_quantity, 0) * p.selling_price), 0) AS expected_sales,
+        COALESCE(SUM(
+          GREATEST(i.quantity - i.reserved_quantity, 0) * p.selling_price
+          - GREATEST(i.quantity - i.reserved_quantity, 0) * p.cost_price
+        ), 0) AS potential_margin
+      FROM inventory i
+      JOIN products p ON p.id = i.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.deleted_at IS NULL AND p.is_active = TRUE
+      GROUP BY COALESCE(c.name, 'Uncategorized')
+      ORDER BY cost_value DESC
+    `)
+
+    const missingCostProducts = await query(`
+      SELECT
+        p.id AS product_id,
+        p.name AS product_name,
+        p.sku,
+        p.cost_price,
+        i.quantity,
+        i.reserved_quantity,
+        (i.quantity - i.reserved_quantity) AS available_stock,
+        c.name AS category_name
+      FROM inventory i
+      JOIN products p ON p.id = i.product_id
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.deleted_at IS NULL AND p.is_active = TRUE
+        AND p.cost_price <= 0 AND i.quantity > 0
+      ORDER BY i.quantity DESC, p.name
+    `)
+
+    res.json({
+      summary: summary.rows[0],
+      categoryBreakdown: categoryBreakdown.rows,
+      missingCostProducts: missingCostProducts.rows
+    })
+  } catch {
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
 export { router as inventoryRoutes }
