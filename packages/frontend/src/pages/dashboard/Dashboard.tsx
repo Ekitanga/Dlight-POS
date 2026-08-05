@@ -15,7 +15,9 @@ import {
   AlertCircle,
   TrendingUp,
   TrendingDown,
-  BarChart3
+  BarChart3,
+  Wallet,
+  Users
 } from 'lucide-react'
 
 interface Stats {
@@ -107,6 +109,22 @@ export function Dashboard() {
       const response = await axios.get(`/api/dashboard/stats?${params.toString()}`)
       return response.data
     }
+  })
+
+  const { data: commissionSummary } = useQuery({
+    queryKey: ['commission-own-summary'],
+    queryFn: async () => (await axios.get('/api/commissions/own/summary')).data,
+    enabled: hasPermission('commission.own_view')
+  })
+
+  const { data: managementCommission } = useQuery({
+    queryKey: ['management-commission', dateFrom, dateTo],
+    queryFn: async () => {
+      const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo })
+      const response = await axios.get(`/api/commissions/summary?${params.toString()}`)
+      return response.data
+    },
+    enabled: hasPermission('commission.view')
   })
   const financialMax = Math.max(stats?.periodSales || 0, stats?.periodExpenses || 0, 1)
   const orderMax = Math.max(stats?.totalOrders || 0, stats?.periodOrders || 0, 1)
@@ -266,6 +284,28 @@ export function Dashboard() {
           onClick={hasPermission('reports.view') ? () => navigate(reportUrl('sales', 'profit')) : undefined}
         />
       </div>
+
+      {(hasPermission('commission.own_view') || hasPermission('commission.view')) && (
+        <section className="space-y-3">
+          <div><h2 className="text-lg font-semibold">Commission</h2><p className="text-sm text-muted-foreground">Sales commission programme overview</p></div>
+          {hasPermission('commission.own_view') && commissionSummary && (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <StatsCard title="Gross Earned" value={formatMoney(commissionSummary.grossEarned)} icon={<Wallet className="h-5 w-5" />} />
+              <StatsCard title="Reversals" value={formatMoney(commissionSummary.reversals)} icon={<TrendingDown className="h-5 w-5" />} />
+              <StatsCard title="Net Commission" value={formatMoney(commissionSummary.netCommission)} icon={<TrendingUp className="h-5 w-5" />} />
+              <StatsCard title="Outstanding" value={formatMoney(commissionSummary.outstandingAmount)} icon={<CreditCard className="h-5 w-5" />} />
+            </div>
+          )}
+          {hasPermission('commission.view') && managementCommission && (
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <StatsCard title="Total Earned" value={formatMoney(managementCommission.totalEarned)} icon={<Wallet className="h-5 w-5" />} />
+              <StatsCard title="Reversals" value={formatMoney(managementCommission.totalReversals)} icon={<TrendingDown className="h-5 w-5" />} />
+              <StatsCard title="Net Commission" value={formatMoney(managementCommission.netCommission)} icon={<TrendingUp className="h-5 w-5" />} />
+              <StatsCard title="Salespeople" value={managementCommission.salespersonCount.toString()} icon={<Users className="h-5 w-5" />} />
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <button type="button" onClick={hasPermission('reports.view') ? () => navigate(reportUrl('sales', 'sales')) : undefined} disabled={!hasPermission('reports.view')} className="rounded-xl border bg-card p-6 text-left transition-all enabled:hover:border-primary/50 enabled:hover:shadow-sm disabled:cursor-default">
