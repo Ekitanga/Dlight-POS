@@ -22,7 +22,9 @@ for (const file of [
   'database/schema.sql',
   'database/production_stabilization_phase1.sql',
   'database/permissions_migration.sql',
-  'database/production_stabilization_permissions.sql'
+  'database/production_stabilization_permissions.sql',
+  'database/commission_tables_migration.sql',
+  'database/commission_permissions_migration.sql'
 ]) {
   await db.query(await fs.readFile(path.join(root, file), 'utf8'))
 }
@@ -53,6 +55,16 @@ await db.query(
 await db.query(
   `INSERT INTO settings (company_name, currency, tax_rate, order_prefix)
    VALUES ('Dlight Phase 6', 'KES', 0, 'TST')`
+)
+await db.query(
+  `INSERT INTO commission_programmes (status, effective_from, created_by)
+   VALUES ('active', NOW(), $1)`,
+  [adminUser.id]
+)
+await db.query(
+  `INSERT INTO commission_rates (programme_id, rate_per_item, effective_from, scope_type, created_by)
+   SELECT id, 50, NOW(), 'global', $1 FROM commission_programmes LIMIT 1`,
+  [adminUser.id]
 )
 
 const supplier = (await db.query(

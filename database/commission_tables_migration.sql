@@ -1,0 +1,85 @@
+CREATE TABLE commission_programmes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    status VARCHAR(20) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspended', 'disabled')),
+    effective_from TIMESTAMP NOT NULL DEFAULT NOW(),
+    effective_to TIMESTAMP,
+    reason TEXT,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE commission_rates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    programme_id UUID NOT NULL REFERENCES commission_programmes(id),
+    rate_per_item NUMERIC(12,2) NOT NULL,
+    effective_from TIMESTAMP NOT NULL DEFAULT NOW(),
+    effective_to TIMESTAMP,
+    scope_type VARCHAR(20) NOT NULL DEFAULT 'global' CHECK (scope_type IN ('global', 'category', 'product', 'salesperson')),
+    scope_id UUID,
+    scope_name VARCHAR(255),
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE commission_eligibility (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    programme_id UUID NOT NULL REFERENCES commission_programmes(id),
+    scope_type VARCHAR(20) NOT NULL CHECK (scope_type IN ('category', 'product')),
+    scope_id UUID NOT NULL,
+    scope_name VARCHAR(255) NOT NULL,
+    is_eligible BOOLEAN NOT NULL DEFAULT true,
+    effective_from TIMESTAMP NOT NULL DEFAULT NOW(),
+    effective_to TIMESTAMP,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE commission_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    programme_id UUID NOT NULL REFERENCES commission_programmes(id),
+    salesperson_id UUID NOT NULL REFERENCES users(id),
+    order_id UUID NOT NULL REFERENCES orders(id),
+    order_item_id UUID NOT NULL REFERENCES order_items(id),
+    product_id UUID NOT NULL REFERENCES products(id),
+    category_id UUID REFERENCES categories(id),
+    eligible_quantity INTEGER NOT NULL,
+    rate_per_item NUMERIC(12,2) NOT NULL,
+    amount NUMERIC(12,2) NOT NULL,
+    transaction_type VARCHAR(20) NOT NULL CHECK (transaction_type IN ('earned', 'reversal', 'manual_add', 'manual_deduct', 'carry_forward', 'payment')),
+    transaction_status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (transaction_status IN ('pending', 'approved', 'paid', 'reversed')),
+    qualification_date DATE NOT NULL,
+    commission_month DATE NOT NULL,
+    original_transaction_id UUID REFERENCES commission_transactions(id),
+    reference_type VARCHAR(50),
+    reference_id UUID,
+    reason TEXT,
+    approved_by UUID REFERENCES users(id),
+    approved_at TIMESTAMP,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE commission_payments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    salesperson_id UUID NOT NULL REFERENCES users(id),
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    total_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+    paid_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+    payment_method payment_method NOT NULL,
+    reference VARCHAR(255),
+    paid_by UUID REFERENCES users(id),
+    paid_at TIMESTAMP,
+    notes TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'partial', 'paid')),
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX uq_commission_transaction_order_item ON commission_transactions(order_item_id, transaction_type) WHERE transaction_type = 'earned' AND transaction_status <> 'reversed';
+CREATE INDEX idx_commission_transactions_salesperson ON commission_transactions(salesperson_id);
+CREATE INDEX idx_commission_transactions_month ON commission_transactions(commission_month);
+CREATE INDEX idx_commission_transactions_order ON commission_transactions(order_id);
+CREATE INDEX idx_commission_payments_salesperson ON commission_payments(salesperson_id);
+CREATE INDEX idx_commission_payments_period ON commission_payments(period_start, period_end);

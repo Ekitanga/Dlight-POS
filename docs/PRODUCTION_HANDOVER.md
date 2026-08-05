@@ -170,6 +170,8 @@ psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\schema.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\permissions_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\production_stabilization_permissions.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\order_edit_permission_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_tables_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_permissions_migration.sql
 ```
 
 Then create the first owner with the controlled seed process or emergency reset utility. `SEED_ADMIN_PASSWORD` must be at least 12 characters if the seed is used.
@@ -197,6 +199,8 @@ psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\permissions_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\production_stabilization_permissions.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\order_edit_permission_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\cod_delivery_fee_split.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_tables_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_permissions_migration.sql
 ```
 
 Do not rerun `production_stabilization_phase1.sql` after it succeeds; constraint creation is intentionally one-time.

@@ -5,6 +5,7 @@ import { auditMiddleware } from '../middleware/audit.js'
 import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 import { logAudit } from '../utils/audit.js'
 import { emitNotification } from '../utils/notifications.js'
+import { evaluateOrderItem, earnCommission, reverseCommission } from '../services/commission.js'
 
 const router = Router()
 
@@ -1183,6 +1184,7 @@ router.put('/:id/status', async (req, res) => {
 
       const previousStatus = order.status
       const normalizedPreviousStatus = normalizedWorkflowStatus(previousStatus)
+      const now = new Date().toISOString()
       const exceptionTransition =
         status === 'cancelled'
           ? ['pending', 'confirmed'].includes(normalizedPreviousStatus)
@@ -1428,6 +1430,33 @@ router.put('/:id/status', async (req, res) => {
         entityType: 'order',
         entityId: id
       }).catch(() => {})
+
+      const enteringCompleted = ['delivered', 'collected_paid'].includes(status) && !['delivered', 'collected_paid'].includes(previousStatus)
+      if (enteringCompleted || enteringClosedState) {
+        const items = await client.query('SELECT * FROM order_items WHERE order_id = $1 FOR UPDATE', [id])
+        for (const item of items.rows) {
+          if (enteringCompleted) {
+            const evaluation = await evaluateOrderItem(
+              id, item.id, status, order.delivery_type, order.courier_payment_type,
+              toNumber(order.paid_amount), toNumber(order.total_amount),
+              item.product_id, null, toNumber(item.quantity),
+              order.created_by, now.slice(0, 10)
+            )
+            if (evaluation.eligible) {
+              await earnCommission(id, item.id, item.product_id, null, toNumber(item.quantity), order.created_by, now.slice(0, 10), req.user?.userId || null).catch(() => {})
+            }
+          }
+          if (enteringClosedState) {
+            const existingResult = await client.query(
+              `SELECT id FROM commission_transactions WHERE order_item_id = $1 AND transaction_type = 'earned' AND transaction_status <> 'reversed' FOR UPDATE`,
+              [item.id]
+            )
+            for (const existing of existingResult.rows) {
+              await reverseCommission(existing.id, id, item.id, toNumber(item.quantity), `Order ${status}`, req.user?.userId || null).catch(() => {})
+            }
+          }
+        }
+      }
 
       return result.rows[0]
     })
