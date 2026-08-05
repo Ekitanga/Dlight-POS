@@ -13,11 +13,9 @@ router.post('/login', async (req, res) => {
   const { email, password } = req.body
   const attemptKey = req.ip || req.socket.remoteAddress || 'unknown'
   const now = Date.now()
-  if (!DEV_BYPASS_LOGIN_LIMIT) {
-    const attempt = loginAttempts.get(attemptKey)
-    if (attempt && attempt.resetAt > now && attempt.count >= LOGIN_LIMIT) {
-      return res.status(429).json({ error: { message: 'Too many login attempts. Try again later.' } })
-    }
+  const attempt = DEV_BYPASS_LOGIN_LIMIT ? undefined : loginAttempts.get(attemptKey)
+  if (!DEV_BYPASS_LOGIN_LIMIT && attempt && attempt.resetAt > now && attempt.count >= LOGIN_LIMIT) {
+    return res.status(429).json({ error: { message: 'Too many login attempts. Try again later.' } })
   }
   if (!email || !password) {
     return res.status(400).json({ error: { message: 'Email and password are required' } })
@@ -32,17 +30,23 @@ router.post('/login', async (req, res) => {
     const user = result.rows[0]
     
     if (!user) {
-      loginAttempts.set(attemptKey, { count: (attempt?.resetAt || 0) > now ? attempt!.count + 1 : 1, resetAt: now + LOGIN_WINDOW_MS })
+      if (!DEV_BYPASS_LOGIN_LIMIT) {
+        loginAttempts.set(attemptKey, { count: (attempt?.resetAt || 0) > now ? (attempt?.count || 0) + 1 : 1, resetAt: now + LOGIN_WINDOW_MS })
+      }
       return res.status(401).json({ error: { message: 'Invalid credentials' } })
     }
     
     const valid = await bcrypt.compare(password, user.password_hash)
     
     if (!valid) {
-      loginAttempts.set(attemptKey, { count: (attempt?.resetAt || 0) > now ? attempt!.count + 1 : 1, resetAt: now + LOGIN_WINDOW_MS })
+      if (!DEV_BYPASS_LOGIN_LIMIT) {
+        loginAttempts.set(attemptKey, { count: (attempt?.resetAt || 0) > now ? (attempt?.count || 0) + 1 : 1, resetAt: now + LOGIN_WINDOW_MS })
+      }
       return res.status(401).json({ error: { message: 'Invalid credentials' } })
     }
-    loginAttempts.delete(attemptKey)
+    if (!DEV_BYPASS_LOGIN_LIMIT) {
+      loginAttempts.delete(attemptKey)
+    }
     
     const tokens = generateTokens({
       userId: user.id,
