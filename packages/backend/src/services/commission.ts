@@ -742,7 +742,7 @@ export async function evaluateOrdersForDateRange(
     userId,
     action: 'commission_retroactive_evaluation',
     entityType: 'commission_rebuild',
-    entityId: `${dateFrom}__${dateTo}`,
+    entityId: null,
     newValues: {
       date_from: dateFrom,
       date_to: dateTo,
