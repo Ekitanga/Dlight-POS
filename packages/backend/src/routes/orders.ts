@@ -1433,17 +1433,17 @@ router.put('/:id/status', async (req, res) => {
 
       const enteringCompleted = ['delivered', 'collected_paid'].includes(status) && !['delivered', 'collected_paid'].includes(previousStatus)
       if (enteringCompleted || enteringClosedState) {
-        const items = await client.query('SELECT * FROM order_items WHERE order_id = $1 FOR UPDATE', [id])
+        const items = await client.query('SELECT oi.*, p.category_id FROM order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = $1 FOR UPDATE', [id])
         for (const item of items.rows) {
           if (enteringCompleted) {
             const evaluation = await evaluateOrderItem(
               id, item.id, status, order.delivery_type, order.courier_payment_type,
               toNumber(order.paid_amount), toNumber(order.total_amount),
-              item.product_id, null, toNumber(item.quantity),
+              item.product_id, item.category_id, toNumber(item.quantity),
               order.created_by, now.slice(0, 10)
             )
             if (evaluation.eligible) {
-              await earnCommission(id, item.id, item.product_id, null, toNumber(item.quantity), order.created_by, now.slice(0, 10), req.user?.userId || null).catch(() => {})
+              await earnCommission(id, item.id, item.product_id, item.category_id, toNumber(item.quantity), order.created_by, now.slice(0, 10), req.user?.userId || null).catch(() => {})
             }
           }
           if (enteringClosedState) {

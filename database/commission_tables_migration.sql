@@ -83,3 +83,6 @@ CREATE INDEX idx_commission_transactions_month ON commission_transactions(commis
 CREATE INDEX idx_commission_transactions_order ON commission_transactions(order_id);
 CREATE INDEX idx_commission_payments_salesperson ON commission_payments(salesperson_id);
 CREATE INDEX idx_commission_payments_period ON commission_payments(period_start, period_end);
+CREATE INDEX idx_commission_programmes_active_dates ON commission_programmes(status, effective_from, effective_to);
+CREATE INDEX idx_commission_rates_programme_dates ON commission_rates(programme_id, effective_from, effective_to);
+CREATE INDEX idx_commission_eligibility_programme_lookup ON commission_eligibility(programme_id, scope_type, scope_id, effective_from, effective_to);

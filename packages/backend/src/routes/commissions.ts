@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { query } from '../db/index.js'
 import { authMiddleware, requireModulePermission, requireAdmin } from '../middleware/auth.js'
+import { logAudit } from '../utils/audit.js'
 import {
   getProgrammeHistory,
   updateProgrammeStatus,
@@ -14,7 +15,8 @@ import {
   getManagementCommissionBySalesperson,
   approveCommission,
   payCommission,
-  manualAdjustment
+  manualAdjustment,
+  evaluateOrdersForDateRange
 } from '../services/commission.js'
 
 const router = Router()
@@ -206,6 +208,70 @@ router.post('/adjust', requireModulePermission('commission'), async (req, res) =
     }
     const result = await manualAdjustment(salesperson_id, amount, adjustment_type, reason, order_id || null, order_item_id || null, req.user?.userId || null)
     res.status(201).json(result)
+  } catch {
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
+router.put('/rates/:id', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+  try {
+    const { id } = req.params
+    const { rate_per_item, effective_from, effective_to } = req.body
+    if (rate_per_item === undefined || rate_per_item === null || rate_per_item <= 0) {
+      return res.status(400).json({ error: { message: 'Valid rate_per_item is required' } })
+    }
+    if (!effective_from) {
+      return res.status(400).json({ error: { message: 'effective_from is required' } })
+    }
+    const existing = await query('SELECT id FROM commission_rates WHERE id = $1', [id])
+    if (!existing.rows.length) {
+      return res.status(404).json({ error: { message: 'Rate not found' } })
+    }
+    const result = await query(
+      `UPDATE commission_rates SET rate_per_item = $1, effective_from = $2, effective_to = $3 WHERE id = $4 RETURNING *`,
+      [rate_per_item, effective_from, effective_to || null, id]
+    )
+    await logAudit({
+      userId: req.user?.userId || null,
+      action: 'commission_rate_updated',
+      entityType: 'commission_rate',
+      entityId: id,
+      newValues: { rate_per_item, effective_from, effective_to }
+    })
+    res.json(result.rows[0])
+  } catch {
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
+router.delete('/rates/:id', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+  try {
+    const { id } = req.params
+    const existing = await query('SELECT id FROM commission_rates WHERE id = $1', [id])
+    if (!existing.rows.length) {
+      return res.status(404).json({ error: { message: 'Rate not found' } })
+    }
+    await query('DELETE FROM commission_rates WHERE id = $1', [id])
+    await logAudit({
+      userId: req.user?.userId || null,
+      action: 'commission_rate_deleted',
+      entityType: 'commission_rate',
+      entityId: id
+    })
+    res.status(204).send()
+  } catch {
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
+router.post('/retroactive', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+  try {
+    const { date_from, date_to } = req.body
+    if (!date_from || !date_to) {
+      return res.status(400).json({ error: { message: 'date_from and date_to are required (YYYY-MM-DD)' } })
+    }
+    const result = await evaluateOrdersForDateRange(date_from, date_to, req.user?.userId || null)
+    res.json(result)
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }

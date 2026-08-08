@@ -44,14 +44,19 @@ export interface CommissionEligibility {
 }
 
 export async function getActiveProgramme(): Promise<CommissionProgramme | null> {
+  return getProgrammeAsOf(new Date().toISOString())
+}
+
+export async function getProgrammeAsOf(asOfDate: string): Promise<CommissionProgramme | null> {
   const result = await query(
     `SELECT id, status, effective_from, effective_to, reason, created_by, created_at, updated_at
      FROM commission_programmes
      WHERE status = 'active'
-       AND effective_from <= NOW()
-       AND (effective_to IS NULL OR effective_to > NOW())
+       AND effective_from < $1::date + INTERVAL '1 day'
+       AND (effective_to IS NULL OR effective_to >= $1::date)
      ORDER BY effective_from DESC
-     LIMIT 1`
+     LIMIT 1`,
+    [asOfDate]
   )
   return result.rows[0] || null
 }
@@ -89,13 +94,14 @@ export async function updateProgrammeStatus(
   return result.rows[0]
 }
 
-export async function getRateForItem(programmeId: string, productId: string, categoryId: string | null, salespersonId: string): Promise<number> {
+export async function getRateForItem(programmeId: string, productId: string, categoryId: string | null, salespersonId: string, asOfDate?: string): Promise<number> {
+  const now = asOfDate || new Date().toISOString()
   const result = await query(
     `SELECT rate_per_item
      FROM commission_rates
      WHERE programme_id = $1
-       AND effective_from <= NOW()
-       AND (effective_to IS NULL OR effective_to > NOW())
+       AND effective_from < $5::date + INTERVAL '1 day'
+       AND (effective_to IS NULL OR effective_to >= $5::date)
        AND (
          scope_type = 'global'
          OR (scope_type = 'product' AND scope_id = $2)
@@ -109,7 +115,7 @@ export async function getRateForItem(programmeId: string, productId: string, cat
        WHEN 'global' THEN 4
      END
      LIMIT 1`,
-    [programmeId, productId, categoryId, salespersonId]
+    [programmeId, productId, categoryId, salespersonId, now]
   )
   return result.rows[0] ? toNumber(result.rows[0].rate_per_item) : 0
 }
@@ -143,19 +149,21 @@ export async function setRate(
 export async function getEligibility(
   programmeId: string,
   scopeType: 'category' | 'product',
-  scopeId: string
+  scopeId: string,
+  asOfDate?: string
 ): Promise<CommissionEligibility | null> {
+  const now = asOfDate || new Date().toISOString()
   const result = await query(
     `SELECT id, programme_id, scope_type, scope_id, scope_name, is_eligible, effective_from, effective_to, created_by, created_at
      FROM commission_eligibility
      WHERE programme_id = $1
        AND scope_type = $2
        AND scope_id = $3
-       AND effective_from <= NOW()
-       AND (effective_to IS NULL OR effective_to > NOW())
+       AND effective_from < $4::date + INTERVAL '1 day'
+       AND (effective_to IS NULL OR effective_to >= $4::date)
      ORDER BY effective_from DESC
      LIMIT 1`,
-    [programmeId, scopeType, scopeId]
+    [programmeId, scopeType, scopeId, now]
   )
   return result.rows[0] || null
 }
@@ -198,9 +206,9 @@ export async function evaluateOrderItem(
   categoryId: string | null,
   quantity: number,
   salespersonId: string | null,
-  _qualificationDate: string
+  qualificationDate: string
 ): Promise<{ eligible: boolean; reason?: string }> {
-  const programme = await getActiveProgramme()
+  const programme = await getProgrammeAsOf(qualificationDate)
   if (!programme) {
     return { eligible: false, reason: 'No active commission programme' }
   }
@@ -213,9 +221,9 @@ export async function evaluateOrderItem(
     return { eligible: false, reason: 'Zero or negative quantity' }
   }
 
-  const eligibility = await getEligibility(programme.id, 'product', productId)
+  const eligibility = await getEligibility(programme.id, 'product', productId, qualificationDate)
   if (!eligibility) {
-    const catEligibility = categoryId ? await getEligibility(programme.id, 'category', categoryId) : null
+    const catEligibility = categoryId ? await getEligibility(programme.id, 'category', categoryId, qualificationDate) : null
     if (!catEligibility || !catEligibility.is_eligible) {
       return { eligible: false, reason: 'Product or category not eligible' }
     }
@@ -223,7 +231,7 @@ export async function evaluateOrderItem(
     return { eligible: false, reason: 'Product explicitly ineligible' }
   }
 
-  const rate = await getRateForItem(programme.id, productId, categoryId, salespersonId)
+  const rate = await getRateForItem(programme.id, productId, categoryId, salespersonId, qualificationDate)
   if (rate <= 0) {
     return { eligible: false, reason: 'No applicable commission rate' }
   }
@@ -262,10 +270,10 @@ export async function earnCommission(
   qualificationDate: string,
   createdBy: string | null
 ): Promise<{ transactionId: string; amount: number } | null> {
-  const programme = await getActiveProgramme()
+  const programme = await getProgrammeAsOf(qualificationDate)
   if (!programme) return null
 
-  const rate = await getRateForItem(programme.id, productId, categoryId, salespersonId)
+  const rate = await getRateForItem(programme.id, productId, categoryId, salespersonId, qualificationDate)
   if (rate <= 0) return null
 
   const monthDate = qualificationDate.slice(0, 7) + '-01'
@@ -618,4 +626,138 @@ export async function manualAdjustment(
     newValues: { salesperson_id: salespersonId, amount, adjustment_type: adjustmentType, reason, order_id: orderId, order_item_id: orderItemId }
   })
   return result.rows[0]
+}
+
+export interface RetroactiveEvaluationResult {
+  totalOrdersScanned: number
+  totalItemsEvaluated: number
+  commissionsEarned: number
+  totalCommissionAmount: number
+  details: Array<{
+    orderId: string
+    orderNumber: string
+    salespersonId: string
+    salespersonName: string
+    orderItemId: string
+    productId: string
+    productName: string
+    quantity: number
+    rate: number
+    amount: number
+    qualificationDate: string
+  }>
+}
+
+export async function evaluateOrdersForDateRange(
+  dateFrom: string,
+  dateTo: string,
+  userId: string | null
+): Promise<RetroactiveEvaluationResult> {
+  const orderResult = await query(
+    `SELECT o.id, o.order_number, o.created_by, o.created_at, o.status,
+            oi.id AS order_item_id, oi.product_id, oi.quantity,
+            p.name AS product_name, p.category_id,
+            u.full_name AS salesperson_name,
+            o.delivery_type, o.courier_payment_type,
+            o.paid_amount, o.total_amount
+     FROM orders o
+     JOIN order_items oi ON oi.order_id = o.id
+     JOIN products p ON p.id = oi.product_id
+     LEFT JOIN users u ON u.id = o.created_by
+     WHERE o.created_at::date >= $1
+       AND o.created_at::date <= $2
+       AND o.status IN ('delivered', 'collected_paid')
+       AND o.payment_status = 'paid'
+       AND NOT EXISTS (
+         SELECT 1 FROM commission_transactions ct
+         WHERE ct.order_item_id = oi.id AND ct.transaction_type = 'earned' AND ct.transaction_status <> 'reversed'
+       )
+     ORDER BY o.created_at DESC`,
+    [dateFrom, dateTo]
+  )
+
+  const details: RetroactiveEvaluationResult['details'] = []
+  const processedOrderItems = new Set<string>()
+  const processedOrders = new Set<string>()
+  let totalCommissionAmount = 0
+  let commissionsEarned = 0
+
+  for (const row of orderResult.rows) {
+    processedOrders.add(row.id)
+    const orderItemId = row.order_item_id
+    if (processedOrderItems.has(orderItemId)) continue
+    processedOrderItems.add(orderItemId)
+
+    const qualificationDate = row.created_at instanceof Date
+      ? row.created_at.toISOString().slice(0, 10)
+      : String(row.created_at).slice(0, 10)
+
+    const evaluation = await evaluateOrderItem(
+      row.id,
+      orderItemId,
+      row.status || 'delivered',
+      row.delivery_type,
+      row.courier_payment_type,
+      toNumber(row.paid_amount),
+      toNumber(row.total_amount),
+      row.product_id,
+      row.category_id,
+      toNumber(row.quantity),
+      row.created_by,
+      qualificationDate
+    )
+
+    if (evaluation.eligible) {
+      const earned = await earnCommission(
+        row.id,
+        orderItemId,
+        row.product_id,
+        row.category_id,
+        toNumber(row.quantity),
+        row.created_by,
+        qualificationDate,
+        userId
+      )
+      if (earned) {
+        commissionsEarned++
+        totalCommissionAmount += earned.amount
+        details.push({
+          orderId: row.id,
+          orderNumber: row.order_number,
+          salespersonId: row.created_by,
+          salespersonName: row.salesperson_name,
+          orderItemId,
+          productId: row.product_id,
+          productName: row.product_name,
+          quantity: toNumber(row.quantity),
+          rate: earned.amount / toNumber(row.quantity),
+          amount: earned.amount,
+          qualificationDate
+        })
+      }
+    }
+  }
+
+  await logAudit({
+    userId,
+    action: 'commission_retroactive_evaluation',
+    entityType: 'commission_rebuild',
+    entityId: `${dateFrom}__${dateTo}`,
+    newValues: {
+      date_from: dateFrom,
+      date_to: dateTo,
+      total_orders_scanned: processedOrders.size,
+      total_items_evaluated: orderResult.rows.length,
+      commissions_earned: commissionsEarned,
+      total_amount: totalCommissionAmount
+    }
+  })
+
+  return {
+    totalOrdersScanned: processedOrders.size,
+    totalItemsEvaluated: orderResult.rows.length,
+    commissionsEarned,
+    totalCommissionAmount,
+    details
+  }
 }
