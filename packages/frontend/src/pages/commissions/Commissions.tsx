@@ -6,13 +6,33 @@ import { useAuthStore } from '../../stores/authStore'
 import { formatMoney } from '../../lib/format'
 import {
   Wallet, TrendingUp, TrendingDown, CreditCard, Settings2, History,
-  CheckCircle2, XCircle, Users, BarChart3, Target
+  CheckCircle2, XCircle, Users, BarChart3, Target,
+  Plus, ChevronDown, ChevronUp
 } from 'lucide-react'
 
 type Tab = 'overview' | 'transactions' | 'potential' | 'management' | 'settings'
 
+const SCOPE_TYPES = [
+  { value: 'global', label: 'Global (all products)' },
+  { value: 'category', label: 'Category' },
+  { value: 'product', label: 'Product' },
+  { value: 'salesperson', label: 'Salesperson' },
+]
+
 export function Commissions() {
   const [tab, setTab] = useState<Tab>('overview')
+  const [showRateForm, setShowRateForm] = useState(false)
+  const [editingRate, setEditingRate] = useState<any>(null)
+  const [showRetroForm, setShowRetroForm] = useState(false)
+  const [retroResult, setRetroResult] = useState<any>(null)
+  const [rateForm, setRateForm] = useState({
+    scope_type: 'global',
+    scope_id: '',
+    scope_name: '',
+    rate_per_item: '',
+    effective_from: '',
+    effective_to: '',
+  })
   const { hasPermission } = useAuthStore()
   const queryClient = useQueryClient()
 
@@ -84,6 +104,60 @@ export function Commissions() {
   const payMutation = useMutation({
     mutationFn: async (id: string) => (await axios.post(`/api/commissions/transactions/${id}/pay`)).data,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['commission-own-transactions'] })
+  })
+
+  const { data: categories } = useQuery({
+    queryKey: ['commission-categories'],
+    queryFn: async () => (await axios.get('/api/products/categories')).data,
+    enabled: canManage
+  })
+
+  const { data: products } = useQuery({
+    queryKey: ['commission-products'],
+    queryFn: async () => (await axios.get('/api/products')).data,
+    enabled: canManage
+  })
+
+  const { data: salespeople } = useQuery({
+    queryKey: ['commission-salespeople'],
+    queryFn: async () => (await axios.get('/api/users')).data,
+    enabled: canManage
+  })
+
+  const createRateMutation = useMutation({
+    mutationFn: async (data: any) => (await axios.post('/api/commissions/rates', data)).data,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['commission-rates'] })
+      setShowRateForm(false)
+      setEditingRate(null)
+      setRateForm({ scope_type: 'global', scope_id: '', scope_name: '', rate_per_item: '', effective_from: '', effective_to: '' })
+    }
+  })
+
+  const updateRateMutation = useMutation({
+    mutationFn: async ({ id, data }: { id: string; data: any }) => (await axios.put(`/api/commissions/rates/${id}`, data)).data,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['commission-rates'] })
+      setShowRateForm(false)
+      setEditingRate(null)
+      setRateForm({ scope_type: 'global', scope_id: '', scope_name: '', rate_per_item: '', effective_from: '', effective_to: '' })
+    }
+  })
+
+  const deleteRateMutation = useMutation({
+    mutationFn: async (id: string) => (await axios.delete(`/api/commissions/rates/${id}`)).data,
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['commission-rates'] })
+  })
+
+  const retroMutation = useMutation({
+    mutationFn: async ({ date_from, date_to }: { date_from: string; date_to: string }) =>
+      (await axios.post('/api/commissions/retroactive', { date_from, date_to })).data,
+    onSuccess: (data: any) => {
+      setRetroResult(data)
+      queryClient.invalidateQueries({ queryKey: ['commission-own-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['commission-own-transactions'] })
+      queryClient.invalidateQueries({ queryKey: ['commission-rates'] })
+    }
   })
 
   if (!canView) {
@@ -393,8 +467,157 @@ export function Commissions() {
 
           <div className="rounded-lg border bg-card overflow-hidden">
             <div className="px-4 py-3 border-b">
-              <h3 className="font-semibold">Rates</h3>
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold">Rates</h3>
+                <button
+                  onClick={() => { setShowRateForm(!showRateForm); setEditingRate(null); setRateForm({ scope_type: 'global', scope_id: '', scope_name: '', rate_per_item: '', effective_from: '', effective_to: '' }) }}
+                  className="flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  <Plus className="h-3 w-3" />
+                  Add Rate
+                </button>
+              </div>
             </div>
+
+            {showRateForm && (
+              <div className="border-b bg-muted/30">
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault()
+                    const payload = {
+                      rate_per_item: Number(rateForm.rate_per_item),
+                      scope_type: rateForm.scope_type,
+                      scope_id: rateForm.scope_id || null,
+                      scope_name: rateForm.scope_name || null,
+                      effective_from: rateForm.effective_from,
+                      effective_to: rateForm.effective_to || null,
+                    }
+                    try {
+                      if (editingRate) {
+                        await updateRateMutation.mutateAsync({ id: editingRate.id, data: payload })
+                      } else {
+                        await createRateMutation.mutateAsync(payload)
+                      }
+                    } catch {
+                      // error is surfaced via toast in real app
+                    }
+                  }}
+                  className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 p-4"
+                >
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Scope</label>
+                    <select
+                      value={rateForm.scope_type}
+                      onChange={(e) => setRateForm({ ...rateForm, scope_type: e.target.value, scope_id: '', scope_name: '' })}
+                      className="w-full border rounded px-2 py-1 text-sm"
+                    >
+                      {SCOPE_TYPES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+                    </select>
+                  </div>
+
+                  {rateForm.scope_type === 'category' && (
+                    <div>
+                      <label className="block text-xs font-medium mb-1">Category</label>
+                      <select
+                        value={rateForm.scope_id}
+                        onChange={(e) => {
+                          const cat = categories?.find((c: any) => c.id === e.target.value)
+                          setRateForm({ ...rateForm, scope_id: e.target.value, scope_name: cat?.name || '' })
+                        }}
+                        className="w-full border rounded px-2 py-1 text-sm"
+                      >
+                        <option value="">All categories</option>
+                        {categories?.map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+
+                  {rateForm.scope_type === 'product' && (
+                    <div>
+                      <label className="block text-xs font-medium mb-1">Product</label>
+                      <select
+                        value={rateForm.scope_id}
+                        onChange={(e) => {
+                          const prod = products?.find((p: any) => p.id === e.target.value)
+                          setRateForm({ ...rateForm, scope_id: e.target.value, scope_name: prod?.name || '' })
+                        }}
+                        className="w-full border rounded px-2 py-1 text-sm"
+                      >
+                        <option value="">Select product</option>
+                        {products?.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+
+                  {rateForm.scope_type === 'salesperson' && (
+                    <div>
+                      <label className="block text-xs font-medium mb-1">Salesperson</label>
+                      <select
+                        value={rateForm.scope_id}
+                        onChange={(e) => {
+                          const sp = salespeople?.find((s: any) => s.id === e.target.value)
+                          setRateForm({ ...rateForm, scope_id: e.target.value, scope_name: sp?.full_name || sp?.name || '' })
+                        }}
+                        className="w-full border rounded px-2 py-1 text-sm"
+                      >
+                        <option value="">Select salesperson</option>
+                        {salespeople?.map((s: any) => <option key={s.id} value={s.id}>{s.full_name || s.name}</option>)}
+                      </select>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Rate per item (KSh)</label>
+                    <input
+                      type="number" step="0.01" min="0"
+                      value={rateForm.rate_per_item}
+                      onChange={(e) => setRateForm({ ...rateForm, rate_per_item: e.target.value })}
+                      className="w-full border rounded px-2 py-1 text-sm"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Effective From</label>
+                    <input
+                      type="date"
+                      value={rateForm.effective_from}
+                      onChange={(e) => setRateForm({ ...rateForm, effective_from: e.target.value })}
+                      className="w-full border rounded px-2 py-1 text-sm"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Effective To (optional)</label>
+                    <input
+                      type="date"
+                      value={rateForm.effective_to}
+                      onChange={(e) => setRateForm({ ...rateForm, effective_to: e.target.value })}
+                      className="w-full border rounded px-2 py-1 text-sm"
+                    />
+                  </div>
+
+                  <div className="flex items-end gap-2">
+                    <button
+                      type="submit"
+                      disabled={createRateMutation.isPending || updateRateMutation.isPending}
+                      className="px-3 py-1 bg-primary text-primary-foreground rounded text-xs hover:bg-primary/90 disabled:opacity-50"
+                    >
+                      {editingRate ? 'Update' : 'Create'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setShowRateForm(false); setEditingRate(null) }}
+                      className="px-3 py-1 border rounded text-xs hover:bg-muted"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              </div>
+            )}
+
             {rates?.rates?.length === 0 ? (
               <div className="p-6 text-center text-muted-foreground">No rates configured</div>
             ) : (
@@ -406,6 +629,7 @@ export function Commissions() {
                       <th className="text-right px-4 py-3">Rate</th>
                       <th className="text-left px-4 py-3">Effective From</th>
                       <th className="text-left px-4 py-3">Effective To</th>
+                      {canManage && <th className="center px-4 py-3">Actions</th>}
                     </tr>
                   </thead>
                   <tbody>
@@ -415,10 +639,139 @@ export function Commissions() {
                         <td className="px-4 py-3 text-right">{formatMoney(rate.rate_per_item)}</td>
                         <td className="px-4 py-3">{new Date(rate.effective_from).toLocaleDateString()}</td>
                         <td className="px-4 py-3">{rate.effective_to ? new Date(rate.effective_to).toLocaleDateString() : '-'}</td>
+                        {canManage && (
+                          <td className="px-4 py-3 text-center">
+                            <div className="flex items-center justify-center gap-2">
+                              <button
+                                onClick={() => {
+                                  setEditingRate(rate)
+                                  setRateForm({
+                                    scope_type: rate.scope_type || 'global',
+                                    scope_id: rate.scope_id || '',
+                                    scope_name: rate.scope_name || '',
+                                    rate_per_item: String(rate.rate_per_item),
+                                    effective_from: rate.effective_from ? new Date(rate.effective_from).toISOString().slice(0, 10) : '',
+                                    effective_to: rate.effective_to ? new Date(rate.effective_to).toISOString().slice(0, 10) : '',
+                                  })
+                                  setShowRateForm(true)
+                                }}
+                                className="text-xs text-blue-600 hover:underline"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  if (confirm('Delete this rate?')) {
+                                    await deleteRateMutation.mutateAsync(rate.id)
+                                  }
+                                }}
+                                className="text-xs text-red-600 hover:underline"
+                              >
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+          </div>
+
+          <div className="rounded-lg border bg-card overflow-hidden">
+            <div className="px-4 py-3 border-b">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold">Retroactive Evaluation</h3>
+                <button
+                  onClick={() => setShowRetroForm(!showRetroForm)}
+                  className="flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  {showRetroForm ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                  {showRetroForm ? 'Hide' : 'Run'}
+                </button>
+              </div>
+            </div>
+            {showRetroForm && (
+              <div className="border-t p-4 space-y-4">
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault()
+                    const form = e.currentTarget
+                    const dateFrom = (form.elements.namedItem('date_from') as HTMLInputElement).value
+                    const dateTo = (form.elements.namedItem('date_to') as HTMLInputElement).value
+                    if (!dateFrom || !dateTo) return
+                    setRetroResult(null)
+                    await retroMutation.mutateAsync({ date_from: dateFrom, date_to: dateTo })
+                  }}
+                  className="grid grid-cols-1 md:grid-cols-3 gap-4"
+                >
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Date From</label>
+                    <input type="date" name="date_from" className="w-full border rounded px-2 py-1 text-sm" required />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1">Date To</label>
+                    <input type="date" name="date_to" className="w-full border rounded px-2 py-1 text-sm" required />
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      type="submit"
+                      disabled={retroMutation.isPending}
+                      className="w-full px-3 py-1 bg-primary text-primary-foreground rounded text-xs hover:bg-primary/90 disabled:opacity-50"
+                    >
+                      {retroMutation.isPending ? 'Evaluating...' : 'Evaluate'}
+                    </button>
+                  </div>
+                </form>
+                {retroMutation.isError && (
+                  <div className="text-sm text-red-600">Error: {retroMutation.error?.message || 'Failed to evaluate commissions'}</div>
+                )}
+                {retroResult && (
+                  <div className="space-y-3 pt-2 border-t">
+                    <div className="grid gap-3 sm:grid-cols-4">
+                      <StatCard title="Orders Scanned" value={String(retroResult.totalOrdersScanned || 0)} icon={<Users className="h-5 w-5" />} />
+                      <StatCard title="Items Evaluated" value={String(retroResult.totalItemsEvaluated || 0)} icon={<BarChart3 className="h-5 w-5" />} />
+                      <StatCard title="Commission Earned" value={formatMoney(retroResult.totalCommissionAmount || 0)} icon={<Wallet className="h-5 w-5" />} />
+                      <StatCard title="Salespeople" value={String(new Set(retroResult.details?.map((d: any) => d.salespersonId) || []).size)} icon={<TrendingUp className="h-5 w-5" />} />
+                    </div>
+                    {retroResult.details?.length > 0 && (
+                      <div>
+                        <h4 className="font-medium text-sm mb-2">Commission Transactions Created</h4>
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-xs">
+                            <thead className="bg-muted">
+                              <tr>
+                                <th className="text-left px-3 py-2">Order</th>
+                                <th className="text-left px-3 py-2">Salesperson</th>
+                                <th className="text-left px-3 py-2">Product</th>
+                                <th className="text-right px-3 py-2">Qty</th>
+                                <th className="text-right px-3 py-2">Rate</th>
+                                <th className="text-right px-3 py-2">Amount</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {retroResult.details.map((d: any) => (
+                                <tr key={d.orderItemId} className="border-t">
+                                  <td className="px-3 py-2">{d.orderNumber}</td>
+                                  <td className="px-3 py-2">{d.salespersonName}</td>
+                                  <td className="px-3 py-2">{d.productName}</td>
+                                  <td className="px-3 py-2 text-right">{d.quantity}</td>
+                                  <td className="px-3 py-2 text-right">{formatMoney(d.rate)}</td>
+                                  <td className="px-3 py-2 text-right font-medium">{formatMoney(d.amount)}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                    {retroResult.details?.length === 0 && retroResult.commissionsEarned === 0 && (
+                      <p className="text-sm text-muted-foreground">No commission eligible items found for the selected date range.</p>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
