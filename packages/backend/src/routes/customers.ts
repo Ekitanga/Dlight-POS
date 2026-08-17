@@ -3,6 +3,7 @@ import { query, transaction } from '../db/index.js'
 import { normalizeKenyanPhone } from '../utils/phone.js'
 import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 import { logAudit } from '../utils/audit.js'
+import { evaluateAndEarnOrderItem } from '../services/commission.js'
 
 const router = Router()
 
@@ -136,6 +137,12 @@ router.post('/:id/payments', async (req, res) => {
             'UPDATE orders SET paid_amount = $1, payment_status = $2, updated_at = NOW() WHERE id = $3',
             [newPaidAmount, paymentStatus, order_id]
           )
+          if (paymentStatus === 'paid' && ['delivered', 'collected_paid'].includes(order.status)) {
+            const items = await client.query('SELECT id FROM order_items WHERE order_id = $1 ORDER BY id', [order_id])
+            for (const item of items.rows) {
+              await evaluateAndEarnOrderItem(order_id, item.id, req.user?.userId || null, client)
+            }
+          }
         }
       }
 

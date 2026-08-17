@@ -33,6 +33,14 @@ import { NotificationBell } from './NotificationBell'
 
 const mobilePrimaryPaths = ['/dashboard', '/orders', '/products', '/inventory']
 
+const dashboardAccessPermissions = [
+  'dashboard.view',
+  'dashboard.personal_sales', 'dashboard.personal_orders', 'dashboard.pending_speedaf',
+  'dashboard.management_sales', 'dashboard.management_profit', 'dashboard.management_expenses',
+  'dashboard.management_suppliers', 'dashboard.management_riders', 'dashboard.management_inventory',
+  'dashboard.management_reports', 'dashboard.management_audit'
+]
+
 const navItems = [
   { path: '/dashboard', icon: LayoutDashboard, label: 'Dashboard', permission: 'dashboard.view' },
   { path: '/orders', icon: Package, label: 'Orders', permission: 'orders.view' },
@@ -96,8 +104,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
         
         <nav className="flex-1 overflow-y-auto px-3 py-4">
           {navItems.filter(item => {
+            if (item.permission === 'dashboard.view') {
+              return dashboardAccessPermissions.some(hasPermission)
+            }
             if (item.permission === 'commission.view') {
-              return hasPermission('commission.view') || hasPermission('commission.own_view')
+              return hasPermission('commission.view') || hasPermission('commission.own_view') || hasPermission('commission.own_daily') || hasPermission('commission.own_monthly') ||
+                hasPermission('commission.own_history') || hasPermission('commission.own_transactions') || hasPermission('commission.own_potential') || hasPermission('commission.manage') ||
+                hasPermission('commission.approve') || hasPermission('commission.pay') || hasPermission('commission.adjust') || hasPermission('commission.reconcile') || hasPermission('commission.close')
             }
             return hasPermission(item.permission)
           }).map((item) => {
@@ -175,7 +188,12 @@ export function Layout({ children }: { children: React.ReactNode }) {
       </main>
 
       <nav className="mobile-bottom-nav fixed inset-x-0 bottom-0 z-40 grid h-[68px] grid-cols-5 border-t bg-card/95 px-1 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden" aria-label="Primary navigation">
-        {navItems.filter(item => mobilePrimaryPaths.includes(item.path) && hasPermission(item.permission)).map(item => {
+        {navItems.filter(item => {
+          if (!mobilePrimaryPaths.includes(item.path)) return false
+          return item.permission === 'dashboard.view'
+            ? dashboardAccessPermissions.some(hasPermission)
+            : hasPermission(item.permission)
+        }).map(item => {
           const Icon = item.icon
           const active = location.pathname === item.path
           return (

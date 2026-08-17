@@ -228,6 +228,29 @@ docker compose -f deploy/contabo/docker-compose.yml restart app
 
 Apply new migrations only when a release includes them.
 
+### Commission release dated 17 August 2026
+
+This release upgrades an existing production database with the commission ledger, effective-date policy, return reversals, granular permissions, and month-close controls. Do not run the fresh-database `apply-migrations.sh` against an existing installation.
+
+```bash
+cd /opt/dlight-pos
+git pull --ff-only
+bash deploy/contabo/apply-commission-release-20260817.sh
+docker compose -f deploy/contabo/docker-compose.yml up -d --build
+curl -I https://169-58-30-49.sslip.io/health
+docker compose -f deploy/contabo/docker-compose.yml logs --tail=100 app
+```
+
+The release script creates and validates a custom-format PostgreSQL backup before stopping the application and applying any SQL. It records each migration filename and SHA-256 checksum in `dlight_schema_migrations`, refuses an unexpected partial commission schema, and restarts the previous application image if migration verification fails.
+
+After the application is healthy:
+
+1. In **Users**, keep Ann commission-eligible and deactivate or mark **Frontend UAT Attendant** ineligible.
+2. In **Commission centre**, configure the programme and KES 50 global rate with an effective date of **1 August 2026**.
+3. Preview reconciliation for **1–17 August 2026**.
+4. Compare the preview with completed and paid orders before applying it with a recorded reason.
+5. Confirm Admin and Owner accounts have no commission transactions.
+
 ## Emergency Commands
 
 View logs:

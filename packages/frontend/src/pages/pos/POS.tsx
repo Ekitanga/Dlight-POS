@@ -3,6 +3,7 @@ import { Plus, Search, ShoppingCart, Trash2, CreditCard, Banknote, Smartphone, W
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { formatMoney } from '../../lib/format'
+import { invalidateCommissionData } from '../../lib/commissionCache'
 
 interface Product {
   id: string
@@ -43,6 +44,7 @@ export function POS() {
       setCart([])
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
       queryClient.invalidateQueries({ queryKey: ['orders'] })
+      void invalidateCommissionData(queryClient)
     }
   })
 

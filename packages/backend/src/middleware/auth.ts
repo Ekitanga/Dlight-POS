@@ -90,6 +90,7 @@ function actionForRequest(module: string, req: Request): string {
   const method = req.method.toUpperCase()
   const path = req.path
   if (module === 'orders' && path.includes('/refunds')) return method === 'GET' ? 'view' : 'edit'
+  if (module === 'orders' && /\/items\/[^/]+\/returns$/.test(path)) return 'cancel'
 
   if (
     module === 'orders' &&
@@ -143,6 +144,62 @@ export function requireModulePermission(module: string) {
       )
       if (result.rows.length === 0) {
         return res.status(403).json({ error: { message: `Permission required: ${permissionModule}.${action}` } })
+      }
+      next()
+    } catch {
+      res.status(500).json({ error: { message: 'Unable to verify permission' } })
+    }
+  }
+}
+
+export function requirePermission(module: string, action: string) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (req.user?.role === 'admin' || req.user?.role === 'owner') return next()
+      if (!req.user) return res.status(401).json({ error: { message: 'Authentication required' } })
+
+      const result = await query(
+        `SELECT 1
+         FROM user_permissions up
+         JOIN permissions p ON p.id = up.permission_id
+         WHERE up.user_id = $1 AND p.module = $2 AND p.action = $3`,
+        [req.user.userId, module, action]
+      )
+      if (result.rows.length === 0) {
+        return res.status(403).json({ error: { message: `Permission required: ${module}.${action}` } })
+      }
+      next()
+    } catch {
+      res.status(500).json({ error: { message: 'Unable to verify permission' } })
+    }
+  }
+}
+
+export function requireAnyPermission(permissions: Array<[module: string, action: string]>) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (req.user?.role === 'admin' || req.user?.role === 'owner') return next()
+      if (!req.user) return res.status(401).json({ error: { message: 'Authentication required' } })
+      if (permissions.length === 0) {
+        return res.status(403).json({ error: { message: 'Permission required' } })
+      }
+
+      const modules = permissions.map(([module]) => module)
+      const actions = permissions.map(([, action]) => action)
+      const result = await query(
+        `SELECT 1
+         FROM user_permissions up
+         JOIN permissions p ON p.id = up.permission_id
+         WHERE up.user_id = $1
+           AND (p.module, p.action) IN (
+             SELECT * FROM UNNEST($2::text[], $3::text[])
+           )
+         LIMIT 1`,
+        [req.user.userId, modules, actions]
+      )
+      if (result.rows.length === 0) {
+        const required = permissions.map(([module, action]) => `${module}.${action}`).join(' or ')
+        return res.status(403).json({ error: { message: `Permission required: ${required}` } })
       }
       next()
     } catch {

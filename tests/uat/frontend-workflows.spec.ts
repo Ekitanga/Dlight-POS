@@ -16,7 +16,7 @@ const screenshotDir = 'artifacts/uat-screenshots'
 async function login(page: Page, email: string, password: string) {
   await page.goto('/login')
   await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password').fill(password)
+  await page.getByLabel('Password', { exact: true }).fill(password)
   await page.getByRole('button', { name: 'Sign In' }).click()
   await expect(page).toHaveURL(/\/dashboard/)
 }
@@ -305,7 +305,7 @@ test.describe.serial('Dlight Giftshop frontend UAT', () => {
   test('visible actions, filters, export, dashboard empty state, and mobile usability', async ({ page }) => {
     await login(page, adminEmail, adminPassword)
     await page.goto('/dashboard')
-    await page.getByLabel('Period').selectOption('custom')
+    await page.locator('label').filter({ hasText: /^Period/ }).locator('select').first().selectOption('custom')
     await page.getByLabel('To', { exact: true }).fill('2099-01-02')
     await page.getByLabel('From', { exact: true }).fill('2099-01-01')
     await expect(page.getByText('No data available').first()).toBeVisible()
@@ -313,7 +313,7 @@ test.describe.serial('Dlight Giftshop frontend UAT', () => {
 
     await page.goto('/orders')
     await page.getByPlaceholder('Search orders...').fill('UAT')
-    await page.getByLabel('Period').selectOption('custom')
+    await page.locator('label').filter({ hasText: /^Period/ }).locator('select').first().selectOption('custom')
     await page.getByLabel('From', { exact: true }).fill('2026-01-01')
     await expect(page.getByRole('button', { name: 'Clear dates' })).toBeVisible()
     await page.getByRole('button', { name: 'New Order' }).click()

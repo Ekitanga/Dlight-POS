@@ -5,7 +5,12 @@ import { auditMiddleware } from '../middleware/audit.js'
 import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 import { logAudit } from '../utils/audit.js'
 import { emitNotification } from '../utils/notifications.js'
-import { evaluateOrderItem, earnCommission, reverseCommission } from '../services/commission.js'
+import {
+  commissionPeriodForTimestamp,
+  evaluateAndEarnOrderItem,
+  lockCommissionPeriod,
+  reverseCommission
+} from '../services/commission.js'
 
 const router = Router()
 
@@ -50,6 +55,11 @@ function allowedNextStatuses(order: any): string[] {
   }
   if (current === 'in_transit') return ['delivered']
   return []
+}
+
+function isFinalCompletedStatus(order: any, status: string): boolean {
+  if (status === 'collected_paid') return true
+  return status === 'delivered' && !(order.delivery_type === 'courier' && order.courier_payment_type === 'cod')
 }
 
 function deliveryStatusForOrder(status: string, deliveryType?: string): string | null {
@@ -421,10 +431,11 @@ async function rebuildOpenOrder(client: any, req: any, order: any, body: any) {
   for (const prepared of preparedItems) {
     const { productData, quantity, itemTotal, sellingPrice, fulfillmentType, supplierCost, internalQuantity, supplierQuantity } = prepared
     const orderItem = await client.query(
-      'INSERT INTO order_items (order_id, product_id, supplier_id, quantity, internal_quantity, supplier_quantity, unit_cost, supplier_cost, unit_price, total_price, fulfillment_type, fulfillment_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *',
+      'INSERT INTO order_items (order_id, product_id, product_category_id, product_category_snapshot_verified, supplier_id, quantity, internal_quantity, supplier_quantity, unit_cost, supplier_cost, unit_price, total_price, fulfillment_type, fulfillment_status) VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *',
       [
         order.id,
         productData.id,
+        productData.category_id || null,
         prepared.item.supplier_id || null,
         quantity,
         internalQuantity,
@@ -560,13 +571,19 @@ router.get('/', async (req, res) => {
       params.push(delivery_type)
     }
     if (workflow_stage === 'pending') {
-      conditions.push("o.status IN ('pending', 'confirmed', 'packed')")
+      conditions.push("o.status = 'pending'")
+    } else if (workflow_stage === 'confirmed') {
+      conditions.push("o.status IN ('confirmed', 'packed')")
     } else if (workflow_stage === 'in_transit') {
       conditions.push("o.status IN ('in_transit', 'dispatched')")
     } else if (workflow_stage === 'pending_payment') {
       conditions.push("o.delivery_type = 'courier' AND o.courier_payment_type = 'cod' AND o.status = 'delivered'")
     } else if (workflow_stage === 'completed') {
       conditions.push("((o.status = 'delivered' AND NOT (o.delivery_type = 'courier' AND o.courier_payment_type = 'cod')) OR o.status = 'collected_paid')")
+    } else if (workflow_stage === 'returned') {
+      conditions.push("o.status = 'returned'")
+    } else if (workflow_stage === 'cancelled') {
+      conditions.push("o.status = 'cancelled'")
     }
 
     if (date_from) {
@@ -631,7 +648,9 @@ router.get('/:id', async (req, res) => {
 
     const items = await query(
       `SELECT oi.*, p.name as product_name, p.sku, p.category_id, pc.name AS category_name,
-          COALESCE(i.quantity - i.reserved_quantity, 0) AS available_stock
+          COALESCE(i.quantity - i.reserved_quantity, 0) AS available_stock,
+          COALESCE((SELECT SUM(oir.internal_quantity) FROM order_item_returns oir WHERE oir.order_item_id = oi.id), 0) AS returned_internal_quantity,
+          COALESCE((SELECT SUM(oir.supplier_quantity) FROM order_item_returns oir WHERE oir.order_item_id = oi.id), 0) AS returned_supplier_quantity
        FROM order_items oi
        LEFT JOIN products p ON oi.product_id = p.id
        LEFT JOIN categories pc ON p.category_id = pc.id
@@ -757,7 +776,10 @@ router.put('/:orderId/items/:itemId/fulfillment-status', async (req, res) => {
         throw Object.assign(new Error('Order item not found'), { statusCode: 404 })
       }
 
-      if (!['assigned', 'confirmed', 'fulfilled', 'cancelled', 'returned'].includes(fulfillment_status)) {
+      if (['cancelled', 'returned'].includes(fulfillment_status)) {
+        throw Object.assign(new Error('Use the order cancellation or item-return workflow so financial records and commission are updated together'), { statusCode: 400 })
+      }
+      if (!['assigned', 'confirmed', 'fulfilled'].includes(fulfillment_status)) {
         throw Object.assign(new Error('Invalid fulfillment status'), { statusCode: 400 })
       }
 
@@ -791,6 +813,200 @@ router.put('/:orderId/items/:itemId/fulfillment-status', async (req, res) => {
     })
 
     res.json(item)
+  } catch (err) {
+    const statusCode = (err as any).statusCode || 500
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (err as Error).message } })
+  }
+})
+
+// Records a return against one order item without changing the status of the
+// remaining items. This is the authoritative operational event that drives a
+// proportional commission reversal.
+router.post('/:orderId/items/:itemId/returns', async (req, res) => {
+  try {
+    const { orderId, itemId } = req.params
+    const { quantity, reason, return_source, stock_condition = 'sellable' } = req.body
+    const returnQuantity = Number(quantity)
+    const returnReason = String(reason || '').trim()
+
+    if (!Number.isInteger(returnQuantity) || returnQuantity <= 0) {
+      throw Object.assign(new Error('Return quantity must be a whole number greater than zero'), { statusCode: 400 })
+    }
+    if (!returnReason) {
+      throw Object.assign(new Error('A return reason is required'), { statusCode: 400 })
+    }
+    if (return_source && !['internal', 'supplier'].includes(return_source)) {
+      throw Object.assign(new Error('Return source must be shop stock or supplier'), { statusCode: 400 })
+    }
+    if (stock_condition && !['sellable', 'damaged'].includes(stock_condition)) {
+      throw Object.assign(new Error('Returned shop stock must be sellable or damaged'), { statusCode: 400 })
+    }
+
+    const returned = await transaction(async client => {
+      const orderResult = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId])
+      const order = orderResult.rows[0]
+      if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 })
+      if (!['in_transit', 'delivered', 'collected_paid'].includes(normalizedWorkflowStatus(order.status))) {
+        throw Object.assign(new Error('Items can only be returned from an in-transit, completed, or collected-and-paid order'), { statusCode: 400 })
+      }
+
+      const itemResult = await client.query(
+        'SELECT * FROM order_items WHERE id = $1 AND order_id = $2 FOR UPDATE',
+        [itemId, orderId]
+      )
+      const item = itemResult.rows[0]
+      if (!item) throw Object.assign(new Error('Order item not found'), { statusCode: 404 })
+
+      const alreadyReturned = toNumber(item.returned_quantity)
+      const remainingQuantity = Math.max(0, toNumber(item.quantity) - alreadyReturned)
+      if (returnQuantity > remainingQuantity) {
+        throw Object.assign(new Error(`Only ${remainingQuantity} item(s) remain available to return`), { statusCode: 400 })
+      }
+
+      const priorSources = await client.query(
+        `SELECT
+           COALESCE(SUM(internal_quantity), 0) AS internal_quantity,
+           COALESCE(SUM(supplier_quantity), 0) AS supplier_quantity
+         FROM order_item_returns
+         WHERE order_item_id = $1`,
+        [itemId]
+      )
+      const returnedInternal = toNumber(priorSources.rows[0]?.internal_quantity)
+      const returnedSupplier = toNumber(priorSources.rows[0]?.supplier_quantity)
+      const remainingInternal = Math.max(0, toNumber(item.internal_quantity) - returnedInternal)
+      const remainingSupplier = Math.max(0, toNumber(item.supplier_quantity) - returnedSupplier)
+      const isHybrid = remainingInternal > 0 && remainingSupplier > 0
+      const source = isHybrid ? return_source : (remainingInternal > 0 ? 'internal' : 'supplier')
+      if (!source) {
+        throw Object.assign(new Error('This item has no remaining fulfilment quantity to return'), { statusCode: 400 })
+      }
+      if (isHybrid && !return_source) {
+        throw Object.assign(new Error('Choose whether this returned item came from shop stock or a supplier'), { statusCode: 400 })
+      }
+
+      const availableForSource = source === 'internal' ? remainingInternal : remainingSupplier
+      if (returnQuantity > availableForSource) {
+        throw Object.assign(new Error(`Only ${availableForSource} ${source === 'internal' ? 'shop-stock' : 'supplier'} item(s) remain available to return`), { statusCode: 400 })
+      }
+
+      const internalReturnQuantity = source === 'internal' ? returnQuantity : 0
+      const supplierReturnQuantity = source === 'supplier' ? returnQuantity : 0
+      const returnRecord = await client.query(
+        `INSERT INTO order_item_returns
+          (order_id, order_item_id, quantity, internal_quantity, supplier_quantity, stock_condition, reason, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING *`,
+        [
+          orderId,
+          itemId,
+          returnQuantity,
+          internalReturnQuantity,
+          supplierReturnQuantity,
+          internalReturnQuantity > 0 ? stock_condition : null,
+          returnReason,
+          req.user?.userId || null
+        ]
+      )
+
+      if (internalReturnQuantity > 0) {
+        const inventoryResult = await client.query('SELECT * FROM inventory WHERE product_id = $1 FOR UPDATE', [item.product_id])
+        const inventory = inventoryResult.rows[0]
+        if (!inventory) throw Object.assign(new Error('Missing inventory record for returned shop-stock item'), { statusCode: 409 })
+        const beforeQuantity = toNumber(inventory.quantity)
+        const movementType = stock_condition === 'damaged' ? 'return_damaged' : 'return_sellable'
+        const afterQuantity = stock_condition === 'damaged' ? beforeQuantity : beforeQuantity + internalReturnQuantity
+        if (stock_condition === 'damaged') {
+          await client.query(
+            'UPDATE inventory SET returned_quantity = returned_quantity + $1, damaged_quantity = damaged_quantity + $1, last_updated = NOW() WHERE product_id = $2',
+            [internalReturnQuantity, item.product_id]
+          )
+        } else {
+          await client.query(
+            'UPDATE inventory SET returned_quantity = returned_quantity + $1, quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2',
+            [internalReturnQuantity, item.product_id]
+          )
+        }
+        await client.query(
+          `INSERT INTO inventory_movements
+            (product_id, type, quantity, before_quantity, after_quantity, reference_id, reference_type, notes, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, 'order_item_return', $7, $8)`,
+          [item.product_id, movementType, internalReturnQuantity, beforeQuantity, afterQuantity, returnRecord.rows[0].id, returnReason, req.user?.userId || null]
+        )
+      }
+
+      if (supplierReturnQuantity > 0 && item.payable_id) {
+        const payableResult = await client.query('SELECT * FROM supplier_payables WHERE id = $1 FOR UPDATE', [item.payable_id])
+        const payable = payableResult.rows[0]
+        if (payable && item.supplier_id) {
+          const supplierReturnAmount = toNumber(item.supplier_cost) * supplierReturnQuantity
+          if (supplierReturnAmount > 0) {
+            await client.query(
+              `INSERT INTO supplier_returns (supplier_id, payable_id, order_item_id, amount, reason, created_by)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [item.supplier_id, payable.id, itemId, supplierReturnAmount, returnReason, req.user?.userId || null]
+            )
+            await recalculateSupplierBalance(client, item.supplier_id)
+          }
+        }
+      }
+
+      const updatedItem = await client.query(
+        `UPDATE order_items
+         SET returned_quantity = returned_quantity + $1,
+             fulfillment_status = CASE WHEN returned_quantity + $1 >= quantity THEN 'returned' ELSE fulfillment_status END
+         WHERE id = $2
+         RETURNING *`,
+        [returnQuantity, itemId]
+      )
+
+      const existingEarnings = await client.query(
+        `SELECT id FROM commission_transactions
+         WHERE order_item_id = $1 AND transaction_type = 'earned'
+         FOR UPDATE`,
+        [itemId]
+      )
+      const reversals = []
+      for (const earning of existingEarnings.rows) {
+        const reversal = await reverseCommission(
+          earning.id,
+          orderId,
+          itemId,
+          returnQuantity,
+          returnReason,
+          req.user?.userId || null,
+          client,
+          'order_item_return',
+          returnRecord.rows[0].id
+        )
+        if (reversal) reversals.push(reversal)
+      }
+
+      await logAudit({
+        req,
+        client,
+        action: 'order_item_returned',
+        entityType: 'order_item_return',
+        entityId: returnRecord.rows[0].id,
+        oldValues: {
+          returned_quantity: alreadyReturned,
+          fulfillment_status: item.fulfillment_status
+        },
+        newValues: {
+          order_id: orderId,
+          order_item_id: itemId,
+          quantity: returnQuantity,
+          source,
+          stock_condition: internalReturnQuantity > 0 ? stock_condition : null,
+          returned_quantity: updatedItem.rows[0].returned_quantity,
+          commission_reversal_count: reversals.length
+        },
+        metadata: { order_number: order.order_number, reason: returnReason }
+      })
+
+      return { item: updatedItem.rows[0], return: returnRecord.rows[0], reversals }
+    })
+
+    res.status(201).json(returned)
   } catch (err) {
     const statusCode = (err as any).statusCode || 500
     res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (err as Error).message } })
@@ -869,6 +1085,16 @@ router.post('/', auditMiddleware('order', 'order_created'), async (req, res) => 
     const orderNumber = orderPrefix + '-' + Date.now().toString().slice(-8)
 
     const createdOrder = await transaction(async (client) => {
+      const commissionOwnerResult = await client.query(
+        `SELECT commission_eligible, role
+         FROM users WHERE id = $1`,
+        [req.user?.userId]
+      )
+      const commissionOwner = commissionOwnerResult.rows[0]
+      const commissionSalespersonEligible = Boolean(
+        commissionOwner?.commission_eligible === true &&
+        !['admin', 'owner'].includes(String(commissionOwner?.role || '').toLowerCase())
+      )
       let subtotal = 0
       const customerDeliveryFee = toNumber(customer_delivery_fee)
       const rawDeliveryCost = delivery_type === 'rider' ? toNumber(actual_rider_fee) : delivery_type === 'courier' ? toNumber(actual_courier_fee) : 0
@@ -987,8 +1213,9 @@ router.post('/', auditMiddleware('order', 'order_created'), async (req, res) => 
           order_number, customer_id, delivery_type, delivery_fee, rider_id, courier_id,
           courier_tracking_number, courier_payment_type, delivery_address, subtotal, total_amount,
           delivery_income, delivery_fee_payment_method, delivery_fee_paid_amount,
-          courier_customer_fee, courier_actual_fee, delivery_cost, notes, created_by, sale_date
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING *`,
+          courier_customer_fee, courier_actual_fee, delivery_cost, notes, created_by, sale_date,
+          commission_salesperson_eligible
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING *`,
         [
           orderNumber,
           normalizedCustomerId,
@@ -1009,7 +1236,8 @@ router.post('/', auditMiddleware('order', 'order_created'), async (req, res) => 
           deliveryCost,
           notes || null,
           req.user?.userId,
-          businessSaleDate
+          businessSaleDate,
+          commissionSalespersonEligible
         ]
       )
 
@@ -1018,10 +1246,11 @@ router.post('/', auditMiddleware('order', 'order_created'), async (req, res) => 
       for (const prepared of preparedItems) {
         const { productData, quantity, itemTotal, sellingPrice, fulfillmentType, supplierCost, internalQuantity, supplierQuantity } = prepared
         const orderItem = await client.query(
-          'INSERT INTO order_items (order_id, product_id, supplier_id, quantity, internal_quantity, supplier_quantity, unit_cost, supplier_cost, unit_price, total_price, fulfillment_type, fulfillment_status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *',
+          'INSERT INTO order_items (order_id, product_id, product_category_id, product_category_snapshot_verified, supplier_id, quantity, internal_quantity, supplier_quantity, unit_cost, supplier_cost, unit_price, total_price, fulfillment_type, fulfillment_status) VALUES ($1, $2, $3, TRUE, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING *',
           [
             orderId,
             productData.id,
+            productData.category_id || null,
             prepared.item.supplier_id || null,
             quantity,
             internalQuantity,
@@ -1174,6 +1403,9 @@ router.put('/:id/status', async (req, res) => {
     if (!orderStatuses.includes(status)) {
       return res.status(400).json({ error: { message: 'Invalid order status' } })
     }
+    if (status === 'returned' && !String(notes || '').trim()) {
+      return res.status(400).json({ error: { message: 'A return reason is required' } })
+    }
 
     const updatedOrder = await transaction(async (client) => {
       const orderResult = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [id])
@@ -1184,12 +1416,11 @@ router.put('/:id/status', async (req, res) => {
 
       const previousStatus = order.status
       const normalizedPreviousStatus = normalizedWorkflowStatus(previousStatus)
-      const now = new Date().toISOString()
       const exceptionTransition =
         status === 'cancelled'
           ? ['pending', 'confirmed'].includes(normalizedPreviousStatus)
           : status === 'returned'
-            ? ['in_transit', 'delivered'].includes(normalizedPreviousStatus)
+            ? ['in_transit', 'delivered', 'collected_paid'].includes(normalizedPreviousStatus)
             : false
       if (status !== previousStatus && !allowedNextStatuses(order).includes(status) && !exceptionTransition) {
         throw Object.assign(new Error('This status change is not valid for the current order stage'), { statusCode: 400 })
@@ -1237,6 +1468,44 @@ router.put('/:id/status', async (req, res) => {
         }
       }
       const enteringClosedState = ['cancelled', 'returned'].includes(status) && !['cancelled', 'returned'].includes(previousStatus)
+      // A courier COD parcel is only physically delivered at `delivered`.
+      // Its final completion is recorded by the remittance transaction when
+      // the full verified amount moves the order to `collected_paid`.
+      const enteringCompleted = isFinalCompletedStatus(order, status) && !isFinalCompletedStatus(order, previousStatus)
+      let commissionProgrammeActiveForSale = false
+      if (enteringCompleted) {
+        // Serialize a just-completed sale with a close operation for its exact
+        // Nairobi business month. This prevents a month-close query from
+        // missing a still-uncommitted completed order and creating an earning
+        // in a period that has just been closed.
+        const clock = await client.query('SELECT NOW() AS timestamp')
+        const completionPeriod = commissionPeriodForTimestamp(clock.rows[0].timestamp)
+        const programmeState = await client.query(
+          `SELECT status FROM commission_programmes
+           WHERE effective_from <= $1::date
+             AND (effective_to IS NULL OR effective_to >= $1::date)
+           ORDER BY effective_from DESC, created_at DESC, id DESC
+           LIMIT 1`,
+          [order.sale_date]
+        )
+        // Status policy versions intentionally overlap at their handover
+        // instant; only the latest version is authoritative.
+        commissionProgrammeActiveForSale = programmeState.rows[0]?.status === 'active'
+        if (commissionProgrammeActiveForSale) {
+          await lockCommissionPeriod(client, completionPeriod)
+          const closedPeriod = await client.query(
+            `SELECT id FROM commission_period_closures
+             WHERE period_start = $1::date AND status = 'closed'`,
+            [completionPeriod]
+          )
+          if (closedPeriod.rows.length > 0) {
+            throw Object.assign(
+              new Error(`Commission period ${completionPeriod} is closed; complete this historical order through a reviewed correction instead`),
+              { statusCode: 409 }
+            )
+          }
+        }
+      }
       const deliveryStatus = deliveryStatusForOrder(status, order.delivery_type)
       const codStatus = codStatusForOrder(status)
 
@@ -1283,7 +1552,12 @@ router.put('/:id/status', async (req, res) => {
       if (enteringClosedState) {
         const items = await client.query('SELECT * FROM order_items WHERE order_id = $1 FOR UPDATE', [id])
         for (const item of items.rows) {
-          const internalQuantity = toNumber(item.internal_quantity)
+          const priorReturnResult = await client.query(
+            `SELECT COALESCE(SUM(internal_quantity), 0) AS returned_internal_quantity
+             FROM order_item_returns WHERE order_item_id = $1`,
+            [item.id]
+          )
+          const internalQuantity = Math.max(0, toNumber(item.internal_quantity) - toNumber(priorReturnResult.rows[0]?.returned_internal_quantity))
           if (internalQuantity > 0) {
             await client.query(
               'UPDATE inventory SET quantity = quantity + $1, last_updated = NOW() WHERE product_id = $2',
@@ -1296,8 +1570,11 @@ router.put('/:id/status', async (req, res) => {
           }
 
           await client.query(
-            'UPDATE order_items SET fulfillment_status = $1 WHERE id = $2',
-            [status === 'returned' ? 'returned' : 'cancelled', item.id]
+            `UPDATE order_items
+             SET fulfillment_status = $1,
+                 returned_quantity = CASE WHEN $3::boolean THEN quantity ELSE returned_quantity END
+             WHERE id = $2`,
+            [status === 'returned' ? 'returned' : 'cancelled', item.id, status === 'returned']
           )
         }
 
@@ -1306,7 +1583,11 @@ router.put('/:id/status', async (req, res) => {
           [id]
         )
         for (const payable of payables.rows) {
-          const reversalAmount = toNumber(payable.amount)
+          const previousSupplierReturns = await client.query(
+            'SELECT COALESCE(SUM(amount), 0) AS amount FROM supplier_returns WHERE payable_id = $1',
+            [payable.id]
+          )
+          const reversalAmount = Math.max(0, toNumber(payable.amount) - toNumber(previousSupplierReturns.rows[0]?.amount))
           if (reversalAmount > 0) {
             await client.query(
               `INSERT INTO supplier_returns
@@ -1391,10 +1672,12 @@ router.put('/:id/status', async (req, res) => {
              confirmed_by = CASE WHEN $4 THEN $2 ELSE confirmed_by END,
              cancelled_by = CASE WHEN $5 THEN $2 ELSE cancelled_by END,
              cancelled_at = CASE WHEN $5 THEN COALESCE(cancelled_at, NOW()) ELSE cancelled_at END,
+             commission_completion_by = CASE WHEN $6 THEN $2 ELSE commission_completion_by END,
+             commission_completion_at = CASE WHEN $6 THEN NOW() ELSE commission_completion_at END,
              updated_at = NOW()
          WHERE id = $3
          RETURNING *`,
-        [status, req.user?.userId || null, id, status === 'confirmed', status === 'cancelled']
+        [status, req.user?.userId || null, id, status === 'confirmed', status === 'cancelled', enteringCompleted]
       )
 
       await logAudit({
@@ -1413,7 +1696,9 @@ router.put('/:id/status', async (req, res) => {
         }
       })
 
-      const statusLabel = status === 'delivered' ? 'completed' : status
+      const statusLabel = status === 'delivered'
+        ? (order.delivery_type === 'courier' && order.courier_payment_type === 'cod' ? 'pending payment' : 'completed')
+        : status
       const previousStatusLabel = normalizedWorkflowStatus(previousStatus)
       const deliveryTypeLabel = (order.delivery_type || 'walk_in').toUpperCase()
       const totalAmount = toNumber(order.total_amount)
@@ -1431,20 +1716,11 @@ router.put('/:id/status', async (req, res) => {
         entityId: id
       }).catch(() => {})
 
-      const enteringCompleted = ['delivered', 'collected_paid'].includes(status) && !['delivered', 'collected_paid'].includes(previousStatus)
       if (enteringCompleted || enteringClosedState) {
-        const items = await client.query('SELECT oi.*, p.category_id FROM order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = $1 FOR UPDATE', [id])
+        const items = await client.query('SELECT oi.*, p.category_id FROM order_items oi JOIN products p ON p.id = oi.product_id WHERE oi.order_id = $1 FOR UPDATE OF oi', [id])
         for (const item of items.rows) {
           if (enteringCompleted) {
-            const evaluation = await evaluateOrderItem(
-              id, item.id, status, order.delivery_type, order.courier_payment_type,
-              toNumber(order.paid_amount), toNumber(order.total_amount),
-              item.product_id, item.category_id, toNumber(item.quantity),
-              order.created_by, now.slice(0, 10)
-            )
-            if (evaluation.eligible) {
-              await earnCommission(id, item.id, item.product_id, item.category_id, toNumber(item.quantity), order.created_by, now.slice(0, 10), req.user?.userId || null).catch(() => {})
-            }
+            await evaluateAndEarnOrderItem(id, item.id, req.user?.userId || null, client)
           }
           if (enteringClosedState) {
             const existingResult = await client.query(
@@ -1452,7 +1728,7 @@ router.put('/:id/status', async (req, res) => {
               [item.id]
             )
             for (const existing of existingResult.rows) {
-              await reverseCommission(existing.id, id, item.id, toNumber(item.quantity), `Order ${status}`, req.user?.userId || null).catch(() => {})
+              await reverseCommission(existing.id, id, item.id, toNumber(item.quantity), `Order ${status}`, req.user?.userId || null, client, 'order_status', id)
             }
           }
         }
@@ -1465,6 +1741,21 @@ router.put('/:id/status', async (req, res) => {
   } catch (err) {
     console.error('Order status update error:', err)
     const statusCode = (err as any).statusCode || 500
+    if (statusCode >= 400 && statusCode < 500) {
+      try {
+        await logAudit({
+          req,
+          userId: req.user?.userId || null,
+          action: 'order_status_change_rejected',
+          entityType: 'order',
+          entityId: req.params.id || null,
+          newValues: { requested_status: req.body?.status || null },
+          metadata: { status_code: statusCode, outcome: 'rejected' }
+        })
+      } catch (auditError) {
+        console.error('Unable to record rejected order status attempt:', auditError)
+      }
+    }
     res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (err as Error).message } })
   }
 })

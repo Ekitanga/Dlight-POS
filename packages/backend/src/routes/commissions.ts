@@ -1,118 +1,273 @@
 import { Router } from 'express'
 import { query } from '../db/index.js'
-import { authMiddleware, requireModulePermission, requireAdmin } from '../middleware/auth.js'
+import { authMiddleware, getUserPermissions, requireAnyPermission, requirePermission } from '../middleware/auth.js'
 import { logAudit } from '../utils/audit.js'
 import {
   getProgrammeHistory,
+  getProgrammeStateAsOf,
   updateProgrammeStatus,
   setRate,
   setEligibility,
   getSalespersonCommissionSummary,
   getSalespersonDailyCommission,
+  getSalespersonMonthlyCommissionHistory,
   getSalespersonCommissionTransactions,
+  getManagementCommissionTransactions,
   getPotentialCommission,
   getManagementCommissionSummary,
   getManagementCommissionBySalesperson,
   approveCommission,
   payCommission,
+  payCommissionBulk,
   manualAdjustment,
-  evaluateOrdersForDateRange
+  evaluateOrdersForDateRange,
+  closeCommissionPeriod,
+  getCommissionPeriodClosures
 } from '../services/commission.js'
 
 const router = Router()
 
+function nairobiToday() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date())
+}
+
+function nextMonthStart(monthStart: string) {
+  const [year, month] = monthStart.split('-').map(Number)
+  return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10)
+}
+
 router.use(authMiddleware)
 
-router.get('/programme', requireModulePermission('commission'), async (req, res) => {
+// Commission operators need their own narrowly scoped selector data. Requiring
+// products.view or users.view here would make commission.manage unusable and
+// leaks unrelated modules into a deliberately granular permission model.
+router.get('/lookups', requireAnyPermission([['commission', 'manage'], ['commission', 'adjust'], ['commission', 'view'], ['commission', 'approve'], ['commission', 'pay']]), async (req, res) => {
+  try {
+    const permissions = new Set(await getUserPermissions(req.user!.userId, req.user!.role))
+    const canManage = permissions.has('commission.manage')
+    const [salespeopleResult, productsResult, categoriesResult] = await Promise.all([
+      query(`SELECT id, full_name, email FROM users
+             WHERE is_active = TRUE AND commission_eligible = TRUE AND role NOT IN ('admin', 'owner')
+             ORDER BY full_name ASC`),
+      canManage
+        ? query(`SELECT id, name, sku, category_id FROM products WHERE is_active = TRUE AND deleted_at IS NULL ORDER BY name ASC`)
+        : Promise.resolve({ rows: [] }),
+      canManage
+        ? query(`SELECT id, name FROM categories ORDER BY name ASC`)
+        : Promise.resolve({ rows: [] })
+    ])
+    res.json({ salespeople: salespeopleResult.rows, products: productsResult.rows, categories: categoriesResult.rows })
+  } catch {
+    res.status(500).json({ error: { message: 'Unable to load commission lookup data' } })
+  }
+})
+
+router.get('/programme', requirePermission('commission', 'manage'), async (req, res) => {
   try {
     const history = await getProgrammeHistory()
-    res.json({ active: history[0] || null, history })
+    const current = await getProgrammeStateAsOf(new Date().toISOString())
+    res.json({ current, active: current?.status === 'active' ? current : null, history })
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }
 })
 
-router.post('/programme', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+router.get('/status', requireAnyPermission([
+  ['commission', 'own_view'], ['commission', 'own_daily'], ['commission', 'own_monthly'],
+  ['commission', 'own_history'], ['commission', 'own_transactions'], ['commission', 'own_potential'],
+  ['commission', 'view'], ['commission', 'manage'], ['commission', 'approve'], ['commission', 'pay'],
+  ['commission', 'adjust'], ['commission', 'reconcile'], ['commission', 'close']
+]), async (_req, res) => {
+  try {
+    const current = await getProgrammeStateAsOf(new Date().toISOString())
+    const permissions = new Set(await getUserPermissions(_req.user!.userId, _req.user!.role))
+    const canManage = permissions.has('commission.manage')
+    const rateResult = current && canManage
+      ? await query(
+          `SELECT rate_per_item, effective_from
+           FROM commission_rates
+           WHERE programme_id = $1 AND scope_type = 'global'
+             AND effective_from <= (CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')
+             AND (effective_to IS NULL OR effective_to >= (CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi'))
+           ORDER BY effective_from DESC, created_at DESC LIMIT 1`,
+          [current.id]
+        )
+      : { rows: [] as any[] }
+    const settingsResult = await query('SELECT commission_module_enabled FROM settings ORDER BY id DESC LIMIT 1')
+    const moduleEnabled = settingsResult.rows[0]?.commission_module_enabled !== false
+    res.json({
+      configured: Boolean(current),
+      status: current?.status || 'not_configured',
+      effectiveFrom: current?.effective_from || null,
+      reason: canManage ? current?.reason || null : null,
+      currentRate: rateResult.rows[0] || null,
+      moduleEnabled
+    })
+  } catch (error) {
+    const statusCode = (error as any).statusCode || 500
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.post('/programme', requirePermission('commission', 'manage'), async (req, res) => {
   try {
     const { status, effective_from, effective_to, reason } = req.body
-    const result = await updateProgrammeStatus('', status, effective_from, effective_to, reason, req.user?.userId || null)
+    const result = await updateProgrammeStatus('', status, effective_from, effective_to, reason, req.user?.userId || null, true)
     res.status(201).json(result)
-  } catch {
-    res.status(500).json({ error: { message: 'Database error' } })
+  } catch (error) {
+    const statusCode = (error as any).statusCode || 500
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (error as Error).message } })
   }
 })
 
-router.get('/rates', requireModulePermission('commission'), async (req, res) => {
+router.get('/rates', requirePermission('commission', 'manage'), async (req, res) => {
   try {
-    const programmeResult = await query(`SELECT id FROM commission_programmes WHERE status = 'active' ORDER BY effective_from DESC LIMIT 1`)
-    const programmeId = programmeResult.rows[0]?.id
-    if (!programmeId) {
+    const programme = await getProgrammeStateAsOf(new Date().toISOString())
+    if (!programme) {
       return res.json({ rates: [], programmeId: null })
     }
     const result = await query(
       `SELECT id, programme_id, rate_per_item, effective_from, effective_to, scope_type, scope_id, scope_name, created_by, created_at
-       FROM commission_rates WHERE programme_id = $1 ORDER BY effective_from DESC`,
-      [programmeId]
+       FROM commission_rates WHERE programme_id = $1 ORDER BY effective_from DESC, created_at DESC`,
+      [programme.id]
     )
-    res.json({ rates: result.rows, programmeId })
+    res.json({ rates: result.rows, programmeId: programme.id })
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }
 })
 
-router.post('/rates', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+router.post('/rates', requirePermission('commission', 'manage'), async (req, res) => {
   try {
     const { rate_per_item, scope_type, scope_id, scope_name, effective_from, effective_to } = req.body
-    const programmeResult = await query(`SELECT id FROM commission_programmes WHERE status = 'active' ORDER BY effective_from DESC LIMIT 1`)
-    const programmeId = programmeResult.rows[0]?.id
-    if (!programmeId) {
-      return res.status(400).json({ error: { message: 'No active commission programme' } })
+    const programme = await getProgrammeStateAsOf(new Date().toISOString())
+    if (!programme) {
+      return res.status(400).json({ error: { message: 'Configure the commission programme first' } })
     }
-    const result = await setRate(programmeId, rate_per_item, scope_type || 'global', scope_id || null, scope_name || null, effective_from || new Date().toISOString(), effective_to || null, req.user?.userId || null)
+    const numericRate = Number(rate_per_item)
+    if (!Number.isFinite(numericRate) || numericRate <= 0) {
+      return res.status(400).json({ error: { message: 'Rate must be greater than zero' } })
+    }
+    if (!['global', 'category', 'product', 'salesperson'].includes(scope_type || 'global')) {
+      return res.status(400).json({ error: { message: 'Invalid rate scope' } })
+    }
+    if ((scope_type || 'global') !== 'global' && !scope_id) {
+      return res.status(400).json({ error: { message: 'Select a category, product, or salesperson for this rate' } })
+    }
+    const result = await setRate(programme.id, numericRate, scope_type || 'global', scope_id || null, scope_name || null, effective_from || new Date().toISOString(), effective_to || null, req.user?.userId || null, true)
     res.status(201).json(result)
-  } catch {
-    res.status(500).json({ error: { message: 'Database error' } })
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
   }
 })
 
-router.get('/eligibility', requireModulePermission('commission'), async (req, res) => {
+router.get('/eligibility', requirePermission('commission', 'manage'), async (req, res) => {
   try {
-    const programmeResult = await query(`SELECT id FROM commission_programmes WHERE status = 'active' ORDER BY effective_from DESC LIMIT 1`)
-    const programmeId = programmeResult.rows[0]?.id
-    if (!programmeId) {
+    const programme = await getProgrammeStateAsOf(new Date().toISOString())
+    if (!programme) {
       return res.json({ eligibility: [], programmeId: null })
     }
     const result = await query(
       `SELECT id, programme_id, scope_type, scope_id, scope_name, is_eligible, effective_from, effective_to, created_by, created_at
-       FROM commission_eligibility WHERE programme_id = $1 ORDER BY effective_from DESC`,
-      [programmeId]
+       FROM commission_eligibility WHERE programme_id = $1 ORDER BY effective_from DESC, created_at DESC`,
+      [programme.id]
     )
-    res.json({ eligibility: result.rows, programmeId })
+    res.json({ eligibility: result.rows, programmeId: programme.id })
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }
 })
 
-router.post('/eligibility', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+router.post('/eligibility', requirePermission('commission', 'manage'), async (req, res) => {
   try {
     const { scope_type, scope_id, scope_name, is_eligible, effective_from, effective_to } = req.body
-    const programmeResult = await query(`SELECT id FROM commission_programmes WHERE status = 'active' ORDER BY effective_from DESC LIMIT 1`)
-    const programmeId = programmeResult.rows[0]?.id
-    if (!programmeId) {
-      return res.status(400).json({ error: { message: 'No active commission programme' } })
+    const programme = await getProgrammeStateAsOf(new Date().toISOString())
+    if (!programme) {
+      return res.status(400).json({ error: { message: 'Configure the commission programme first' } })
     }
-    const result = await setEligibility(programmeId, scope_type, scope_id, scope_name, is_eligible, effective_from || new Date().toISOString(), effective_to || null, req.user?.userId || null)
+    if (!['category', 'product'].includes(scope_type) || !scope_id || !scope_name) {
+      return res.status(400).json({ error: { message: 'Select a valid product or category' } })
+    }
+    if (typeof is_eligible !== 'boolean') {
+      return res.status(400).json({ error: { message: 'is_eligible must be true or false' } })
+    }
+    const result = await setEligibility(programme.id, scope_type, scope_id, scope_name, is_eligible, effective_from || new Date().toISOString(), effective_to || null, req.user?.userId || null, true)
     res.status(201).json(result)
-  } catch {
-    res.status(500).json({ error: { message: 'Database error' } })
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
   }
 })
 
-router.get('/own/summary', requireModulePermission('commission'), async (req, res) => {
+router.put('/eligibility/:id', requirePermission('commission', 'manage'), async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10)
+    const existing = await query('SELECT * FROM commission_eligibility WHERE id = $1', [req.params.id])
+    if (!existing.rows.length) return res.status(404).json({ error: { message: 'Eligibility rule not found' } })
+    const prior = existing.rows[0]
+    const { is_eligible, effective_from, effective_to } = req.body
+    if (typeof is_eligible !== 'boolean' || !effective_from) {
+      return res.status(400).json({ error: { message: 'is_eligible and effective_from are required' } })
+    }
+    const replacement = await setEligibility(
+      prior.programme_id,
+      prior.scope_type,
+      prior.scope_id,
+      prior.scope_name,
+      is_eligible,
+      effective_from,
+      effective_to || null,
+      req.user?.userId || null,
+      true,
+      req.params.id
+    )
+    await logAudit({
+      userId: req.user?.userId || null,
+      action: 'commission_eligibility_replaced',
+      entityType: 'commission_eligibility',
+      entityId: req.params.id,
+      oldValues: { is_eligible: prior.is_eligible, effective_from: prior.effective_from, effective_to: prior.effective_to },
+      newValues: { replacement_rule_id: replacement.id, is_eligible, effective_from, effective_to: effective_to || null }
+    })
+    res.json(replacement)
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.delete('/eligibility/:id', requirePermission('commission', 'manage'), async (req, res) => {
+  try {
+    const existing = await query('SELECT * FROM commission_eligibility WHERE id = $1', [req.params.id])
+    if (!existing.rows.length) return res.status(404).json({ error: { message: 'Eligibility rule not found' } })
+    const ended = await query(
+      `UPDATE commission_eligibility
+       SET effective_to = COALESCE(effective_to, CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')
+       WHERE id = $1 RETURNING *`,
+      [req.params.id]
+    )
+    await logAudit({
+      userId: req.user?.userId || null,
+      action: 'commission_eligibility_ended',
+      entityType: 'commission_eligibility',
+      entityId: req.params.id,
+      oldValues: { effective_to: existing.rows[0].effective_to },
+      newValues: { effective_to: ended.rows[0].effective_to }
+    })
+    res.status(204).send()
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.get('/own/summary', requireAnyPermission([['commission', 'own_view'], ['commission', 'own_monthly']]), async (req, res) => {
+  try {
+    const today = nairobiToday()
     const monthStart = today.slice(0, 8) + '01'
-    const nextMonth = new Date(Date.now() + 32 * 24 * 60 * 60 * 1000).toISOString().slice(0, 8) + '01'
+    const nextMonth = nextMonthStart(monthStart)
     const summary = await getSalespersonCommissionSummary(req.user!.userId, monthStart, nextMonth)
     res.json(summary)
   } catch {
@@ -120,9 +275,9 @@ router.get('/own/summary', requireModulePermission('commission'), async (req, re
   }
 })
 
-router.get('/own/daily', requireModulePermission('commission'), async (req, res) => {
+router.get('/own/daily', requirePermission('commission', 'own_daily'), async (req, res) => {
   try {
-    const today = new Date().toISOString().slice(0, 10)
+    const today = nairobiToday()
     const monthStart = today.slice(0, 8) + '01'
     const daily = await getSalespersonDailyCommission(req.user!.userId, monthStart, today)
     res.json({ daily, monthStart })
@@ -131,7 +286,7 @@ router.get('/own/daily', requireModulePermission('commission'), async (req, res)
   }
 })
 
-router.get('/own/transactions', requireModulePermission('commission'), async (req, res) => {
+router.get('/own/transactions', requirePermission('commission', 'own_transactions'), async (req, res) => {
   try {
     const page = Number(req.query.page) || 1
     const pageSize = Number(req.query.page_size) || 25
@@ -142,7 +297,7 @@ router.get('/own/transactions', requireModulePermission('commission'), async (re
   }
 })
 
-router.get('/own/potential', requireModulePermission('commission'), async (req, res) => {
+router.get('/own/potential', requirePermission('commission', 'own_potential'), async (req, res) => {
   try {
     const potential = await getPotentialCommission(req.user!.userId)
     res.json({ potential })
@@ -151,11 +306,11 @@ router.get('/own/potential', requireModulePermission('commission'), async (req, 
   }
 })
 
-router.get('/summary', requireModulePermission('commission'), async (req, res) => {
+router.get('/summary', requirePermission('commission', 'view'), async (req, res) => {
   try {
     const { date_from, date_to } = req.query
-    const today = new Date().toISOString().slice(0, 10)
-    const dateFrom = String(date_from || today)
+    const today = nairobiToday()
+    const dateFrom = String(date_from || `${today.slice(0, 8)}01`)
     const dateTo = String(date_to || today)
     const summary = await getManagementCommissionSummary(dateFrom, dateTo)
     res.json(summary)
@@ -164,11 +319,11 @@ router.get('/summary', requireModulePermission('commission'), async (req, res) =
   }
 })
 
-router.get('/by-salesperson', requireModulePermission('commission'), async (req, res) => {
+router.get('/by-salesperson', requirePermission('commission', 'view'), async (req, res) => {
   try {
     const { date_from, date_to } = req.query
-    const today = new Date().toISOString().slice(0, 10)
-    const dateFrom = String(date_from || today)
+    const today = nairobiToday()
+    const dateFrom = String(date_from || `${today.slice(0, 8)}01`)
     const dateTo = String(date_to || today)
     const data = await getManagementCommissionBySalesperson(dateFrom, dateTo)
     res.json({ salespeople: data, dateFrom, dateTo })
@@ -177,43 +332,130 @@ router.get('/by-salesperson', requireModulePermission('commission'), async (req,
   }
 })
 
-router.post('/transactions/:id/approve', requireModulePermission('commission'), async (req, res) => {
+router.get('/own/history', requirePermission('commission', 'own_history'), async (req, res) => {
+  try {
+    const history = await getSalespersonMonthlyCommissionHistory(req.user!.userId, Number(req.query.limit) || 24)
+    res.json({ history })
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.get('/transactions', requireAnyPermission([['commission', 'view'], ['commission', 'approve'], ['commission', 'pay'], ['commission', 'adjust']]), async (req, res) => {
+  try {
+    const today = nairobiToday()
+    const dateFrom = String(req.query.date_from || `${today.slice(0, 8)}01`)
+    const dateTo = String(req.query.date_to || today)
+    const page = Math.max(1, Number(req.query.page) || 1)
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.page_size) || 50))
+    const result = await getManagementCommissionTransactions(
+      dateFrom,
+      dateTo,
+      page,
+      pageSize,
+      req.query.status ? String(req.query.status) : undefined,
+      req.query.salesperson_id ? String(req.query.salesperson_id) : undefined
+    )
+    res.json({ ...result, dateFrom, dateTo })
+  } catch (error) {
+    const statusCode = (error as any).statusCode || 500
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.post('/transactions/:id/approve', requirePermission('commission', 'approve'), async (req, res) => {
   try {
     const result = await approveCommission(req.params.id, req.user?.userId || null)
     if (!result) return res.status(404).json({ error: { message: 'Transaction not found or not pending' } })
     res.json(result)
-  } catch {
-    res.status(500).json({ error: { message: 'Database error' } })
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
   }
 })
 
-router.post('/transactions/:id/pay', requireModulePermission('commission'), async (req, res) => {
+router.post('/transactions/:id/pay', requirePermission('commission', 'pay'), async (req, res) => {
   try {
-    const result = await payCommission(req.params.id, req.user?.userId || null)
+    const result = await payCommission(req.params.id, req.user?.userId || null, {
+      amount: req.body.amount === undefined ? undefined : Number(req.body.amount),
+      paymentMethod: req.body.payment_method,
+      reference: req.body.reference || null,
+      notes: req.body.notes || null,
+      idempotencyKey: req.body.idempotency_key || req.get('Idempotency-Key') || null
+    })
     if (!result) return res.status(404).json({ error: { message: 'Transaction not found or not approved' } })
     res.json(result)
-  } catch {
-    res.status(500).json({ error: { message: 'Database error' } })
+  } catch (error) {
+    const status = (error as any).statusCode || ((error as any).code === '23505' || (error as any).code === '55000' ? 409 : 500)
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
   }
 })
 
-router.post('/adjust', requireModulePermission('commission'), async (req, res) => {
+router.post('/bulk-pay', requirePermission('commission', 'pay'), async (req, res) => {
   try {
-    const { salesperson_id, amount, adjustment_type, reason, order_id, order_item_id } = req.body
-    if (!salesperson_id || !amount || !adjustment_type || !reason) {
-      return res.status(400).json({ error: { message: 'salesperson_id, amount, adjustment_type, and reason are required' } })
+    const transactionIds = Array.isArray(req.body.transaction_ids) ? req.body.transaction_ids.filter((id: any) => typeof id === 'string') : []
+    if (transactionIds.length === 0) {
+      return res.status(400).json({ error: { message: 'Select at least one commission transaction to pay' } })
+    }
+    const result = await payCommissionBulk(transactionIds, req.user?.userId || null, {
+      amount: req.body.amount === undefined ? undefined : Number(req.body.amount),
+      paymentMethod: req.body.payment_method,
+      reference: req.body.reference || null,
+      notes: req.body.notes || null,
+      idempotencyKey: req.body.idempotency_key || req.get('Idempotency-Key') || null
+    })
+    res.json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || ((error as any).code === '23505' || (error as any).code === '55000' ? 409 : 500)
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.post('/adjust', requirePermission('commission', 'adjust'), async (req, res) => {
+  try {
+    const { salesperson_id, amount, adjustment_type, reason, order_id, order_item_id, period } = req.body
+    if (!salesperson_id || !amount || !adjustment_type || !reason || !period) {
+      return res.status(400).json({ error: { message: 'salesperson_id, amount, adjustment_type, reason, and period are required' } })
     }
     if (!['manual_add', 'manual_deduct'].includes(adjustment_type)) {
       return res.status(400).json({ error: { message: 'adjustment_type must be manual_add or manual_deduct' } })
     }
-    const result = await manualAdjustment(salesperson_id, amount, adjustment_type, reason, order_id || null, order_item_id || null, req.user?.userId || null)
+    const result = await manualAdjustment(salesperson_id, amount, adjustment_type, reason, order_id || null, order_item_id || null, period, req.user?.userId || null)
     res.status(201).json(result)
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }
 })
 
-router.put('/rates/:id', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+// Period closure is deliberately separate from general commission management.
+// It has its own permission because it freezes historical payroll records.
+router.get('/periods', requirePermission('commission', 'close'), async (req, res) => {
+  try {
+    const closures = await getCommissionPeriodClosures(Number(req.query.limit) || 24)
+    res.json({ closures })
+  } catch {
+    res.status(500).json({ error: { message: 'Unable to load commission closure history' } })
+  }
+})
+
+router.post('/periods/close', requirePermission('commission', 'close'), async (req, res) => {
+  try {
+    const period = String(req.body.period || req.body.period_start || '')
+    const result = await closeCommissionPeriod(period, req.body.reason, req.user?.userId || null)
+    res.status(201).json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({
+      error: {
+        message: status === 500 ? 'Unable to close commission period' : (error as Error).message,
+        pending_transactions: (error as any).pendingTransactions || undefined
+      }
+    })
+  }
+})
+
+router.put('/rates/:id', requirePermission('commission', 'manage'), async (req, res) => {
   try {
     const { id } = req.params
     const { rate_per_item, effective_from, effective_to } = req.body
@@ -223,40 +465,58 @@ router.put('/rates/:id', requireAdmin, requireModulePermission('commission'), as
     if (!effective_from) {
       return res.status(400).json({ error: { message: 'effective_from is required' } })
     }
-    const existing = await query('SELECT id FROM commission_rates WHERE id = $1', [id])
+    const existing = await query('SELECT * FROM commission_rates WHERE id = $1', [id])
     if (!existing.rows.length) {
       return res.status(404).json({ error: { message: 'Rate not found' } })
     }
-    const result = await query(
-      `UPDATE commission_rates SET rate_per_item = $1, effective_from = $2, effective_to = $3 WHERE id = $4 RETURNING *`,
-      [rate_per_item, effective_from, effective_to || null, id]
+    const prior = existing.rows[0]
+    const result = await setRate(
+      prior.programme_id,
+      Number(rate_per_item),
+      prior.scope_type,
+      prior.scope_id,
+      prior.scope_name,
+      effective_from,
+      effective_to || null,
+      req.user?.userId || null,
+      true,
+      id
     )
     await logAudit({
       userId: req.user?.userId || null,
       action: 'commission_rate_updated',
       entityType: 'commission_rate',
       entityId: id,
+      oldValues: { rate_per_item: prior.rate_per_item, effective_from: prior.effective_from, effective_to: prior.effective_to },
       newValues: { rate_per_item, effective_from, effective_to }
     })
-    res.json(result.rows[0])
-  } catch {
-    res.status(500).json({ error: { message: 'Database error' } })
+    res.json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
   }
 })
 
-router.delete('/rates/:id', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+router.delete('/rates/:id', requirePermission('commission', 'manage'), async (req, res) => {
   try {
     const { id } = req.params
-    const existing = await query('SELECT id FROM commission_rates WHERE id = $1', [id])
+    const existing = await query('SELECT * FROM commission_rates WHERE id = $1', [id])
     if (!existing.rows.length) {
       return res.status(404).json({ error: { message: 'Rate not found' } })
     }
-    await query('DELETE FROM commission_rates WHERE id = $1', [id])
+    const ended = await query(
+      `UPDATE commission_rates
+       SET effective_to = COALESCE(effective_to, CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')
+       WHERE id = $1 RETURNING *`,
+      [id]
+    )
     await logAudit({
       userId: req.user?.userId || null,
-      action: 'commission_rate_deleted',
+      action: 'commission_rate_ended',
       entityType: 'commission_rate',
-      entityId: id
+      entityId: id,
+      oldValues: { effective_to: existing.rows[0].effective_to },
+      newValues: { effective_to: ended.rows[0].effective_to }
     })
     res.status(204).send()
   } catch {
@@ -264,16 +524,43 @@ router.delete('/rates/:id', requireAdmin, requireModulePermission('commission'),
   }
 })
 
-router.post('/retroactive', requireAdmin, requireModulePermission('commission'), async (req, res) => {
+router.post('/retroactive', requireAnyPermission([['commission', 'manage'], ['commission', 'reconcile']]), async (req, res) => {
   try {
-    const { date_from, date_to } = req.body
+    const { date_from, date_to, apply, reason } = req.body
     if (!date_from || !date_to) {
       return res.status(400).json({ error: { message: 'date_from and date_to are required (YYYY-MM-DD)' } })
     }
-    const result = await evaluateOrdersForDateRange(date_from, date_to, req.user?.userId || null)
+    if (apply === true && req.user?.role !== 'admin' && req.user?.role !== 'owner') {
+      const permissions = await getUserPermissions(req.user!.userId, req.user!.role)
+      if (!permissions.includes('commission.reconcile')) {
+        return res.status(403).json({ error: { message: 'commission.reconcile is required to apply reconciliation changes' } })
+      }
+    }
+    const result = await evaluateOrdersForDateRange(date_from, date_to, req.user?.userId || null, apply === true, reason || null)
     res.json(result)
-  } catch {
-    res.status(500).json({ error: { message: 'Database error' } })
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.post('/own/retroactive', requireAnyPermission([['commission', 'own_view'], ['commission', 'own_potential'], ['commission', 'reconcile'], ['commission', 'manage']]), async (req, res) => {
+  try {
+    const { date_from, date_to, apply, reason } = req.body
+    if (!date_from || !date_to) {
+      return res.status(400).json({ error: { message: 'date_from and date_to are required (YYYY-MM-DD)' } })
+    }
+    if (apply === true && req.user?.role !== 'admin' && req.user?.role !== 'owner') {
+      const permissions = await getUserPermissions(req.user!.userId, req.user!.role)
+      if (!permissions.includes('commission.reconcile') && !permissions.includes('commission.manage')) {
+        return res.status(403).json({ error: { message: 'commission.reconcile or commission.manage is required to apply reconciliation changes' } })
+      }
+    }
+    const result = await evaluateOrdersForDateRange(date_from, date_to, req.user?.userId || null, apply === true, reason || null, req.user?.userId || null)
+    res.json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
   }
 })
 

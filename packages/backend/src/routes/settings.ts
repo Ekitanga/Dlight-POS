@@ -158,7 +158,7 @@ router.put('/', auditMiddleware('setting', 'settings_updated'), async (req, res)
     receipt_header, receipt_footer, receipt_paper_width, receipt_show_customer_address,
     receipt_show_payment_details, receipt_show_delivery_details, appearance_mode,
     brand_preset, primary_color, accent_color, sidebar_style, interface_density,
-    expense_categories
+    expense_categories, commission_module_enabled
   } = req.body
   try {
     const normalizedExpenseCategories = normalizeExpenseCategories(expense_categories)
@@ -186,23 +186,24 @@ router.put('/', auditMiddleware('setting', 'settings_updated'), async (req, res)
           receipt_show_customer_address = $18, receipt_show_payment_details = $19,
           receipt_show_delivery_details = $20, appearance_mode = $21, brand_preset = $22,
           primary_color = $23, accent_color = $24, sidebar_style = $25,
-          interface_density = $26, expense_categories = $27::jsonb, updated_at = NOW()
-         WHERE id = $28 RETURNING *`,
-        [
-          company_name, logo_url || null, company_phone || null, company_email || null,
-          company_address || null, website || null, kra_pin || null, currency || 'KES',
-          Number(tax_rate || 0), mpesa_paybill || null, mpesa_account_number || null,
-          mpesa_till || null, bank_details || null,
-          (order_prefix || 'ORD').toUpperCase(), receipt_header || null, receipt_footer || null,
-          receipt_paper_width || '80mm', receipt_show_customer_address ?? true,
-          receipt_show_payment_details ?? true, receipt_show_delivery_details ?? true,
-          appearance_mode || 'light', brand_preset || 'dlight', primary_color || '#B08D57',
-          accent_color || '#D4AF67', sidebar_style || 'dark',
-          interface_density || 'comfortable',
-          JSON.stringify(normalizedExpenseCategories),
-          existing.rows[0].id
-        ]
-      )
+          interface_density = $26, expense_categories = $27::jsonb, commission_module_enabled = $28, updated_at = NOW()
+         WHERE id = $29 RETURNING *`,
+         [
+           company_name, logo_url || null, company_phone || null, company_email || null,
+           company_address || null, website || null, kra_pin || null, currency || 'KES',
+           Number(tax_rate || 0), mpesa_paybill || null, mpesa_account_number || null,
+           mpesa_till || null, bank_details || null,
+           (order_prefix || 'ORD').toUpperCase(), receipt_header || null, receipt_footer || null,
+           receipt_paper_width || '80mm', receipt_show_customer_address ?? true,
+           receipt_show_payment_details ?? true, receipt_show_delivery_details ?? true,
+           appearance_mode || 'light', brand_preset || 'dlight', primary_color || '#B08D57',
+           accent_color || '#D4AF67', sidebar_style || 'dark',
+           interface_density || 'comfortable',
+           JSON.stringify(normalizedExpenseCategories),
+           commission_module_enabled === false ? false : true,
+           existing.rows[0].id
+         ]
+       )
       res.json(result.rows[0])
     } else {
       const result = await query(
@@ -212,23 +213,24 @@ router.put('/', auditMiddleware('setting', 'settings_updated'), async (req, res)
           receipt_header, receipt_footer, receipt_paper_width, receipt_show_customer_address,
           receipt_show_payment_details, receipt_show_delivery_details, appearance_mode,
           brand_preset, primary_color, accent_color, sidebar_style, interface_density,
-          expense_categories
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27::jsonb)
+          expense_categories, commission_module_enabled
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27::jsonb, $28)
          RETURNING *`,
-        [
-          company_name, logo_url || null, company_phone || null, company_email || null,
-          company_address || null, website || null, kra_pin || null, currency || 'KES',
-          Number(tax_rate || 0), mpesa_paybill || null, mpesa_account_number || null,
-          mpesa_till || null, bank_details || null,
-          (order_prefix || 'ORD').toUpperCase(), receipt_header || null, receipt_footer || null,
-          receipt_paper_width || '80mm', receipt_show_customer_address ?? true,
-          receipt_show_payment_details ?? true, receipt_show_delivery_details ?? true,
-          appearance_mode || 'light', brand_preset || 'dlight', primary_color || '#B08D57',
-          accent_color || '#D4AF67', sidebar_style || 'dark',
-          interface_density || 'comfortable',
-          JSON.stringify(normalizedExpenseCategories)
-        ]
-      )
+         [
+           company_name, logo_url || null, company_phone || null, company_email || null,
+           company_address || null, website || null, kra_pin || null, currency || 'KES',
+           Number(tax_rate || 0), mpesa_paybill || null, mpesa_account_number || null,
+           mpesa_till || null, bank_details || null,
+           (order_prefix || 'ORD').toUpperCase(), receipt_header || null, receipt_footer || null,
+           receipt_paper_width || '80mm', receipt_show_customer_address ?? true,
+           receipt_show_payment_details ?? true, receipt_show_delivery_details ?? true,
+           appearance_mode || 'light', brand_preset || 'dlight', primary_color || '#B08D57',
+           accent_color || '#D4AF67', sidebar_style || 'dark',
+           interface_density || 'comfortable',
+           JSON.stringify(normalizedExpenseCategories),
+           commission_module_enabled === false ? false : true
+         ]
+       )
       res.json(result.rows[0])
     }
   } catch {

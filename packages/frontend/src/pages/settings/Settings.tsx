@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
-import { AlertTriangle, Archive, Building2, Check, CreditCard, Database, Download, Laptop, Loader2, Moon, Palette, Plus, Receipt, RefreshCcw, Save, ShieldAlert, SlidersHorizontal, Sun, Trash2, Upload, X } from 'lucide-react'
+import { AlertTriangle, Archive, Building2, Check, CreditCard, Database, Download, Laptop, Loader2, Moon, Palette, Plus, Receipt, RefreshCcw, Save, ShieldAlert, SlidersHorizontal, Sun, Trash2, TrendingUp, Upload, X } from 'lucide-react'
 import { applyAppearance, AppearanceMode } from '../../lib/appearance'
 
 interface SettingsData {
@@ -33,6 +33,7 @@ interface SettingsData {
   sidebar_style: 'dark' | 'light'
   interface_density: 'comfortable' | 'compact'
   expense_categories: string[]
+  commission_module_enabled?: boolean
 }
 
 interface CleanupPreview {
@@ -360,8 +361,13 @@ export function Settings() {
           <div className="grid gap-4 sm:grid-cols-3">
             <label className="text-sm font-medium">Currency<input {...register('currency', { required: true })} className={`${inputClass} mt-1.5`} placeholder="KES" /></label>
             <label className="text-sm font-medium">Tax Rate (%)<input type="number" min="0" step="0.01" {...register('tax_rate', { valueAsNumber: true })} className={`${inputClass} mt-1.5`} placeholder="Tax percentage" /></label>
-            <label className="text-sm font-medium">Order Prefix<input {...register('order_prefix')} className={`${inputClass} mt-1.5 uppercase`} maxLength={20} placeholder="ORD" /></label>
+            <label className="text-sm font-medium">Order Prefix<input {...register('order_prefix')} className={`${inputClass} mt-1.5`} placeholder="ORD" /></label>
           </div>
+        </section>
+
+        <section className="min-w-0 space-y-5 border-b pb-8">
+          <div className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-primary" /><div><h2 className="font-semibold">Commission Module</h2><p className="text-sm text-muted-foreground">Disable new commission earnings while keeping existing history and reports available.</p></div></div>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" {...register('commission_module_enabled')} className="h-4 w-4" /> Commission module enabled</label>
         </section>
 
         <section className="min-w-0 space-y-5 border-b pb-8">

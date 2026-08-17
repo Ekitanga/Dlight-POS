@@ -6,6 +6,7 @@ import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { formatMoney } from '../../lib/format'
 import { PaginatedResponse, Pagination } from '../../components/Pagination'
+import { invalidateCommissionData } from '../../lib/commissionCache'
 
 interface Customer {
   id: string
@@ -96,6 +97,7 @@ export function Customers() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['customers'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
       setPayingCustomer(null)
       setPaymentAmount('')
       setPaymentReference('')

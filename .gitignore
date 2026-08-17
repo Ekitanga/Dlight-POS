@@ -16,6 +16,9 @@ test-results/
 # Local/generated data
 database/backups/
 packages/backend/database/backups/
+backups/
+.codex-temp/
+scripts/start-live-simulation.ps1
 .agents/
 .kilo/
 

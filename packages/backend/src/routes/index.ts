@@ -29,7 +29,9 @@ router.use('/suppliers', authMiddleware, requireModulePermission('suppliers'), s
 router.use('/riders', authMiddleware, requireModulePermission('riders'), riderRoutes)
 router.use('/couriers', authMiddleware, requireModulePermission('couriers'), courierRoutes)
 router.use('/expenses', authMiddleware, requireModulePermission('expenses'), expenseRoutes)
-router.use('/dashboard', authMiddleware, requireModulePermission('dashboard'), dashboardRoutes)
+// Dashboard widgets authorize themselves with their exact granular permissions.
+// A legacy dashboard.view gate here would block users granted only personal views.
+router.use('/dashboard', authMiddleware, dashboardRoutes)
 router.use('/settings', authMiddleware, requireAdmin, requireModulePermission('settings'), settingsRoutes)
 router.use('/deliveries', authMiddleware, requireModulePermission('deliveries'), deliveryRoutes)
 router.use('/reports', authMiddleware, requireModulePermission('reports'), reportRoutes)
@@ -38,6 +40,6 @@ router.use('/users', authMiddleware, requireAdmin, requireModulePermission('user
 router.use('/inventory', authMiddleware, requireModulePermission('inventory'), inventoryRoutes)
 router.use('/audit', authMiddleware, requireModulePermission('audit'), auditRoutes)
 router.use('/notifications', authMiddleware, notificationsRoutes)
-router.use('/commissions', authMiddleware, requireModulePermission('commission'), commissionRoutes)
+router.use('/commissions', authMiddleware, commissionRoutes)
 
 export { router as apiRouter }

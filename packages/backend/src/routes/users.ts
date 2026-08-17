@@ -23,7 +23,7 @@ router.get('/permissions', async (_req, res) => {
 router.get('/', async (req, res) => {
   try {
     const { search } = req.query
-    let sql = `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.created_at,
+    let sql = `SELECT u.id, u.email, u.full_name, u.role, u.is_active, u.commission_eligible, u.created_at,
       COALESCE(
         (SELECT JSON_AGG(p.module || '.' || p.action ORDER BY p.module, p.action)
          FROM user_permissions up
@@ -50,7 +50,7 @@ router.get('/', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const { email, full_name, role, password, is_active, permissions = [] } = req.body
+    const { email, full_name, role, password, is_active, commission_eligible, permissions = [] } = req.body
     
     const existing = await query('SELECT id FROM users WHERE email = $1', [email])
     if (existing.rows.length > 0) {
@@ -58,11 +58,13 @@ router.post('/', async (req, res) => {
     }
     
     const password_hash = await bcrypt.hash(password, 10)
+    const finalRole = role || 'attendant'
+    const commissionEligible = !['admin', 'owner'].includes(finalRole) && commission_eligible === true
     
     const user = await transaction(async client => {
       const result = await client.query(
-        'INSERT INTO users (email, password_hash, full_name, role, is_active) VALUES ($1, $2, $3, $4, $5) RETURNING id, email, full_name, role, is_active, created_at',
-        [email, password_hash, full_name, role || 'attendant', is_active ?? true]
+        'INSERT INTO users (email, password_hash, full_name, role, is_active, commission_eligible) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, email, full_name, role, is_active, commission_eligible, created_at',
+        [email, password_hash, full_name, finalRole, is_active ?? true, commissionEligible]
       )
       const createdUser = result.rows[0]
       if (createdUser.role !== 'admin' && permissions.length > 0) {
@@ -86,8 +88,8 @@ router.post('/', async (req, res) => {
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params
-    const { email, full_name, role, password, is_active, permissions } = req.body
-    const existingResult = await query('SELECT id, role, is_active FROM users WHERE id = $1', [id])
+    const { email, full_name, role, password, is_active, commission_eligible, permissions } = req.body
+    const existingResult = await query('SELECT id, role, is_active, commission_eligible FROM users WHERE id = $1', [id])
     const existingUser = existingResult.rows[0]
     if (!existingUser) return res.status(404).json({ error: { message: 'User not found' } })
 
@@ -106,6 +108,13 @@ router.put('/:id', async (req, res) => {
     if (full_name) { updateFields.push(`full_name = $${updateFields.length + 1}`); params.push(full_name) }
     if (role) { updateFields.push(`role = $${updateFields.length + 1}`); params.push(role) }
     if (is_active !== undefined) { updateFields.push(`is_active = $${updateFields.length + 1}`); params.push(is_active) }
+    if (commission_eligible !== undefined || role) {
+      const finalRole = role || existingUser.role
+      const commissionEligible = !['admin', 'owner'].includes(finalRole) &&
+        (commission_eligible === undefined ? existingUser.commission_eligible === true : commission_eligible === true)
+      updateFields.push(`commission_eligible = $${updateFields.length + 1}`)
+      params.push(commissionEligible)
+    }
     
     if (password) {
       const password_hash = await bcrypt.hash(password, 10)
@@ -118,7 +127,7 @@ router.put('/:id', async (req, res) => {
     
     const user = await transaction(async client => {
       const result = await client.query(
-        `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${params.length} RETURNING id, email, full_name, role, is_active, created_at`,
+        `UPDATE users SET ${updateFields.join(', ')} WHERE id = $${params.length} RETURNING id, email, full_name, role, is_active, commission_eligible, created_at`,
         params
       )
       const updatedUser = result.rows[0]
@@ -136,7 +145,7 @@ router.put('/:id', async (req, res) => {
       }
       await client.query(
         'INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values) VALUES ($1, $2, $3, $4, $5)',
-        [req.user?.userId, 'user_permissions_updated', 'user', id, JSON.stringify({ role: updatedUser.role, permissions })]
+        [req.user?.userId, 'user_permissions_updated', 'user', id, JSON.stringify({ role: updatedUser.role, commission_eligible: updatedUser.commission_eligible, permissions })]
       )
       return updatedUser
     })

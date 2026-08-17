@@ -23,8 +23,18 @@ for (const file of [
   'database/production_stabilization_phase1.sql',
   'database/permissions_migration.sql',
   'database/production_stabilization_permissions.sql',
+  'database/commission_module_settings_migration.sql',
   'database/commission_tables_migration.sql',
-  'database/commission_permissions_migration.sql'
+  'database/commission_permissions_migration.sql',
+  'database/commission_hardening_migration.sql',
+  'database/commission_dashboard_permission_fix.sql',
+  'database/commission_accuracy_migration.sql',
+  'database/commission_return_accuracy_migration.sql',
+  'database/commission_separation_of_duties_migration.sql',
+  'database/commission_category_snapshot_provenance_migration.sql',
+  'database/commission_period_closure_migration.sql',
+  'database/commission_operational_hardening_migration.sql',
+  'database/commission_business_policy_migration.sql'
 ]) {
   await db.query(await fs.readFile(path.join(root, file), 'utf8'))
 }
@@ -32,10 +42,10 @@ for (const file of [
 const password = 'Phase6-Test-Password!'
 const passwordHash = await bcrypt.hash(password, 4)
 const users = await db.query(
-  `INSERT INTO users (email, password_hash, full_name, role) VALUES
-   ('admin.phase6@dlight.test', $1, 'Phase 6 Admin', 'admin'),
-   ('owner.phase6@dlight.test', $1, 'Phase 6 Owner', 'owner'),
-   ('attendant.phase6@dlight.test', $1, 'Phase 6 Attendant', 'attendant')
+  `INSERT INTO users (email, password_hash, full_name, role, commission_eligible) VALUES
+   ('admin.phase6@dlight.test', $1, 'Phase 6 Admin', 'admin', FALSE),
+   ('owner.phase6@dlight.test', $1, 'Phase 6 Owner', 'owner', FALSE),
+   ('attendant.phase6@dlight.test', $1, 'Phase 6 Attendant', 'attendant', TRUE)
    RETURNING id, email, role`,
   [passwordHash]
 )
@@ -58,12 +68,16 @@ await db.query(
 )
 await db.query(
   `INSERT INTO commission_programmes (status, effective_from, created_by)
-   VALUES ('active', NOW(), $1)`,
+   VALUES ('active', (CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')::date, $1)`,
   [adminUser.id]
 )
 await db.query(
   `INSERT INTO commission_rates (programme_id, rate_per_item, effective_from, scope_type, created_by)
-   SELECT id, 50, NOW(), 'global', $1 FROM commission_programmes LIMIT 1`,
+   SELECT id, 50, (CURRENT_TIMESTAMP AT TIME ZONE 'Africa/Nairobi')::date, 'global', $1
+   FROM commission_programmes
+   WHERE status = 'active'
+   ORDER BY effective_from DESC, created_at DESC, id DESC
+   LIMIT 1`,
   [adminUser.id]
 )
 
@@ -99,6 +113,7 @@ process.env.JWT_SECRET = 'phase6-access-secret-that-is-long-and-safe'
 process.env.JWT_REFRESH_SECRET = 'phase6-refresh-secret-that-is-long-and-safe'
 const { default: app } = await import('./index.js')
 const { pool: appPool } = await import('./db/pool.js')
+const { evaluateOrderItemFromRecords } = await import('./services/commission.js')
 const server = app.listen(0)
 await new Promise<void>(resolve => server.once('listening', resolve))
 const address = server.address()
@@ -185,7 +200,11 @@ async function createOrder(body: Record<string, unknown>, token = admin.accessTo
 async function advance(orderId: string, statuses: string[], extra: Record<string, unknown> = {}) {
   let order
   for (const status of statuses) {
-    order = await request('PUT', `/orders/${orderId}/status`, admin.accessToken, { status, ...extra })
+    order = await request('PUT', `/orders/${orderId}/status`, admin.accessToken, {
+      status,
+      ...(status === 'returned' ? { notes: 'Automated test return reason' } : {}),
+      ...extra
+    })
   }
   return order
 }
@@ -432,7 +451,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
       courier_tracking_number: 'SPD-P6-COD', courier_payment_type: 'cod',
       customer_delivery_fee: 200, actual_courier_fee: 150, payment_method: 'mpesa',
       items: [internalItem(stockProduct.id, 1, 1000)]
-    })
+    }, attendant.accessToken)
     assert.equal(order.payment_status, 'partially_paid')
     assert.equal(Number(order.paid_amount), 200)
     assert.equal(order.delivery_fee_payment_method, 'mpesa')
@@ -441,6 +460,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(await count('SELECT COUNT(*) FROM cod_collections WHERE order_id=$1 AND cod_amount=1000', [order.id]), 1)
     await advance(order.id, ['confirmed', 'in_transit', 'delivered'])
     assert.equal((await row('SELECT status FROM cod_collections WHERE order_id=$1', [order.id])).status, 'delivered_awaiting_remittance')
+    assert.equal((await row('SELECT commission_completion_at FROM orders WHERE id=$1', [order.id])).commission_completion_at, null)
     const dashboardBefore = await request('GET', '/dashboard/stats', admin.accessToken)
     assert.ok(Number(dashboardBefore.outstandingCOD) >= 1000)
     await request('POST', `/deliveries/orders/${order.id}/cod`, admin.accessToken, {
@@ -458,7 +478,22 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(completed.status, 'collected_paid')
     assert.equal(completed.payment_status, 'paid')
     assert.equal(Number(completed.paid_amount), 1200)
+    const finalCompletion = await row(
+      `SELECT o.commission_completion_at, cc.closed_at, cc.remitted_at
+       FROM orders o JOIN cod_collections cc ON cc.order_id = o.id
+       WHERE o.id = $1`,
+      [order.id]
+    )
+    assert.ok(finalCompletion.commission_completion_at)
+    assert.equal(new Date(finalCompletion.commission_completion_at).getTime(), new Date(finalCompletion.closed_at).getTime())
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM audit_logs
+       WHERE entity_type='order' AND entity_id=$1 AND action='order_status_changed'
+         AND old_values->>'status'='delivered' AND new_values->>'status'='collected_paid'`,
+      [order.id]
+    ), 1)
     assert.equal(await count('SELECT COUNT(*) FROM cod_remittances WHERE order_id=$1', [order.id]), 2)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id]), 1)
     await waitForAudit('cod_remittance_recorded', order.id)
     await assertGlobalIntegrity()
   })
@@ -528,6 +563,70 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal((await row('SELECT delivery_status FROM deliveries WHERE order_id=$1', [order.id])).delivery_status, 'delivered')
     const deliveryAmounts = await row('SELECT delivery_income,delivery_cost FROM orders WHERE id=$1', [order.id])
     assert.equal(Number(deliveryAmounts.delivery_income) - Number(deliveryAmounts.delivery_cost), 0)
+    await assertGlobalIntegrity()
+  })
+
+  await t.test('6a. order and delivery workflow filters use the same canonical statuses', async () => {
+    const createWorkflowDelivery = (label: string, courierPaymentType: 'prepaid' | 'cod' = 'prepaid') => createOrder({
+      ...customer(`Workflow ${label}`),
+      delivery_type: 'courier',
+      courier_id: courier.id,
+      courier_tracking_number: `SPD-P6-WORKFLOW-${label.toUpperCase()}`,
+      courier_payment_type: courierPaymentType,
+      customer_delivery_fee: 0,
+      actual_courier_fee: 0,
+      payment_method: courierPaymentType === 'cod' ? 'pay_on_delivery' : 'mpesa',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    })
+
+    const pendingOrder = await createWorkflowDelivery('PENDING')
+    const confirmedOrder = await createWorkflowDelivery('CONFIRMED')
+    await advance(confirmedOrder.id, ['confirmed'])
+    const inTransitOrder = await createWorkflowDelivery('TRANSIT')
+    await advance(inTransitOrder.id, ['confirmed', 'in_transit'])
+    const pendingPaymentOrder = await createWorkflowDelivery('COD', 'cod')
+    await advance(pendingPaymentOrder.id, ['confirmed', 'in_transit', 'delivered'])
+    const completedOrder = await createWorkflowDelivery('COMPLETED')
+    await advance(completedOrder.id, ['confirmed', 'in_transit', 'delivered'])
+    const returnedOrder = await createWorkflowDelivery('RETURNED')
+    await advance(returnedOrder.id, ['confirmed', 'in_transit', 'returned'])
+    const cancelledOrder = await createWorkflowDelivery('CANCELLED')
+    await advance(cancelledOrder.id, ['cancelled'])
+
+    const expectedStages = [
+      ['pending', pendingOrder],
+      ['confirmed', confirmedOrder],
+      ['in_transit', inTransitOrder],
+      ['pending_payment', pendingPaymentOrder],
+      ['completed', completedOrder],
+      ['returned', returnedOrder],
+      ['cancelled', cancelledOrder]
+    ] as const
+
+    for (const [stage, expectedOrder] of expectedStages) {
+      const orders = await request('GET', `/orders?workflow_stage=${stage}&page=1&page_size=100`, admin.accessToken)
+      assert.ok(orders.data.some((order: any) => order.id === expectedOrder.id), `Orders filter should include ${stage}`)
+
+      const deliveries = await request('GET', `/deliveries?workflow_stage=${stage}&page=1&page_size=100`, admin.accessToken)
+      const delivery = deliveries.data.find((record: any) => record.order_id === expectedOrder.id)
+      assert.ok(delivery, `Deliveries filter should include ${stage}`)
+      assert.equal(delivery.workflow_status, stage)
+    }
+
+    // `status` remains the physical-delivery-state filter for callers that
+    // already use it. Combining it with a workflow filter must not turn a COD
+    // delivery awaiting remittance into a completed delivery.
+    const assignedDeliveries = await request('GET', '/deliveries?status=assigned&page=1&page_size=100', admin.accessToken)
+    assert.ok(assignedDeliveries.data.some((record: any) => record.order_id === pendingOrder.id))
+    assert.ok(assignedDeliveries.data.some((record: any) => record.order_id === confirmedOrder.id))
+    const pendingPaymentDeliveries = await request(
+      'GET',
+      '/deliveries?workflow_stage=pending_payment&status=delivered&page=1&page_size=100',
+      admin.accessToken
+    )
+    assert.ok(pendingPaymentDeliveries.data.some((record: any) => record.order_id === pendingPaymentOrder.id))
+    assert.ok(pendingPaymentDeliveries.data.every((record: any) => record.workflow_status === 'pending_payment'))
+    await request('GET', '/deliveries?workflow_stage=not_a_status', admin.accessToken, undefined, 400)
     await assertGlobalIntegrity()
   })
 
@@ -808,6 +907,899 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(await count('SELECT COUNT(*) FROM supplier_settlements WHERE settled_amount=1'), 0)
     await waitForAudit('order_created')
     await assertGlobalIntegrity()
+  })
+
+  await t.test('15. commission accuracy, permissions, payment, and module controls', async () => {
+    await db.query(
+      `INSERT INTO user_permissions (user_id, permission_id, granted_by)
+       SELECT $1, id, $2 FROM permissions
+       WHERE (module = 'commission' AND action IN ('own_view','own_daily','own_history','own_transactions','own_potential'))
+          OR (module = 'orders' AND action = 'status')
+          OR (module = 'dashboard' AND action IN ('view','personal_sales','personal_orders','pending_speedaf'))
+       ON CONFLICT DO NOTHING`,
+      [attendantUser.id, adminUser.id]
+    )
+
+    // Create the qualifying sale in this test so the commission assertion is not
+    // coupled to a prior test's workflow or timing.
+    const commissionOrder = await createOrder({
+      ...customer('Commission Attendant Sale'),
+      delivery_type: 'walk_in',
+      payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 3, 100)]
+    }, attendant.accessToken)
+    await request('PUT', `/orders/${commissionOrder.id}/status`, admin.accessToken, { status: 'confirmed' })
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [commissionOrder.id]), 0)
+    await request('PUT', `/orders/${commissionOrder.id}/status`, admin.accessToken, { status: 'delivered' })
+
+    const commissionItem = await row('SELECT id FROM order_items WHERE order_id = $1', [commissionOrder.id])
+    const commissionEvaluation = await evaluateOrderItemFromRecords(commissionOrder.id, commissionItem.id)
+    assert.ok(
+      commissionEvaluation.eligible || commissionEvaluation.alreadyEarned,
+      `Expected fresh attendant sale to qualify: ${JSON.stringify(commissionEvaluation)}`
+    )
+
+    const attendantCommission = await row(
+      `SELECT ct.* FROM commission_transactions ct
+       WHERE ct.order_id = $1 AND ct.transaction_type = 'earned'
+       ORDER BY ct.created_at DESC LIMIT 1`,
+      [commissionOrder.id]
+    )
+    assert.equal(Number(attendantCommission.eligible_quantity), 3)
+    assert.equal(Number(attendantCommission.rate_per_item), 50)
+    assert.equal(Number(attendantCommission.amount), 150)
+
+    const ownSummary = await request('GET', '/commissions/own/summary', attendant.accessToken)
+    assert.ok(Number(ownSummary.grossEarned) >= 100)
+    await request('GET', '/commissions/summary', attendant.accessToken, undefined, 403)
+
+    // Speedaf COD is not complete at customer delivery. It earns only after an
+    // authorised user records full remittance and the order becomes completed.
+    const ownCodOrder = await createOrder({
+      ...customer('Own COD Remittance Separation'),
+      delivery_type: 'courier', courier_id: courier.id, courier_tracking_number: 'SPD-P6-OWN-COD',
+      courier_payment_type: 'cod', delivery_fee_payment_method: 'paid_to_courier',
+      customer_delivery_fee: 0, actual_courier_fee: 0, payment_method: 'pay_on_delivery',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, attendant.accessToken)
+    await advance(ownCodOrder.id, ['confirmed', 'in_transit', 'delivered'])
+    await db.query(
+      `INSERT INTO user_permissions (user_id, permission_id, granted_by)
+       SELECT $1, id, $2 FROM permissions WHERE module='cod' AND action='remit'
+       ON CONFLICT DO NOTHING`,
+      [attendantUser.id, adminUser.id]
+    )
+    await request('POST', `/deliveries/orders/${ownCodOrder.id}/cod`, attendant.accessToken, {
+      amount: 100, payment_method: 'mpesa', reference: 'P6-OWN-COD-BLOCKED'
+    }, 403)
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [ownCodOrder.id])).status, 'delivered')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [ownCodOrder.id]), 0)
+    await request('POST', `/deliveries/orders/${ownCodOrder.id}/cod`, admin.accessToken, {
+      amount: 100, payment_method: 'mpesa', reference: 'P6-OWN-COD-ADMIN-REMIT'
+    }, 201)
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [ownCodOrder.id])).status, 'collected_paid')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [ownCodOrder.id]), 1)
+
+    // The order creator owns the sale. Completion unlocks commission without a
+    // second commission-specific verification step.
+    const selfCompletedOrder = await createOrder({
+      ...customer('Independent Commission Verification'), delivery_type: 'walk_in', payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, attendant.accessToken)
+    await request('PUT', `/orders/${selfCompletedOrder.id}/status`, attendant.accessToken, { status: 'confirmed' })
+    await request('PUT', `/orders/${selfCompletedOrder.id}/status`, attendant.accessToken, { status: 'delivered' })
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [selfCompletedOrder.id]), 1)
+
+    // The COD separation-of-duties scenario above also uses this stock item;
+    // take the return baseline only after that independent sale has consumed
+    // its item. The assertions below then isolate the three-item commission
+    // order's partial/full return behaviour.
+    const stockBeforeCommissionReturn = Number((await row('SELECT quantity FROM inventory WHERE product_id = $1', [stockProduct.id])).quantity)
+
+    const personalDashboard = await request('GET', '/dashboard/stats', attendant.accessToken)
+    assert.ok(Object.hasOwn(personalDashboard, 'myTodaySales'))
+    assert.ok(!Object.hasOwn(personalDashboard, 'netProfit'))
+    assert.ok(!Object.hasOwn(personalDashboard, 'supplierPayables'))
+
+    // Every personal dashboard card must load, including the selected-period
+    // queries that previously used a sparse PostgreSQL parameter list.
+    const personalCardNames = [
+      'my_sales_today',
+      'my_sales_period',
+      'my_orders_period',
+      'my_open_orders',
+      'my_completed_orders',
+      'my_speedaf_pending'
+    ]
+    const personalCardResults: Record<string, any> = {}
+    for (const card of personalCardNames) {
+      personalCardResults[card] = await request(
+        'GET',
+        `/dashboard/drilldown?card=${card}&date_from=${isoDate()}&date_to=${isoDate()}`,
+        attendant.accessToken
+      )
+      assert.equal(personalCardResults[card].kind, 'orders')
+      assert.ok(personalCardResults[card].rows.every((item: any) => item.creator_name === 'Phase 6 Attendant'))
+    }
+
+    const completedDrilldown = personalCardResults.my_completed_orders
+    assert.equal(completedDrilldown.kind, 'orders')
+    assert.ok(completedDrilldown.rows.some((item: any) => item.order_id === commissionOrder.id))
+    assert.equal(completedDrilldown.total, personalDashboard.myCompletedOrders)
+    assert.equal(completedDrilldown.summary.completedOrders, completedDrilldown.total)
+    assert.ok(completedDrilldown.summary.totalCompletedSales > 0)
+    assert.ok(completedDrilldown.rows.every((item: any) => item.completion_date))
+    assert.ok(completedDrilldown.rows.every((item: any) => ['earned', 'expected', 'not_eligible', 'reversed'].includes(item.commission_status)))
+    for (const item of completedDrilldown.rows) {
+      assert.equal((await row('SELECT created_by FROM orders WHERE id=$1', [item.order_id])).created_by, attendantUser.id)
+    }
+    const futureCompletedDrilldown = await request(
+      'GET',
+      `/dashboard/drilldown?card=my_completed_orders&date_from=${addDays(isoDate(), 1)}&date_to=${addDays(isoDate(), 1)}`,
+      attendant.accessToken
+    )
+    assert.equal(futureCompletedDrilldown.total, 0)
+
+    const ownCommissionCards = ['recorded', 'reversals', 'balance', 'approved', 'paid', 'outstanding', 'recovery']
+    const ownCommissionResults: Record<string, any> = {}
+    for (const card of ownCommissionCards) {
+      ownCommissionResults[card] = await request(
+        'GET',
+        `/dashboard/drilldown?card=my_commission_${card}&date_from=${isoDate()}&date_to=${isoDate()}`,
+        attendant.accessToken
+      )
+      assert.equal(ownCommissionResults[card].kind, 'commissions')
+    }
+    const ownCommissionDrilldown = ownCommissionResults.recorded
+    assert.equal(ownCommissionDrilldown.kind, 'commissions')
+    assert.ok(ownCommissionDrilldown.rows.some((item: any) => item.order_id === commissionOrder.id))
+    assert.ok(ownCommissionDrilldown.rows.every((item: any) => item.salesperson_name === 'Phase 6 Attendant'))
+    await request(
+      'GET',
+      `/dashboard/drilldown?card=company_commission_recorded&date_from=${isoDate()}&date_to=${isoDate()}`,
+      attendant.accessToken,
+      undefined,
+      403
+    )
+    const companyCommissionCards = ['recorded', 'reversals', 'balance', 'approved', 'paid', 'outstanding', 'recovery', 'salespeople']
+    const companyCommissionResults: Record<string, any> = {}
+    for (const card of companyCommissionCards) {
+      companyCommissionResults[card] = await request(
+        'GET',
+        `/dashboard/drilldown?card=company_commission_${card}&date_from=${isoDate()}&date_to=${isoDate()}`,
+        admin.accessToken
+      )
+      assert.equal(companyCommissionResults[card].kind, card === 'salespeople' ? 'salespeople' : 'commissions')
+    }
+    const companyCommissionDrilldown = companyCommissionResults.recorded
+    assert.equal(companyCommissionDrilldown.kind, 'commissions')
+    await request(
+      'GET',
+      `/dashboard/drilldown?card=unknown_card&date_from=${isoDate()}&date_to=${isoDate()}`,
+      attendant.accessToken,
+      undefined,
+      400
+    )
+
+    const duplicateItems = await count(
+      `SELECT COUNT(*) FROM (
+         SELECT order_item_id FROM commission_transactions
+         WHERE transaction_type = 'earned' AND transaction_status <> 'reversed'
+         GROUP BY order_item_id HAVING COUNT(*) > 1
+       ) duplicates`
+    )
+    assert.equal(duplicateItems, 0)
+
+    const speedafAccuracy = await row(
+      `SELECT ct.qualified_at, cc.remitted_at
+       FROM commission_transactions ct
+       JOIN orders o ON o.id = ct.order_id
+       JOIN cod_collections cc ON cc.order_id = o.id
+       WHERE o.courier_payment_type = 'cod' AND ct.transaction_type = 'earned'
+       ORDER BY ct.created_at DESC LIMIT 1`
+    )
+    assert.ok(new Date(speedafAccuracy.qualified_at).getTime() >= new Date(speedafAccuracy.remitted_at).getTime())
+
+    await request('POST', `/commissions/transactions/${attendantCommission.id}/approve`, admin.accessToken, {})
+    await request('POST', `/commissions/transactions/${attendantCommission.id}/pay`, admin.accessToken, {
+      amount: 40, payment_method: 'mpesa', reference: 'P6-COMMISSION-PARTIAL'
+    })
+    assert.equal(await count('SELECT COUNT(*) FROM commission_payments WHERE commission_transaction_id=$1 AND reference=$2', [attendantCommission.id, 'P6-COMMISSION-PARTIAL']), 1)
+    const repeatedPayment = await request('POST', `/commissions/transactions/${attendantCommission.id}/pay`, admin.accessToken, {
+      amount: 40, payment_method: 'mpesa', reference: 'P6-COMMISSION-PARTIAL'
+    })
+    assert.equal(repeatedPayment.idempotent, true)
+    assert.equal(await count('SELECT COUNT(*) FROM commission_payments WHERE commission_transaction_id=$1 AND reference=$2', [attendantCommission.id, 'P6-COMMISSION-PARTIAL']), 1)
+    assert.equal((await row('SELECT transaction_status FROM commission_transactions WHERE id=$1', [attendantCommission.id])).transaction_status, 'approved')
+    await request('POST', `/commissions/transactions/${attendantCommission.id}/pay`, admin.accessToken, {
+      payment_method: 'mpesa', reference: 'P6-COMMISSION-FINAL'
+    })
+    assert.equal((await row('SELECT transaction_status FROM commission_transactions WHERE id=$1', [attendantCommission.id])).transaction_status, 'paid')
+
+    // A partial return must reverse only the affected item quantity, including
+    // after payment. It also proves the full-order return path does not restore
+    // the same stock or supplier liability twice.
+    await request('PUT', `/orders/${commissionOrder.id}/items/${commissionItem.id}/fulfillment-status`, admin.accessToken, {
+      fulfillment_status: 'returned'
+    }, 400)
+    await request('POST', `/orders/${commissionOrder.id}/items/${commissionItem.id}/returns`, admin.accessToken, {
+      quantity: 1,
+      return_source: 'internal',
+      stock_condition: 'sellable',
+      reason: 'Customer returned one item after payment'
+    }, 201)
+    const partialReturnItem = await row('SELECT returned_quantity, fulfillment_status FROM order_items WHERE id=$1', [commissionItem.id])
+    assert.equal(Number(partialReturnItem.returned_quantity), 1)
+    assert.equal(partialReturnItem.fulfillment_status, 'fulfilled')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE original_transaction_id=$1 AND transaction_type='reversal' AND eligible_quantity=1", [attendantCommission.id]), 1)
+    assert.equal(Number((await row('SELECT quantity FROM inventory WHERE product_id = $1', [stockProduct.id])).quantity), stockBeforeCommissionReturn + 1)
+    await request('POST', `/commissions/transactions/${attendantCommission.id}/pay`, admin.accessToken, {
+      payment_method: 'mpesa', reference: 'P6-MUST-NOT-OVERPAY'
+    }, 400)
+    await request('PUT', `/orders/${commissionOrder.id}/status`, admin.accessToken, { status: 'returned', notes: 'Remaining items returned after partial return' })
+    const returnedCommission = await row(
+      `SELECT COALESCE(SUM(eligible_quantity), 0) AS quantity, COALESCE(SUM(amount), 0) AS amount
+       FROM commission_transactions WHERE original_transaction_id=$1 AND transaction_type='reversal'`,
+      [attendantCommission.id]
+    )
+    assert.equal(Number(returnedCommission.quantity), 3)
+    assert.equal(Number(returnedCommission.amount), 150)
+    assert.equal(Number((await row('SELECT quantity FROM inventory WHERE product_id = $1', [stockProduct.id])).quantity), stockBeforeCommissionReturn + 3)
+
+    const adjustment = await request('POST', '/commissions/adjust', admin.accessToken, {
+      salesperson_id: attendantUser.id, amount: 25, adjustment_type: 'manual_deduct',
+      reason: 'Phase 6 accuracy test', period: isoDate().slice(0, 7)
+    }, 201)
+    assert.equal(Number(adjustment.amount), 25)
+
+    await request('POST', '/commissions/programme', admin.accessToken, {
+      status: 'disabled', effective_from: isoDate(), reason: 'Phase 6 disable test'
+    }, 201)
+    const disabledOrder = await createOrder({
+      ...customer('Commission Disabled'), delivery_type: 'walk_in', payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, attendant.accessToken)
+    await advance(disabledOrder.id, ['confirmed', 'delivered'])
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [disabledOrder.id]), 0)
+
+    // A historical earned row recorded during the disabled period must be
+    // reported as invalid and corrected with a counter-entry, not hidden as
+    // an ambiguous evidence gap.
+    const disabledItem = await row('SELECT id, product_id, product_category_id FROM order_items WHERE order_id = $1', [disabledOrder.id])
+    const disabledEvaluation = await evaluateOrderItemFromRecords(disabledOrder.id, disabledItem.id)
+    assert.match(disabledEvaluation.reason || '', /programme was disabled/i)
+    const disabledProgramme = await row(
+      `SELECT id FROM commission_programmes WHERE status = 'disabled'
+       ORDER BY effective_from DESC, created_at DESC, id DESC LIMIT 1`
+    )
+    const invalidDisabledEarning = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, order_id, order_item_id, product_id, category_id,
+         eligible_quantity, rate_per_item, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 1, 50, 50, 'earned', 'pending',
+               $7::date, $8::timestamp, $9::date, 'Legacy earning recorded while disabled', $10)
+       RETURNING id`,
+      [
+        disabledProgramme.id, attendantUser.id, disabledOrder.id, disabledItem.id,
+        disabledItem.product_id, disabledItem.product_category_id || null,
+        disabledEvaluation.qualificationDate, disabledEvaluation.qualificationAt,
+        `${disabledEvaluation.qualificationDate!.slice(0, 7)}-01`, adminUser.id
+      ]
+    )
+    const disabledPreview = await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: disabledEvaluation.qualificationDate, date_to: disabledEvaluation.qualificationDate, apply: false
+    })
+    const disabledIssue = disabledPreview.issues.find((issue: any) => issue.transactionId === invalidDisabledEarning.id)
+    assert.equal(disabledIssue?.type, 'missing_reversal')
+    assert.match(disabledIssue?.message || '', /disabled/i)
+    const disabledCorrection = await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: disabledEvaluation.qualificationDate, date_to: disabledEvaluation.qualificationDate,
+      apply: true, reason: 'Phase 6 disabled-programme correction'
+    })
+    assert.ok(disabledCorrection.reversalsCreated >= 1)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE original_transaction_id=$1 AND transaction_type='reversal'", [invalidDisabledEarning.id]), 1)
+
+    await request('POST', '/commissions/programme', admin.accessToken, {
+      status: 'active', effective_from: isoDate(), reason: 'Phase 6 reactivation test'
+    }, 201)
+    const reactivatedOrder = await createOrder({
+      ...customer('Commission Reactivated'), delivery_type: 'walk_in', payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, attendant.accessToken)
+    await advance(reactivatedOrder.id, ['confirmed', 'delivered'])
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [reactivatedOrder.id]), 1)
+
+    // Simulate a legacy missing ledger row, then prove a retroactive apply is
+    // idempotent, transactional, and linked to a reconciliation run.
+    const retroMissingOrder = await createOrder({
+      ...customer('Retroactive Missing Commission'), delivery_type: 'walk_in', payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, attendant.accessToken)
+    await advance(retroMissingOrder.id, ['confirmed', 'delivered'])
+    await db.query("DELETE FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [retroMissingOrder.id])
+
+    const retroQualification = await row(
+      `SELECT qualification_date::text AS qualification_date FROM commission_transactions
+       WHERE order_id = $1 AND transaction_type = 'earned'`,
+      [reactivatedOrder.id]
+    )
+    const retroDate = retroQualification.qualification_date
+    const preview = await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: retroDate, date_to: retroDate, apply: false
+    })
+    assert.equal(preview.mode, 'preview')
+    assert.ok(preview.alreadyEarnedItems > 0, `Expected recorded commission in retro preview: ${JSON.stringify({ retroDate, preview })}`)
+    assert.ok(preview.eligibleItems > 0)
+    assert.equal(preview.commissionsEarned, 0)
+    const appliedRetro = await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: retroDate, date_to: retroDate, apply: true, reason: 'Phase 6 verified legacy backfill'
+    })
+    assert.ok(appliedRetro.runId)
+    assert.ok(appliedRetro.commissionsEarned > 0)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [retroMissingOrder.id]), 1)
+    assert.equal(await count('SELECT COUNT(*) FROM commission_reconciliation_runs WHERE id=$1 AND status=$2', [appliedRetro.runId, 'completed']), 1)
+
+    await db.query('UPDATE settings SET commission_module_enabled = FALSE')
+    const moduleDisabledOrder = await createOrder({
+      ...customer('Commission Module Disabled'), delivery_type: 'walk_in', payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, attendant.accessToken)
+    await advance(moduleDisabledOrder.id, ['confirmed', 'delivered'])
+    assert.equal(await count(
+      "SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'",
+      [moduleDisabledOrder.id]
+    ), 0)
+    await db.query('UPDATE settings SET commission_module_enabled = TRUE')
+  })
+
+  await t.test('15b. an August sale completed in September uses the August rate and September earning month', async () => {
+    const historicalSaleDate = '2026-08-01'
+    const completionDate = '2026-09-05'
+    const sourceProgramme = await row(
+      `INSERT INTO commission_programmes (status, effective_from, reason, created_by)
+       VALUES ('active', '2026-08-06'::date, 'Source programme for historical test', $1)
+       RETURNING id`,
+      [adminUser.id]
+    )
+    const historicalRate = await row(
+      `INSERT INTO commission_rates
+        (programme_id, rate_per_item, effective_from, scope_type, scope_name, created_by)
+       VALUES ($1, 35, '2026-08-06'::date, 'global', 'Historical KSh 35 rate', $2)
+       RETURNING id`,
+      [sourceProgramme.id, adminUser.id]
+    )
+    const backdatedRate = await request('PUT', `/commissions/rates/${historicalRate.id}`, admin.accessToken, {
+      rate_per_item: 35,
+      effective_from: historicalSaleDate,
+      effective_to: null
+    })
+    assert.equal(backdatedRate.id, historicalRate.id)
+    const historicalProgramme = await request('POST', '/commissions/programme', admin.accessToken, {
+      status: 'active',
+      effective_from: historicalSaleDate,
+      effective_to: null,
+      reason: 'Commission introduced on 1 August'
+    }, 201)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM commission_rates
+       WHERE programme_id = $1 AND rate_per_item = 35 AND effective_from = $2::date`,
+      [historicalProgramme.id, historicalSaleDate]
+    ), 1)
+
+    const historicalOrder = await createOrder({
+      ...customer('Historical Rate Sale'), sale_date: historicalSaleDate,
+      delivery_type: 'walk_in', payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 2, 100)]
+    }, attendant.accessToken)
+    await advance(historicalOrder.id, ['confirmed', 'delivered'])
+
+    // The transition above proves the live earning path. Move its authoritative
+    // completion/payment evidence to September, remove the initial ledger row,
+    // and let the retroactive path rebuild it using the same policy rules.
+    await db.query(
+      `UPDATE audit_logs
+       SET created_at = $2::timestamp
+       WHERE entity_type = 'order' AND entity_id = $1
+         AND action = 'order_status_changed'
+         AND new_values->>'status' = 'delivered'`,
+      [historicalOrder.id, `${completionDate} 10:00:00`]
+    )
+    await db.query(
+      'UPDATE order_payments SET created_at = $2::timestamp WHERE order_id = $1',
+      [historicalOrder.id, `${completionDate} 09:00:00`]
+    )
+    await db.query("DELETE FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [historicalOrder.id])
+
+    // A retroactive run uses the same order-date policy and remains idempotent.
+    const preview = await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: historicalSaleDate, date_to: historicalSaleDate, apply: false
+    })
+    assert.equal(preview.eligibleItems, 1)
+    assert.equal(Number(preview.totalCommissionAmount), 70)
+    await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: historicalSaleDate, date_to: historicalSaleDate,
+      apply: true, reason: 'Backfill historical sale-date policy test'
+    })
+    const earning = await row(
+      `SELECT rate_per_item, amount, policy_date::text AS policy_date,
+              qualification_date::text AS qualification_date,
+              commission_month::text AS commission_month
+       FROM commission_transactions
+       WHERE order_id = $1 AND transaction_type = 'earned'`,
+      [historicalOrder.id]
+    )
+    assert.equal(Number(earning.rate_per_item), 35)
+    assert.equal(Number(earning.amount), 70)
+    assert.equal(earning.policy_date, historicalSaleDate)
+    assert.equal(earning.qualification_date, completionDate)
+    assert.equal(earning.commission_month, `${completionDate.slice(0, 7)}-01`)
+
+    // Speedaf physical delivery is not final completion. A parcel delivered in
+    // August and fully remitted in September belongs to September's completed
+    // sales and commission accounting, while retaining its August sale rate.
+    const speedafSaleDate = '2026-08-02'
+    const speedafDeliveryDate = '2026-08-31'
+    const speedafCompletionDate = '2026-09-02'
+    const historicalSpeedafOrder = await createOrder({
+      ...customer('Historical Speedaf Completion'),
+      sale_date: speedafSaleDate,
+      delivery_type: 'courier',
+      courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-HISTORICAL',
+      courier_payment_type: 'cod',
+      customer_delivery_fee: 0,
+      actual_courier_fee: 0,
+      payment_method: 'mpesa',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, attendant.accessToken)
+    await advance(historicalSpeedafOrder.id, ['confirmed', 'in_transit', 'delivered'])
+    assert.equal((await row('SELECT commission_completion_at FROM orders WHERE id=$1', [historicalSpeedafOrder.id])).commission_completion_at, null)
+    await db.query(
+      `UPDATE audit_logs SET created_at=$2::timestamp
+       WHERE entity_type='order' AND entity_id=$1 AND action='order_status_changed'
+         AND new_values->>'status'='delivered'`,
+      [historicalSpeedafOrder.id, `${speedafDeliveryDate} 10:00:00`]
+    )
+    await db.query(
+      `UPDATE deliveries SET delivery_status='collected_paid', delivered_at=$2::timestamp
+       WHERE order_id=$1`,
+      [historicalSpeedafOrder.id, `${speedafDeliveryDate} 10:00:00`]
+    )
+    await db.query(
+      `UPDATE cod_collections
+       SET status='remitted', remitted_amount=cod_amount,
+           delivered_at=$2::timestamp, remitted_at=$3::timestamp, closed_at=$3::timestamp
+       WHERE order_id=$1`,
+      [historicalSpeedafOrder.id, `${speedafDeliveryDate} 10:00:00`, `${speedafCompletionDate} 09:00:00`]
+    )
+    await db.query(
+      `INSERT INTO order_payments (order_id, amount, payment_method, payment_date, reference, created_by, created_at)
+       SELECT id, total_amount, 'bank_transfer', $2::date, 'P6-HISTORICAL-SPEEDAF', $3, $2::timestamp
+       FROM orders WHERE id=$1`,
+      [historicalSpeedafOrder.id, `${speedafCompletionDate} 09:00:00`, adminUser.id]
+    )
+    await db.query(
+      `UPDATE orders
+       SET status='collected_paid', payment_status='paid', paid_amount=total_amount,
+           commission_completion_by=$3, commission_completion_at=$2::timestamp
+       WHERE id=$1`,
+      [historicalSpeedafOrder.id, `${speedafCompletionDate} 09:00:00`, adminUser.id]
+    )
+    await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: speedafSaleDate,
+      date_to: speedafSaleDate,
+      apply: true,
+      reason: 'Historical cross-month Speedaf completion test'
+    })
+    const speedafEarning = await row(
+      `SELECT policy_date::text AS policy_date, qualification_date::text AS qualification_date,
+              commission_month::text AS commission_month
+       FROM commission_transactions
+       WHERE order_id=$1 AND transaction_type='earned'`,
+      [historicalSpeedafOrder.id]
+    )
+    assert.equal(speedafEarning.policy_date, speedafSaleDate)
+    assert.equal(speedafEarning.qualification_date, speedafCompletionDate)
+    assert.equal(speedafEarning.commission_month, '2026-09-01')
+
+    const augustSpeedafCompleted = await request(
+      'GET',
+      `/dashboard/drilldown?card=my_completed_orders&date_from=${speedafDeliveryDate}&date_to=${speedafDeliveryDate}`,
+      attendant.accessToken
+    )
+    assert.ok(!augustSpeedafCompleted.rows.some((item: any) => item.order_id === historicalSpeedafOrder.id))
+    const septemberSpeedafCompleted = await request(
+      'GET',
+      `/dashboard/drilldown?card=my_completed_orders&date_from=${speedafCompletionDate}&date_to=${speedafCompletionDate}`,
+      attendant.accessToken
+    )
+    const completedSpeedafRow = septemberSpeedafCompleted.rows.find((item: any) => item.order_id === historicalSpeedafOrder.id)
+    assert.ok(completedSpeedafRow)
+    assert.equal(String(completedSpeedafRow.delivery_date).slice(0, 10), speedafDeliveryDate)
+    assert.equal(String(completedSpeedafRow.completion_date).slice(0, 10), speedafCompletionDate)
+    assert.equal(completedSpeedafRow.commission_status, 'earned')
+
+    const septemberCommissionDrilldown = await request(
+      'GET',
+      `/dashboard/drilldown?card=company_commission_recorded&date_from=${speedafCompletionDate}&date_to=${speedafCompletionDate}`,
+      admin.accessToken
+    )
+    const speedafCommissionRow = septemberCommissionDrilldown.rows.find((item: any) => item.order_id === historicalSpeedafOrder.id)
+    assert.ok(speedafCommissionRow)
+    assert.equal(String(speedafCommissionRow.delivery_date).slice(0, 10), speedafDeliveryDate)
+    assert.equal(String(speedafCommissionRow.completion_date).slice(0, 10), speedafCompletionDate)
+    assert.equal(String(speedafCommissionRow.earned_date).slice(0, 10), speedafCompletionDate)
+
+    const adminOrder = await createOrder({
+      ...customer('Administrator Non Commission Sale'), delivery_type: 'walk_in', payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, admin.accessToken)
+    await advance(adminOrder.id, ['confirmed', 'delivered'])
+    assert.equal(await count(
+      "SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'",
+      [adminOrder.id]
+    ), 0)
+  })
+
+  await t.test('16. commission month close is immutable and carries recovery into the next period', async () => {
+    const closedMonth = '2020-01-01'
+    const closedMonthEnd = '2020-01-31'
+    const nextMonth = '2020-02-01'
+    const programme = await row('SELECT id FROM commission_programmes ORDER BY effective_from DESC LIMIT 1')
+
+    const approvedSource = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, approved_by, approved_at, created_by)
+       VALUES ($1, $2, 100, 'manual_add', 'approved', $3::date, $4::timestamp, $5::date,
+               'Historical approved credit', $6, NOW(), $6)
+       RETURNING *`,
+      [programme.id, attendantUser.id, closedMonthEnd, `${closedMonthEnd} 12:00:00`, closedMonth, adminUser.id]
+    )
+    const pendingSource = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, created_by)
+       VALUES ($1, $2, 5, 'manual_add', 'pending', $3::date, $4::timestamp, $5::date,
+               'Historical pending credit', $6)
+       RETURNING *`,
+      [programme.id, attendantUser.id, closedMonthEnd, `${closedMonthEnd} 13:00:00`, closedMonth, adminUser.id]
+    )
+    // Legacy payments without a transaction link must still reduce the close
+    // balance; otherwise the operator could pay the same period twice.
+    await db.query(
+      `INSERT INTO commission_payments
+        (salesperson_id, period_start, period_end, total_amount, paid_amount, payment_method,
+         reference, paid_by, paid_at, notes, status, created_by)
+       VALUES ($1, $2::date, $3::date, 150, 150, 'cash', 'P6-LEGACY-CLOSE', $4, NOW(),
+               'Legacy period payment', 'paid', $4)`,
+      [attendantUser.id, closedMonth, closedMonthEnd, adminUser.id]
+    )
+
+    await request('POST', '/commissions/periods/close', attendant.accessToken, {
+      period: closedMonth, reason: 'Attendant must not close payroll'
+    }, 403)
+    await request('POST', '/commissions/periods/close', admin.accessToken, {
+      period: closedMonth, reason: 'Pending item must be resolved first'
+    }, 409)
+    await request('POST', `/commissions/transactions/${pendingSource.id}/approve`, admin.accessToken, {})
+
+    const closure = await request('POST', '/commissions/periods/close', admin.accessToken, {
+      period: '2020-01', reason: 'Phase 6 audited historical month close'
+    }, 201)
+    assert.equal(closure.status, 'closed')
+    assert.equal(closure.periodStart, closedMonth)
+    assert.equal((await row('SELECT status FROM commission_period_closures WHERE id=$1', [closure.id])).status, 'closed')
+    assert.equal(Number(closure.totalRecovery), 45)
+    const attendantBalance = closure.balances.find((balance: any) => balance.salespersonId === attendantUser.id)
+    assert.equal(Number(attendantBalance.closingBalance), -45)
+    assert.ok(attendantBalance.sourceOffsetTransactionId)
+    assert.ok(attendantBalance.carryForwardTransactionId)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM commission_transactions
+       WHERE reference_id=$1 AND salesperson_id=$2 AND transaction_type='carry_forward'
+         AND commission_month=$3::date AND carry_forward_direction='deduction'`,
+      [closure.id, attendantUser.id, nextMonth]
+    ), 1)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM commission_transactions
+       WHERE reference_id=$1 AND salesperson_id=$2 AND transaction_type='carry_forward'
+         AND commission_month=$3::date AND carry_forward_direction='credit'`,
+      [closure.id, attendantUser.id, closedMonth]
+    ), 1)
+    await waitForAudit('commission_period_closed', closure.id)
+
+    await request('GET', '/commissions/periods?limit=10', admin.accessToken)
+    await request('POST', '/commissions/periods/close', admin.accessToken, {
+      period: closedMonth, reason: 'Must not close twice'
+    }, 409)
+    await request('POST', '/commissions/periods/close', admin.accessToken, {
+      period: '2020-03', reason: 'Must not skip the unclosed February period'
+    }, 409)
+    await request('POST', `/commissions/transactions/${approvedSource.id}/pay`, admin.accessToken, {
+      payment_method: 'cash', reference: 'P6-CLOSED-PERIOD-BLOCK', idempotency_key: 'P6-CLOSED-PERIOD-BLOCK'
+    }, 409)
+    const closedLedgerProtection = await row(
+      `SELECT ct.commission_month::text AS commission_month, closure.status
+       FROM commission_transactions ct
+       JOIN commission_period_closures closure ON closure.period_start = ct.commission_month
+       WHERE ct.id = $1`,
+      [approvedSource.id]
+    )
+    assert.equal(closedLedgerProtection.commission_month, closedMonth)
+    assert.equal(closedLedgerProtection.status, 'closed')
+    await assert.rejects(
+      db.query('UPDATE commission_transactions SET reason=$2 WHERE id=$1', [approvedSource.id, 'must fail after close']),
+      /closed/i
+    )
+    // The guard resolves any supplied date to its accounting month, so an
+    // invalid intra-month period cannot bypass a January close.
+    await assert.rejects(
+      db.query(
+        `INSERT INTO commission_transactions
+          (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+           qualification_date, qualified_at, commission_month, reason, created_by)
+         VALUES ($1, $2, 1, 'manual_add', 'pending', $3::date, $4::timestamp, $3::date,
+                 'must fail after close', $5)`,
+        [programme.id, attendantUser.id, closedMonthEnd, `${closedMonthEnd} 14:00:00`, adminUser.id]
+      ),
+      /closed/i
+    )
+
+    // The next month can only pay its new credit net of the carried recovery.
+    const nextCredit = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, approved_by, approved_at, created_by)
+       VALUES ($1, $2, 100, 'manual_add', 'approved', $3::date, $4::timestamp, $3::date,
+               'Next-period payable credit', $5, NOW(), $5)
+       RETURNING *`,
+      [programme.id, attendantUser.id, nextMonth, `${nextMonth} 12:00:00`, adminUser.id]
+    )
+    await request('POST', `/commissions/transactions/${nextCredit.id}/pay`, admin.accessToken, {
+      amount: 56, payment_method: 'cash', reference: 'P6-CARRY-OVERPAY-BLOCK', idempotency_key: 'P6-CARRY-OVERPAY-BLOCK'
+    }, 400)
+    const carriedPayment = await request('POST', `/commissions/transactions/${nextCredit.id}/pay`, admin.accessToken, {
+      amount: 55, payment_method: 'cash', reference: 'P6-CARRY-NET-PAY', idempotency_key: 'P6-CARRY-NET-PAY'
+    })
+    assert.equal(Number(carriedPayment.payment.paid_amount), 55)
+  })
+
+  await t.test('17. legacy category gaps still apply only deterministic return reversals', async () => {
+    const legacyCategory = await row("INSERT INTO categories (name) VALUES ('Legacy evidence category') RETURNING id")
+    const legacyProgramme = await row(
+      `SELECT id FROM commission_programmes
+       WHERE status = 'active'
+       ORDER BY effective_from DESC, created_at DESC, id DESC LIMIT 1`
+    )
+    await db.query(
+      `INSERT INTO commission_rates
+        (programme_id, rate_per_item, effective_from, scope_type, scope_id, scope_name, created_by)
+       VALUES ($1, 75, $2::date, 'category', $3, 'Legacy evidence category', $4)`,
+      [legacyProgramme.id, isoDate(), legacyCategory.id, adminUser.id]
+    )
+
+    async function createLegacyEarning(label: string, itemQuantity = 3, recordedQuantity = itemQuantity) {
+      const order = await createOrder({
+        ...customer(`Legacy reconciliation ${label}`),
+        delivery_type: 'walk_in',
+        payment_method: 'cash',
+        items: [internalItem(stockProduct.id, itemQuantity, 100)]
+      }, attendant.accessToken)
+      await advance(order.id, ['confirmed', 'delivered'])
+      const item = await row('SELECT id FROM order_items WHERE order_id = $1', [order.id])
+      const earned = await row(
+        `SELECT id, eligible_quantity, rate_per_item, amount, qualification_date::text AS qualification_date
+         FROM commission_transactions
+         WHERE order_id = $1 AND transaction_type = 'earned'
+         ORDER BY created_at DESC LIMIT 1`,
+        [order.id]
+      )
+      assert.ok(earned, `Expected a recorded earning for ${label}`)
+      if (recordedQuantity !== itemQuantity) {
+        await db.query(
+          `UPDATE commission_transactions
+           SET eligible_quantity = $2::integer, amount = rate_per_item * $3::numeric
+           WHERE id = $1`,
+          [earned.id, recordedQuantity, recordedQuantity]
+        )
+        earned.eligible_quantity = recordedQuantity
+        earned.amount = Number(earned.rate_per_item) * recordedQuantity
+      }
+      await db.query(
+        'UPDATE order_items SET product_category_snapshot_verified = FALSE WHERE id = $1',
+        [item.id]
+      )
+      const legacyEvaluation = await evaluateOrderItemFromRecords(order.id, item.id)
+      assert.equal(legacyEvaluation.categorySnapshotVerified, false)
+      assert.match(legacyEvaluation.reason || '', /historic product category snapshot/i)
+      return { order, item, earned }
+    }
+
+    async function assertDeterministicReversal(
+      label: string,
+      expectedQuantity: number,
+      applyEvidence: (caseData: Awaited<ReturnType<typeof createLegacyEarning>>) => Promise<void>,
+      options: { itemQuantity?: number; recordedQuantity?: number } = {}
+    ) {
+      const caseData = await createLegacyEarning(
+        label,
+        options.itemQuantity ?? 3,
+        options.recordedQuantity ?? options.itemQuantity ?? 3
+      )
+      await applyEvidence(caseData)
+      const qualificationDate = caseData.earned.qualification_date
+      const preview = await request('POST', '/commissions/retroactive', admin.accessToken, {
+        date_from: qualificationDate, date_to: qualificationDate, apply: false
+      })
+      const issue = preview.issues.find((entry: any) => entry.transactionId === caseData.earned.id)
+      assert.equal(issue?.type, 'missing_reversal', `Expected a deterministic reversal issue for ${label}: ${JSON.stringify(issue)}`)
+
+      // Two administrators can launch a correction at nearly the same time;
+      // the earned-row lock must still leave exactly one counter-entry.
+      await Promise.all(['A', 'B'].map(run => request('POST', '/commissions/retroactive', admin.accessToken, {
+        date_from: qualificationDate,
+        date_to: qualificationDate,
+        apply: true,
+        reason: `Phase 6 legacy ${label} correction ${run}`
+      })))
+      const reversals = await db.query(
+        `SELECT eligible_quantity, rate_per_item, amount
+         FROM commission_transactions
+         WHERE original_transaction_id = $1 AND transaction_type = 'reversal'
+         ORDER BY created_at ASC`,
+        [caseData.earned.id]
+      )
+      assert.equal(reversals.rows.length, 1, `${label} should create exactly one proportional reversal`)
+      assert.equal(Number(reversals.rows[0].eligible_quantity), expectedQuantity)
+      assert.equal(Number(reversals.rows[0].rate_per_item), Number(caseData.earned.rate_per_item))
+      assert.equal(Number(reversals.rows[0].amount), Number(caseData.earned.rate_per_item) * expectedQuantity)
+
+      // A repeated apply may review the same legacy evidence but must never
+      // create a duplicate reversal.
+      await request('POST', '/commissions/retroactive', admin.accessToken, {
+        date_from: qualificationDate,
+        date_to: qualificationDate,
+        apply: true,
+        reason: `Phase 6 repeat legacy ${label} correction`
+      })
+      assert.equal(await count(
+        "SELECT COUNT(*) FROM commission_transactions WHERE original_transaction_id=$1 AND transaction_type='reversal'",
+        [caseData.earned.id]
+      ), 1)
+    }
+
+    await assertDeterministicReversal('partial return', 1, async ({ item }) => {
+      await db.query('UPDATE order_items SET returned_quantity = 1 WHERE id = $1', [item.id])
+    })
+    await assertDeterministicReversal('full returned order', 3, async ({ order }) => {
+      await db.query("UPDATE orders SET status = 'returned' WHERE id = $1", [order.id])
+    })
+    await assertDeterministicReversal('cancelled order', 3, async ({ order }) => {
+      await db.query("UPDATE orders SET status = 'cancelled' WHERE id = $1", [order.id])
+    })
+    await assertDeterministicReversal('full refund', 3, async ({ order }) => {
+      await db.query(
+        `INSERT INTO order_refunds (order_id, amount, reason, created_by)
+         VALUES ($1, 300, 'Legacy reconciliation refund evidence', $2)`,
+        [order.id, adminUser.id]
+      )
+    })
+
+    // A partial return cannot prove that a historically limited earning was
+    // among the returned units.  It must remain review-only rather than
+    // reversing more than the lower-bound evidence supports.
+    const ambiguous = await createLegacyEarning('ambiguous partial return', 4, 1)
+    await db.query('UPDATE order_items SET returned_quantity = 2 WHERE id = $1', [ambiguous.item.id])
+    await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: ambiguous.earned.qualification_date,
+      date_to: ambiguous.earned.qualification_date,
+      apply: true,
+      reason: 'Phase 6 conservative legacy partial-return check'
+    })
+    assert.equal(await count(
+      "SELECT COUNT(*) FROM commission_transactions WHERE original_transaction_id=$1 AND transaction_type='reversal'",
+      [ambiguous.earned.id]
+    ), 0)
+
+    const partialRefund = await createLegacyEarning('partial refund')
+    await db.query(
+      `INSERT INTO order_refunds (order_id, amount, reason, created_by)
+       VALUES ($1, 100, 'Partial refund is not full invalidation evidence', $2)`,
+      [partialRefund.order.id, adminUser.id]
+    )
+    await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: partialRefund.earned.qualification_date,
+      date_to: partialRefund.earned.qualification_date,
+      apply: true,
+      reason: 'Phase 6 conservative legacy partial-refund check'
+    })
+    assert.equal(await count(
+      "SELECT COUNT(*) FROM commission_transactions WHERE original_transaction_id=$1 AND transaction_type='reversal'",
+      [partialRefund.earned.id]
+    ), 0)
+  })
+
+  await t.test('18. authoritative invalidity overrides a partial-return correction', async () => {
+    await request('POST', '/commissions/programme', admin.accessToken, {
+      status: 'disabled',
+      effective_from: isoDate(),
+      reason: 'Phase 6 authoritative invalidity reconciliation test'
+    }, 201)
+    const disabledOrder = await createOrder({
+      ...customer('Disabled programme partial return'),
+      delivery_type: 'walk_in',
+      payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 3, 100)]
+    }, attendant.accessToken)
+    await advance(disabledOrder.id, ['confirmed', 'delivered'])
+
+    const disabledItem = await row(
+      `SELECT id, product_id, product_category_id, product_category_snapshot_verified
+       FROM order_items WHERE order_id = $1`,
+      [disabledOrder.id]
+    )
+    assert.equal(disabledItem.product_category_snapshot_verified, true)
+    assert.equal(await count(
+      "SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'",
+      [disabledOrder.id]
+    ), 0)
+    const disabledEvaluation = await evaluateOrderItemFromRecords(disabledOrder.id, disabledItem.id)
+    assert.equal(disabledEvaluation.categorySnapshotVerified, true)
+    assert.match(disabledEvaluation.reason || '', /programme was disabled/i)
+
+    const disabledProgramme = await row(
+      `SELECT id FROM commission_programmes WHERE status = 'disabled'
+       ORDER BY effective_from DESC, created_at DESC, id DESC LIMIT 1`
+    )
+    const invalidEarning = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, order_id, order_item_id, product_id, category_id,
+         eligible_quantity, rate_per_item, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 3, 50, 150, 'earned', 'pending',
+               $7::date, $8::timestamp, $9::date, 'Legacy earning recorded while disabled', $10)
+       RETURNING id`,
+      [
+        disabledProgramme.id,
+        attendantUser.id,
+        disabledOrder.id,
+        disabledItem.id,
+        disabledItem.product_id,
+        disabledItem.product_category_id || null,
+        disabledEvaluation.qualificationDate,
+        disabledEvaluation.qualificationAt,
+        `${disabledEvaluation.qualificationDate!.slice(0, 7)}-01`,
+        adminUser.id
+      ]
+    )
+    await db.query('UPDATE order_items SET returned_quantity = 1 WHERE id = $1', [disabledItem.id])
+
+    const preview = await request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: disabledEvaluation.qualificationDate,
+      date_to: disabledEvaluation.qualificationDate,
+      apply: false
+    })
+    const issue = preview.issues.find((entry: any) => entry.transactionId === invalidEarning.id)
+    assert.equal(issue?.type, 'missing_reversal')
+    assert.match(issue?.message || '', /disabled/i)
+    await Promise.all(['A', 'B'].map(run => request('POST', '/commissions/retroactive', admin.accessToken, {
+      date_from: disabledEvaluation.qualificationDate,
+      date_to: disabledEvaluation.qualificationDate,
+      apply: true,
+      reason: `Phase 6 disabled partial-return correction ${run}`
+    })))
+    const reversals = await db.query(
+      `SELECT eligible_quantity, rate_per_item, amount
+       FROM commission_transactions
+       WHERE original_transaction_id = $1 AND transaction_type = 'reversal'`,
+      [invalidEarning.id]
+    )
+    assert.equal(reversals.rows.length, 1)
+    assert.equal(Number(reversals.rows[0].eligible_quantity), 3)
+    assert.equal(Number(reversals.rows[0].rate_per_item), 50)
+    assert.equal(Number(reversals.rows[0].amount), 150)
   })
 })
 

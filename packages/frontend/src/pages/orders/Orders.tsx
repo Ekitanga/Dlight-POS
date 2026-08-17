@@ -8,6 +8,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { PaginatedResponse, Pagination } from '../../components/Pagination'
 import { DateRangeFilter } from '../../components/DateRangeFilter'
 import { formatMoney } from '../../lib/format'
+import { invalidateCommissionData } from '../../lib/commissionCache'
 
 interface Order {
   id: string
@@ -57,6 +58,10 @@ interface OrderDetailItem {
   supplier_id?: string
   supplier_cost?: number
   available_stock?: number
+  fulfillment_status?: string
+  returned_quantity?: number
+  returned_internal_quantity?: number
+  returned_supplier_quantity?: number
 }
 
 interface OrderDetail {
@@ -132,6 +137,18 @@ const blankItem: OrderItemFormData = {
   supplier_cost: undefined
 }
 
+const workflowStageIds = ['all', 'pending', 'confirmed', 'in_transit', 'pending_payment', 'completed', 'returned', 'cancelled'] as const
+
+const workflowStatusMeta: Record<string, { label: string; badgeClass: string; dotClass: string }> = {
+  pending: { label: 'Pending', badgeClass: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200', dotClass: 'bg-amber-500' },
+  confirmed: { label: 'Confirmed', badgeClass: 'border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-700 dark:bg-sky-950/40 dark:text-sky-200', dotClass: 'bg-sky-500' },
+  in_transit: { label: 'Dispatched / In Transit', badgeClass: 'border-indigo-300 bg-indigo-50 text-indigo-900 dark:border-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-200', dotClass: 'bg-indigo-500' },
+  pending_payment: { label: 'Pending Payment', badgeClass: 'border-orange-300 bg-orange-50 text-orange-900 dark:border-orange-700 dark:bg-orange-950/40 dark:text-orange-200', dotClass: 'bg-orange-500' },
+  completed: { label: 'Completed', badgeClass: 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200', dotClass: 'bg-emerald-500' },
+  returned: { label: 'Returned', badgeClass: 'border-rose-300 bg-rose-50 text-rose-900 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-200', dotClass: 'bg-rose-500' },
+  cancelled: { label: 'Cancelled', badgeClass: 'border-slate-300 bg-slate-100 text-slate-800 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200', dotClass: 'bg-slate-500' }
+}
+
 function todayDate() {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Africa/Nairobi',
@@ -143,12 +160,28 @@ function todayDate() {
   return `${value('year')}-${value('month')}-${value('day')}`
 }
 
+function businessDateValue(value?: string | null): string | null {
+  const rawValue = String(value || '').trim()
+  if (!rawValue) return null
+  const dateOnly = rawValue.match(/^(\d{4}-\d{2}-\d{2})$/)?.[1]
+  if (dateOnly) return dateOnly
+
+  const parsedDate = new Date(rawValue)
+  if (Number.isNaN(parsedDate.getTime())) return null
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(parsedDate)
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(item => item.type === type)?.value || ''
+  return `${part('year')}-${part('month')}-${part('day')}`
+}
+
 function displayBusinessDate(value?: string | null, fallback?: string | null): string {
-  if (!value) return '-'
-  const rawValue = String(value)
-  const dateOnly = rawValue.match(/^(\d{4}-\d{2}-\d{2})/)?.[1]
-  const parsedDate = dateOnly ? new Date(`${dateOnly}T00:00:00`) : new Date(rawValue)
-  if (Number.isNaN(parsedDate.getTime())) return fallback ? displayBusinessDate(fallback) : '-'
+  const dateOnly = businessDateValue(value) || businessDateValue(fallback)
+  if (!dateOnly) return '-'
+  const parsedDate = new Date(`${dateOnly}T12:00:00`)
   return parsedDate.toLocaleDateString()
 }
 
@@ -350,17 +383,22 @@ export function Orders() {
   const [searchParams] = useSearchParams()
   const [search, setSearch] = useState('')
   const requestedStage = searchParams.get('workflow_stage') || 'all'
-  const [activeTab, setActiveTab] = useState(['all', 'pending', 'in_transit', 'pending_payment', 'completed'].includes(requestedStage) ? requestedStage : 'all')
+  const [activeTab, setActiveTab] = useState<string>(workflowStageIds.includes(requestedStage as typeof workflowStageIds[number]) ? requestedStage : 'all')
   const [dateFrom, setDateFrom] = useState(searchParams.get('date_from') || '')
   const [dateTo, setDateTo] = useState(searchParams.get('date_to') || '')
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null)
   const [formError, setFormError] = useState('')
-  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(searchParams.get('order_id'))
   const [selectedStatus, setSelectedStatus] = useState('')
   const [completionPaymentMethod, setCompletionPaymentMethod] = useState('cash')
   const [statusNotes, setStatusNotes] = useState('')
   const [statusError, setStatusError] = useState('')
+  const [returnItemId, setReturnItemId] = useState('')
+  const [returnQuantity, setReturnQuantity] = useState('')
+  const [returnSource, setReturnSource] = useState<'internal' | 'supplier'>('internal')
+  const [returnStockCondition, setReturnStockCondition] = useState<'sellable' | 'damaged'>('sellable')
+  const [returnReason, setReturnReason] = useState('')
   const [codRemittanceAmount, setCodRemittanceAmount] = useState('')
   const [codRemittanceMethod, setCodRemittanceMethod] = useState('mpesa')
   const [codRemittanceReference, setCodRemittanceReference] = useState('')
@@ -519,6 +557,7 @@ export function Orders() {
       queryClient.invalidateQueries({ queryKey: ['suppliers'] })
       queryClient.invalidateQueries({ queryKey: ['riders'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
       setShowCreateForm(false)
       resetOrderForm()
     },
@@ -544,6 +583,7 @@ export function Orders() {
       queryClient.invalidateQueries({ queryKey: ['receipts'] })
       queryClient.invalidateQueries({ queryKey: ['inventory'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
       setSelectedOrderId(null)
       setShowCreateForm(false)
       resetOrderForm()
@@ -573,6 +613,7 @@ export function Orders() {
       queryClient.invalidateQueries({ queryKey: ['suppliers'] })
       queryClient.invalidateQueries({ queryKey: ['riders'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
       setStatusNotes('')
       if (updatedOrder) setSelectedStatus(validStatusOptions(updatedOrder)[0]?.value || '')
     },
@@ -600,12 +641,44 @@ export function Orders() {
       queryClient.invalidateQueries({ queryKey: ['deliveries'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
       queryClient.invalidateQueries({ queryKey: ['reports-overview'] })
+      void invalidateCommissionData(queryClient)
       setCodRemittanceAmount('')
       setCodRemittanceReference('')
       setStatusError('')
     },
     onError: (error: any) => {
       setStatusError(error.response?.data?.error?.message || error.message || 'Failed to record Speedaf remittance')
+    }
+  })
+
+  const recordItemReturn = useMutation({
+    mutationFn: async () => {
+      if (!selectedOrderId || !returnItemId) throw new Error('Choose the item being returned')
+      const quantity = Number(returnQuantity)
+      if (!Number.isInteger(quantity) || quantity <= 0) throw new Error('Return quantity must be a whole number greater than zero')
+      if (!returnReason.trim()) throw new Error('A return reason is required')
+      setStatusError('')
+      return (await axios.post(`/api/orders/${selectedOrderId}/items/${returnItemId}/returns`, {
+        quantity,
+        return_source: returnSource,
+        stock_condition: returnStockCondition,
+        reason: returnReason.trim()
+      })).data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['order-detail', selectedOrderId] })
+      queryClient.invalidateQueries({ queryKey: ['inventory'] })
+      queryClient.invalidateQueries({ queryKey: ['suppliers'] })
+      void invalidateCommissionData(queryClient)
+      setReturnItemId('')
+      setReturnQuantity('')
+      setReturnReason('')
+      setReturnStockCondition('sellable')
+      setStatusError('')
+    },
+    onError: (error: any) => {
+      setStatusError(error.response?.data?.error?.message || error.message || 'Failed to record item return')
     }
   })
 
@@ -636,7 +709,8 @@ export function Orders() {
 
   const workflowStage = (order: Order) => {
     const status = simplifiedStatus(order.status, order)
-    if (['pending', 'confirmed'].includes(status)) return 'pending'
+    if (status === 'pending') return 'pending'
+    if (status === 'confirmed') return 'confirmed'
     if (status === 'in_transit') return 'in_transit'
     if (order.delivery_type === 'courier' && order.courier_payment_type === 'cod' && status === 'delivered') return 'pending_payment'
     if (['delivered', 'collected_paid'].includes(status)) return 'completed'
@@ -669,7 +743,7 @@ export function Orders() {
     if (hasPermission('orders.cancel')) {
       const stage = workflowStage(order)
       if (stage === 'pending') options.push({ value: 'cancelled', label: 'Cancel Order' })
-      if (stage === 'in_transit') options.push({ value: 'returned', label: 'Mark Returned' })
+      if (['in_transit', 'pending_payment', 'completed'].includes(stage)) options.push({ value: 'returned', label: 'Mark Returned' })
     }
     return options
   }
@@ -677,9 +751,30 @@ export function Orders() {
   const canEditOrderDetails = (order: Order) => ['pending', 'confirmed'].includes(simplifiedStatus(order.status, order))
   const canUpdateOrderStatus = () => hasPermission('orders.status')
 
+  const itemRemainingToReturn = (item: OrderDetailItem) => Math.max(0, Number(item.quantity || 0) - Number(item.returned_quantity || 0))
+  const itemRemainingForSource = (item: OrderDetailItem, source: 'internal' | 'supplier') => {
+    const allocated = source === 'internal' ? Number(item.internal_quantity || 0) : Number(item.supplier_quantity || 0)
+    const returned = source === 'internal' ? Number(item.returned_internal_quantity || 0) : Number(item.returned_supplier_quantity || 0)
+    return Math.max(0, allocated - returned)
+  }
+  const orderCanRecordItemReturn = (order?: Order) => Boolean(
+    order && hasPermission('orders.cancel') && ['in_transit', 'delivered', 'collected_paid'].includes(simplifiedStatus(order.status, order))
+  )
+  const selectedReturnItem = selectedOrderDetail?.items.find(item => item.id === returnItemId)
+  const selectedReturnIsHybrid = Boolean(selectedReturnItem && itemRemainingForSource(selectedReturnItem, 'internal') > 0 && itemRemainingForSource(selectedReturnItem, 'supplier') > 0)
+  const selectedReturnSource = selectedReturnItem
+    ? (selectedReturnIsHybrid ? returnSource : itemRemainingForSource(selectedReturnItem, 'internal') > 0 ? 'internal' : 'supplier')
+    : returnSource
+  const selectedReturnMax = selectedReturnItem ? itemRemainingForSource(selectedReturnItem, selectedReturnSource) : 0
+  const chooseReturnItem = (itemId: string) => {
+    const item = selectedOrderDetail?.items.find(candidate => candidate.id === itemId)
+    setReturnItemId(itemId)
+    setReturnQuantity('')
+    if (item) setReturnSource(itemRemainingForSource(item, 'internal') > 0 ? 'internal' : 'supplier')
+  }
+
   const editableDate = (value?: string | null) => {
-    const dateOnly = String(value || '').match(/^(\d{4}-\d{2}-\d{2})/)?.[1]
-    return dateOnly || todayDate()
+    return businessDateValue(value) || todayDate()
   }
 
   const openOrderEdit = (detail: OrderDetail) => {
@@ -732,9 +827,12 @@ export function Orders() {
   const tabs = [
     { id: 'all', label: 'All Orders' },
     { id: 'pending', label: 'Pending' },
+    { id: 'confirmed', label: 'Confirmed' },
     { id: 'in_transit', label: 'Dispatched / In Transit' },
     { id: 'pending_payment', label: 'Pending Payment' },
-    { id: 'completed', label: 'Completed' }
+    { id: 'completed', label: 'Completed' },
+    { id: 'returned', label: 'Returned' },
+    { id: 'cancelled', label: 'Cancelled' }
   ]
 
   const statusOptions = [
@@ -754,16 +852,6 @@ export function Orders() {
     }
     const normalizedStatus = simplifiedStatus(status, order)
     return statusOptions.find(option => option.value === normalizedStatus)?.label || status.replace('_', ' ')
-  }
-
-  const statusColors: Record<string, string> = {
-    pending: 'bg-yellow-100 text-yellow-800',
-    confirmed: 'bg-blue-100 text-blue-800',
-    in_transit: 'bg-blue-100 text-blue-800',
-    delivered: 'bg-green-100 text-green-800',
-    collected_paid: 'bg-emerald-100 text-emerald-800',
-    returned: 'bg-red-100 text-red-800',
-    cancelled: 'bg-gray-100 text-gray-800'
   }
 
   return (
@@ -1027,6 +1115,7 @@ export function Orders() {
               onClick={() => { setActiveTab(tab.id); setPage(1) }}
               className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${activeTab === tab.id ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'}`}
             >
+              {tab.id !== 'all' && <span className={`mr-1.5 inline-block h-2 w-2 rounded-full ${workflowStatusMeta[tab.id]?.dotClass || 'bg-current'}`} aria-hidden="true" />}
               {tab.label}
             </button>
           ))}
@@ -1085,7 +1174,13 @@ export function Orders() {
                   <td className="max-w-56 px-4 py-3 text-sm" title={order.customer_address || ''}>
                     <span className="block truncate">{order.delivery_type === 'walk_in' ? 'Walk-in' : order.customer_address || '-'}</span>
                   </td>
-                  <td className="px-4 py-3"><span className={`px-2 py-1 rounded-full text-xs font-medium ${statusColors[simplifiedStatus(order.status, order)] || 'bg-muted text-muted-foreground'}`}>{statusLabel(order.status, order)}</span></td>
+                  <td className="px-4 py-3">
+                    {(() => {
+                      const stage = workflowStage(order)
+                      const style = workflowStatusMeta[stage] || { badgeClass: 'border-border bg-muted text-muted-foreground', dotClass: 'bg-current' }
+                      return <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold ${style.badgeClass}`}><span className={`h-1.5 w-1.5 rounded-full ${style.dotClass}`} aria-hidden="true" />{statusLabel(order.status, order)}</span>
+                    })()}
+                  </td>
                   <td className="px-4 py-3 text-sm capitalize">{order.payment_status.replace('_', ' ')}</td>
                   <td className="px-4 py-3 font-medium">{formatMoney(order.total_amount)}</td>
                   <td className="px-4 py-3 text-sm">{formatMoney((order.delivery_income || 0) - (order.delivery_cost || 0))}</td>
@@ -1284,7 +1379,10 @@ export function Orders() {
                         <tr key={item.id} className="border-t">
                           <td className="px-4 py-3">{item.product_name || '-'}</td>
                           <td className="px-4 py-3 capitalize">{(item.fulfillment_type || '-').replace('_', ' ')}</td>
-                          <td className="px-4 py-3 text-right">{item.quantity}</td>
+                          <td className="px-4 py-3 text-right">
+                            <div>{item.quantity}</div>
+                            {Number(item.returned_quantity || 0) > 0 && <div className="text-xs text-rose-700">{item.returned_quantity} returned</div>}
+                          </td>
                           <td className="px-4 py-3 text-right">{formatMoney(item.unit_price)}</td>
                           <td className="px-4 py-3 text-right font-medium">{formatMoney(item.total_price)}</td>
                         </tr>
@@ -1292,6 +1390,60 @@ export function Orders() {
                     </tbody>
                   </table>
                 </div>
+
+                {orderCanRecordItemReturn(selectedOrderDetail.order) && selectedOrderDetail.items.some(item => itemRemainingToReturn(item) > 0) && (
+                  <section className="rounded-lg border border-rose-200 bg-rose-50/40 p-4 dark:border-rose-900/50 dark:bg-rose-950/10">
+                    <div className="mb-4">
+                      <h3 className="font-semibold">Record Item Return</h3>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Record the exact returned quantity. The system restores the appropriate stock or supplier liability and creates a proportional commission reversal. A return after payment becomes an auditable offset or recovery; it does not rewrite past payments.
+                      </p>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <label className="text-sm">Item
+                        <select value={returnItemId} onChange={event => chooseReturnItem(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2">
+                          <option value="">Select item</option>
+                          {selectedOrderDetail.items.filter(item => itemRemainingToReturn(item) > 0).map(item => (
+                            <option key={item.id} value={item.id}>
+                              {item.product_name || 'Item'} — {itemRemainingToReturn(item)} available to return
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="text-sm">Quantity
+                        <input type="number" min="1" max={selectedReturnMax || undefined} step="1" value={returnQuantity} onChange={event => setReturnQuantity(event.target.value)} disabled={!selectedReturnItem} className="mt-1 w-full rounded-lg border bg-background px-3 py-2 disabled:cursor-not-allowed disabled:opacity-60" placeholder={selectedReturnItem ? `Maximum ${selectedReturnMax}` : 'Choose an item first'} />
+                      </label>
+                      {selectedReturnItem && selectedReturnIsHybrid && (
+                        <label className="text-sm">Fulfilment Source
+                          <select value={returnSource} onChange={event => setReturnSource(event.target.value as 'internal' | 'supplier')} className="mt-1 w-full rounded-lg border bg-background px-3 py-2">
+                            <option value="internal">Shop stock ({itemRemainingForSource(selectedReturnItem, 'internal')} available)</option>
+                            <option value="supplier">Supplier ({itemRemainingForSource(selectedReturnItem, 'supplier')} available)</option>
+                          </select>
+                        </label>
+                      )}
+                      {selectedReturnItem && selectedReturnSource === 'internal' && (
+                        <label className="text-sm">Condition on Return
+                          <select value={returnStockCondition} onChange={event => setReturnStockCondition(event.target.value as 'sellable' | 'damaged')} className="mt-1 w-full rounded-lg border bg-background px-3 py-2">
+                            <option value="sellable">Sellable — return to available stock</option>
+                            <option value="damaged">Damaged — record as damaged stock</option>
+                          </select>
+                        </label>
+                      )}
+                      <label className="text-sm md:col-span-2">Reason <span className="text-destructive">*</span>
+                        <input value={returnReason} onChange={event => setReturnReason(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2" placeholder="Why was this item returned?" />
+                      </label>
+                    </div>
+                    {selectedReturnItem && <p className="mt-3 text-xs text-muted-foreground">
+                      This return will be recorded against {selectedReturnSource === 'internal' ? 'shop stock' : 'the supplier'}; up to {selectedReturnMax} item(s) remain for that source.
+                    </p>}
+                    {statusError && <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{statusError}</div>}
+                    <div className="mt-4 flex justify-end">
+                      <button type="button" onClick={() => recordItemReturn.mutate()} disabled={recordItemReturn.isPending || !returnItemId || !returnQuantity || !returnReason.trim() || Number(returnQuantity) > selectedReturnMax} className="rounded-lg bg-rose-700 px-4 py-2 text-sm font-medium text-white hover:bg-rose-800 disabled:cursor-not-allowed disabled:opacity-50">
+                        {recordItemReturn.isPending ? 'Recording return…' : 'Record Item Return'}
+                      </button>
+                    </div>
+                  </section>
+                )}
 
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-4 rounded-lg border p-4">
                   <div>

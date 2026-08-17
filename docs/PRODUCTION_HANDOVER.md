@@ -170,8 +170,18 @@ psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\schema.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\permissions_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\production_stabilization_permissions.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\order_edit_permission_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_module_settings_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_tables_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_permissions_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_hardening_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_dashboard_permission_fix.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_accuracy_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_return_accuracy_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_separation_of_duties_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_category_snapshot_provenance_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_period_closure_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_operational_hardening_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_business_policy_migration.sql
 ```
 
 Then create the first owner with the controlled seed process or emergency reset utility. `SEED_ADMIN_PASSWORD` must be at least 12 characters if the seed is used.
@@ -199,8 +209,18 @@ psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\permissions_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\production_stabilization_permissions.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\order_edit_permission_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\cod_delivery_fee_split.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_module_settings_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_tables_migration.sql
 psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_permissions_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_hardening_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_dashboard_permission_fix.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_accuracy_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_return_accuracy_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_separation_of_duties_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_category_snapshot_provenance_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_period_closure_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_operational_hardening_migration.sql
+psql $env:DATABASE_URL -v ON_ERROR_STOP=1 -f database\commission_business_policy_migration.sql
 ```
 
 Do not rerun `production_stabilization_phase1.sql` after it succeeds; constraint creation is intentionally one-time.
@@ -261,6 +281,20 @@ npm test
 13. Close reconciliation only after evidence agrees.
 14. Confirm the Audit Log contains the day’s critical actions.
 15. Create or confirm the end-of-day off-machine backup.
+
+### Commission month-end close
+
+1. Give `commission.close` only to the finance/management operator responsible for payroll closure.
+2. Reconcile returns, payments, manual adjustments, and Speedaf remittances first; every pending commission ledger item must be approved or resolved before a month can close.
+3. Close only a fully finished calendar month and always record a specific reason. The close creates an audited snapshot and freezes that month.
+4. Any unpaid approved amount is transferred as a credit to the next open month. Any overpayment or later recovery is carried as a deduction in the next open month, so it reduces the next payable amount.
+5. Do not edit a closed month directly. There is intentionally no silent reopen path; make an audited current-period correction or return reversal instead.
+
+### Commission release deployment (17 August 2026)
+
+For the existing Contabo database, use `deploy/contabo/apply-commission-release-20260817.sh`. It creates and validates its own pre-release backup and applies only the commission release migrations. The general `apply-migrations.sh` is intentionally restricted to a fresh database and must not be used for an upgrade.
+
+After rebuilding the application, verify user eligibility before any retroactive run. Ann is the production sales agent; test or UAT attendants must be inactive or commission-ineligible. Configure the programme and global rate from 1 August 2026, preview 1–17 August, reconcile the preview to completed paid orders, and only then apply it with a reason.
 
 ## 8. Known Limitations
 

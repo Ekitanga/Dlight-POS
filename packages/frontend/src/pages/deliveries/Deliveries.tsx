@@ -2,12 +2,13 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote, ExternalLink } from 'lucide-react'
+import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote, ExternalLink, type LucideIcon } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { formatMoney } from '../../lib/format'
 import { PaginatedResponse, Pagination } from '../../components/Pagination'
 import { DateRangeFilter } from '../../components/DateRangeFilter'
+import { invalidateCommissionData } from '../../lib/commissionCache'
 
 interface Delivery {
   id: string
@@ -32,6 +33,8 @@ interface Delivery {
   notes: string
   created_at: string
   order_status?: string
+  workflow_status?: string
+  delivery_type?: string
   courier_payment_type?: string
   delivery_fee_payment_method?: string
   payment_status?: string
@@ -45,6 +48,109 @@ interface StatusFormData {
   delivery_status: string
   earned_amount: number
   notes: string
+}
+
+const workflowStatuses = [
+  'pending',
+  'confirmed',
+  'in_transit',
+  'pending_payment',
+  'completed',
+  'returned',
+  'cancelled'
+] as const
+
+type WorkflowStatus = typeof workflowStatuses[number]
+
+const workflowOptions: Array<{ value: WorkflowStatus; label: string }> = [
+  { value: 'pending', label: 'Pending' },
+  { value: 'confirmed', label: 'Confirmed' },
+  { value: 'in_transit', label: 'Dispatched / In Transit' },
+  { value: 'pending_payment', label: 'Pending Payment' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'returned', label: 'Returned' },
+  { value: 'cancelled', label: 'Cancelled' }
+]
+
+const workflowPresentation: Record<WorkflowStatus, { label: string; className: string; Icon: LucideIcon }> = {
+  pending: {
+    label: 'Pending',
+    className: 'bg-amber-100 text-amber-950 ring-1 ring-inset ring-amber-300 dark:bg-amber-950/60 dark:text-amber-200 dark:ring-amber-700',
+    Icon: Clock
+  },
+  confirmed: {
+    label: 'Confirmed',
+    className: 'bg-sky-100 text-sky-950 ring-1 ring-inset ring-sky-300 dark:bg-sky-950/60 dark:text-sky-200 dark:ring-sky-700',
+    Icon: CheckCircle
+  },
+  in_transit: {
+    label: 'Dispatched / In Transit',
+    className: 'bg-indigo-100 text-indigo-950 ring-1 ring-inset ring-indigo-300 dark:bg-indigo-950/60 dark:text-indigo-200 dark:ring-indigo-700',
+    Icon: Truck
+  },
+  pending_payment: {
+    label: 'Pending Payment',
+    className: 'bg-orange-100 text-orange-950 ring-1 ring-inset ring-orange-300 dark:bg-orange-950/60 dark:text-orange-200 dark:ring-orange-700',
+    Icon: Banknote
+  },
+  completed: {
+    label: 'Completed',
+    className: 'bg-emerald-100 text-emerald-950 ring-1 ring-inset ring-emerald-300 dark:bg-emerald-950/60 dark:text-emerald-200 dark:ring-emerald-700',
+    Icon: CheckCircle
+  },
+  returned: {
+    label: 'Returned',
+    className: 'bg-rose-100 text-rose-950 ring-1 ring-inset ring-rose-300 dark:bg-rose-950/60 dark:text-rose-200 dark:ring-rose-700',
+    Icon: AlertCircle
+  },
+  cancelled: {
+    label: 'Cancelled',
+    className: 'bg-slate-200 text-slate-950 ring-1 ring-inset ring-slate-400 dark:bg-slate-800 dark:text-slate-100 dark:ring-slate-600',
+    Icon: X
+  }
+}
+
+const deliveryStateLabels: Record<string, string> = {
+  assigned: 'Assigned',
+  in_transit: 'In transit',
+  delivered: 'Delivered to client',
+  collected_paid: 'Collected & paid',
+  returned: 'Returned',
+  cancelled: 'Cancelled'
+}
+
+function isWorkflowStatus(value: unknown): value is WorkflowStatus {
+  return typeof value === 'string' && workflowStatuses.includes(value as WorkflowStatus)
+}
+
+function workflowStatusForDelivery(delivery: Delivery): WorkflowStatus {
+  if (isWorkflowStatus(delivery.workflow_status)) return delivery.workflow_status
+
+  const orderStatus = delivery.order_status
+  if (orderStatus === 'pending') return 'pending'
+  if (orderStatus === 'confirmed' || orderStatus === 'packed') return 'confirmed'
+  if (orderStatus === 'in_transit' || orderStatus === 'dispatched') return 'in_transit'
+  if (orderStatus === 'returned') return 'returned'
+  if (orderStatus === 'cancelled') return 'cancelled'
+  if (orderStatus === 'collected_paid') return 'completed'
+  if (orderStatus === 'delivered') {
+    return delivery.courier_payment_type === 'cod' ? 'pending_payment' : 'completed'
+  }
+
+  // The API normally supplies workflow_status. This fallback keeps a legacy
+  // response readable without falsely marking an unpaid COD delivery complete.
+  if (delivery.delivery_status === 'collected_paid') return 'completed'
+  if (delivery.delivery_status === 'in_transit') return 'in_transit'
+  if (delivery.delivery_status === 'returned') return 'returned'
+  if (delivery.delivery_status === 'cancelled') return 'cancelled'
+  if (delivery.delivery_status === 'delivered') {
+    return delivery.courier_payment_type === 'cod' ? 'pending_payment' : 'completed'
+  }
+  return 'pending'
+}
+
+function deliveryStateLabel(delivery: Delivery) {
+  return deliveryStateLabels[delivery.delivery_status] || delivery.delivery_status.replace(/_/g, ' ')
 }
 
 function TrackingLink({ trackingNumber, trackingUrl }: { trackingNumber?: string; trackingUrl?: string }) {
@@ -76,6 +182,7 @@ export function Deliveries() {
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
+  const [selectedWorkflowStatus, setSelectedWorkflowStatus] = useState('')
   const [selectedStatus, setSelectedStatus] = useState('')
   const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null)
   const [showStatusForm, setShowStatusForm] = useState(false)
@@ -88,12 +195,13 @@ export function Deliveries() {
   const queryClient = useQueryClient()
 
   const { data: deliveryPage, isLoading, error } = useQuery<PaginatedResponse<Delivery>>({
-    queryKey: ['deliveries', search, dateFrom, dateTo, selectedStatus, codOnly, page, pageSize],
+    queryKey: ['deliveries', search, dateFrom, dateTo, selectedWorkflowStatus, selectedStatus, codOnly, page, pageSize],
     queryFn: async () => {
       const params = new URLSearchParams()
       if (search) params.set('search', search)
       if (dateFrom) params.set('date_from', dateFrom)
       if (dateTo) params.set('date_to', dateTo)
+      if (selectedWorkflowStatus) params.set('workflow_stage', selectedWorkflowStatus)
       if (selectedStatus) params.set('status', selectedStatus)
       if (codOnly) params.set('cod_outstanding', 'true')
       params.set('page', String(page))
@@ -125,6 +233,7 @@ export function Deliveries() {
       queryClient.invalidateQueries({ queryKey: ['deliveries'] })
       queryClient.invalidateQueries({ queryKey: ['orders'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
       setShowStatusForm(false)
       setSelectedDelivery(null)
       resetStatus()
@@ -147,6 +256,7 @@ export function Deliveries() {
       queryClient.invalidateQueries({ queryKey: ['deliveries'] })
       queryClient.invalidateQueries({ queryKey: ['orders'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
       setRemittanceAmount('')
       setRemittanceReference('')
       setRemittanceError('')
@@ -162,35 +272,6 @@ export function Deliveries() {
     if (selectedDelivery) {
       updateStatus.mutate({ ...data, order_id: selectedDelivery.order_id })
     }
-  }
-
-  const statusColors: Record<string, string> = {
-    assigned: 'bg-blue-100 text-blue-800',
-    in_transit: 'bg-yellow-100 text-yellow-800',
-    delivered: 'bg-green-100 text-green-800',
-    collected_paid: 'bg-emerald-100 text-emerald-800',
-    returned: 'bg-red-100 text-red-800',
-    cancelled: 'bg-gray-100 text-gray-800'
-  }
-
-  const statusIcons: Record<string, any> = {
-    assigned: Clock,
-    in_transit: Truck,
-    delivered: CheckCircle,
-    collected_paid: CheckCircle,
-    returned: AlertCircle,
-    cancelled: X
-  }
-
-  const deliveryStatusLabel = (delivery: Delivery) => {
-    if (delivery.courier_payment_type === 'cod') {
-      if (delivery.delivery_status === 'in_transit') return 'Dispatched / In Transit'
-      if (delivery.delivery_status === 'delivered') return 'Pending Payment'
-      if (delivery.delivery_status === 'collected_paid') return 'Completed'
-    }
-    if (delivery.delivery_status === 'in_transit') return 'Dispatched / In Transit'
-    if (delivery.delivery_status === 'delivered' || delivery.delivery_status === 'collected_paid') return 'Completed'
-    return delivery.delivery_status.replace('_', ' ')
   }
 
   const deliveryHandler = (delivery: Delivery) => {
@@ -232,11 +313,12 @@ export function Deliveries() {
   }
 
   const nextOrderStatus = (delivery: Delivery) => {
-    const status = ['confirmed', 'packed'].includes(delivery.order_status || '') ? 'pending'
-      : delivery.order_status === 'dispatched' ? 'in_transit'
-        : delivery.order_status
-    if (status === 'pending') return 'in_transit'
-    if (status === 'in_transit') return 'delivered'
+    const status = delivery.order_status
+    if (status === 'pending') return 'confirmed'
+    if (status === 'confirmed' || status === 'packed') {
+      return delivery.delivery_type === 'walk_in' ? 'delivered' : 'in_transit'
+    }
+    if (status === 'in_transit' || status === 'dispatched') return 'delivered'
     return ''
   }
 
@@ -261,17 +343,20 @@ export function Deliveries() {
 
       {selectedDelivery && showStatusForm && hasPermission('deliveries.manage') && (
         <div className="border rounded-lg p-6 bg-card">
-          <h2 className="font-semibold mb-4">Update Delivery Status</h2>
+          <h2 className="font-semibold mb-1">Advance Order Workflow</h2>
+          <p className="mb-4 text-sm text-muted-foreground">Delivery state updates follow the same controlled order workflow as the Orders page.</p>
           <form onSubmit={handleSubmitStatus(onStatusUpdate)} className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium mb-1">Status</label>
+              <label className="block text-sm font-medium mb-1">Next order status</label>
               {nextOrderStatus(selectedDelivery) ? <select
                 {...registerStatus('delivery_status')}
                 className="w-full px-3 py-2 border rounded-lg"
               >
-                {nextOrderStatus(selectedDelivery) === 'in_transit'
-                  ? <option value="in_transit">Dispatch / Mark In Transit</option>
-                  : <option value="delivered">{selectedDelivery.courier_payment_type === 'cod' ? 'Client Collected - Await Payment' : 'Delivered - Complete Order'}</option>}
+                {nextOrderStatus(selectedDelivery) === 'confirmed'
+                  ? <option value="confirmed">Confirm Order</option>
+                  : nextOrderStatus(selectedDelivery) === 'in_transit'
+                    ? <option value="in_transit">Dispatch / Mark In Transit</option>
+                    : <option value="delivered">{selectedDelivery.courier_payment_type === 'cod' ? 'Client Collected - Await Payment' : 'Delivered - Complete Order'}</option>}
               </select> : <div className="rounded-lg border bg-muted px-3 py-2 text-sm">
                 {selectedDelivery.courier_payment_type === 'cod' && selectedDelivery.delivery_status === 'delivered'
                   ? 'Waiting for courier remittance'
@@ -370,11 +455,25 @@ export function Deliveries() {
           />
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <select value={selectedStatus} onChange={(event) => { setSelectedStatus(event.target.value); setPage(1) }} className="px-3 py-2 border rounded-lg">
-            <option value="">All statuses</option>
+          <select
+            value={selectedWorkflowStatus}
+            onChange={(event) => { setSelectedWorkflowStatus(event.target.value); setPage(1) }}
+            aria-label="Filter by order workflow status"
+            className="px-3 py-2 border rounded-lg"
+          >
+            <option value="">All order statuses</option>
+            {workflowOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          <select
+            value={selectedStatus}
+            onChange={(event) => { setSelectedStatus(event.target.value); setPage(1) }}
+            aria-label="Filter by delivery operation status"
+            className="px-3 py-2 border rounded-lg"
+          >
+            <option value="">All delivery states</option>
             <option value="assigned">Assigned</option>
             <option value="in_transit">In Transit</option>
-            <option value="delivered">Delivered</option>
+            <option value="delivered">Delivered to Client</option>
             <option value="collected_paid">Collected & Paid</option>
             <option value="returned">Returned</option>
             <option value="cancelled">Cancelled</option>
@@ -386,8 +485,8 @@ export function Deliveries() {
             includeClear={false}
             onChange={range => { setDateFrom(range.dateFrom); setDateTo(range.dateTo); setPage(1) }}
           />
-          {(dateFrom || dateTo || selectedStatus) && (
-            <button type="button" onClick={() => { setDateFrom(''); setDateTo(''); setSelectedStatus('') }} className="px-3 py-2 border rounded-lg text-sm">
+          {(dateFrom || dateTo || selectedWorkflowStatus || selectedStatus) && (
+            <button type="button" onClick={() => { setDateFrom(''); setDateTo(''); setSelectedWorkflowStatus(''); setSelectedStatus('') }} className="px-3 py-2 border rounded-lg text-sm">
               Clear filters
             </button>
           )}
@@ -421,7 +520,7 @@ export function Deliveries() {
                 <th className="text-left px-4 py-3 font-medium">Customer</th>
                 <th className="text-left px-4 py-3 font-medium">Handled By</th>
                 <th className="text-left px-4 py-3 font-medium">Destination</th>
-                <th className="text-left px-4 py-3 font-medium">Status</th>
+                <th className="text-left px-4 py-3 font-medium">Order Status</th>
                 <th className="text-left px-4 py-3 font-medium">Customer Fee</th>
                 <th className="text-left px-4 py-3 font-medium">Provider Charge</th>
                 <th className="text-left px-4 py-3 font-medium">Business Margin</th>
@@ -430,7 +529,9 @@ export function Deliveries() {
             </thead>
             <tbody>
               {deliveries.map((delivery: any) => {
-                const StatusIcon = statusIcons[delivery.delivery_status] || Clock
+                const workflowStatus = workflowStatusForDelivery(delivery)
+                const presentation = workflowPresentation[workflowStatus]
+                const StatusIcon = presentation.Icon
                 return (
                   <tr key={delivery.id} className="border-t hover:bg-muted/50 transition-colors">
                     <td className="px-4 py-3 font-medium">{delivery.order_number || '-'}</td>
@@ -447,10 +548,14 @@ export function Deliveries() {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium capitalize ${statusColors[delivery.delivery_status] || 'bg-muted text-muted-foreground'}`}>
+                      <span
+                        className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-semibold ${presentation.className}`}
+                        title={`Order status: ${presentation.label}`}
+                      >
                         <StatusIcon className="h-3 w-3" />
-                        {deliveryStatusLabel(delivery)}
+                        {presentation.label}
                       </span>
+                      <p className="mt-1 text-xs text-muted-foreground">Delivery: {deliveryStateLabel(delivery)}</p>
                     </td>
                     <td className="px-4 py-3">{formatMoney(customerDeliveryFee(delivery))}</td>
                     <td className="px-4 py-3">{formatMoney(actualDeliveryCost(delivery))}</td>

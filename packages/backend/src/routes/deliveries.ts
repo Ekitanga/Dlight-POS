@@ -2,9 +2,58 @@ import { Router } from 'express'
 import { query, transaction } from '../db/index.js'
 import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 import { logAudit } from '../utils/audit.js'
+import { evaluateAndEarnOrderItem } from '../services/commission.js'
 
 const router = Router()
 const DEFAULT_TRACKING_URL_TEMPLATE = 'https://parcelsapp.com/en/tracking/{tracking_number}'
+
+// These are deliberately order-workflow stages, not delivery table states.  A
+// courier delivery can be physically delivered while it is still awaiting COD
+// remittance, so filtering or displaying `delivery_status` alone is misleading.
+const workflowStages = new Set([
+  'pending',
+  'confirmed',
+  'in_transit',
+  'pending_payment',
+  'completed',
+  'returned',
+  'cancelled'
+])
+
+function workflowCondition(stage: string): string | null {
+  switch (stage) {
+    case 'pending':
+      return "o.status = 'pending'"
+    case 'confirmed':
+      return "o.status IN ('confirmed', 'packed')"
+    case 'in_transit':
+      return "o.status IN ('in_transit', 'dispatched')"
+    case 'pending_payment':
+      return "o.delivery_type = 'courier' AND o.courier_payment_type = 'cod' AND o.status = 'delivered'"
+    case 'completed':
+      return "((o.status = 'delivered' AND NOT (o.delivery_type = 'courier' AND o.courier_payment_type = 'cod')) OR o.status = 'collected_paid')"
+    case 'returned':
+      return "o.status = 'returned'"
+    case 'cancelled':
+      return "o.status = 'cancelled'"
+    default:
+      return null
+  }
+}
+
+// Keep this CASE in lockstep with workflowCondition.  The API exposes this
+// canonical value so every client uses the order workflow rather than trying to
+// infer it from delivery fields (especially for COD orders).
+const workflowStatusSql = `CASE
+  WHEN o.status = 'pending' THEN 'pending'
+  WHEN o.status IN ('confirmed', 'packed') THEN 'confirmed'
+  WHEN o.status IN ('in_transit', 'dispatched') THEN 'in_transit'
+  WHEN o.delivery_type = 'courier' AND o.courier_payment_type = 'cod' AND o.status = 'delivered' THEN 'pending_payment'
+  WHEN (o.status = 'delivered' AND NOT (o.delivery_type = 'courier' AND o.courier_payment_type = 'cod')) OR o.status = 'collected_paid' THEN 'completed'
+  WHEN o.status = 'returned' THEN 'returned'
+  WHEN o.status = 'cancelled' THEN 'cancelled'
+  ELSE o.status::text
+END`
 
 function trackingUrl(template: string | null | undefined, trackingNumber: string | null | undefined) {
   const cleanedTrackingNumber = String(trackingNumber || '').trim()
@@ -29,7 +78,7 @@ function withTrackingUrl<T extends { courier_tracking_number?: string | null }>(
 
 router.get('/', async (req, res) => {
   try {
-    const { search, date_from, date_to, status, cod_outstanding } = req.query
+    const { search, date_from, date_to, status, workflow_stage, cod_outstanding } = req.query
     const params: any[] = []
     const conditions: string[] = []
     if (search) {
@@ -56,10 +105,17 @@ router.get('/', async (req, res) => {
       conditions.push(`d.delivery_status = $${params.length + 1}`)
       params.push(status)
     }
+    if (workflow_stage !== undefined && String(workflow_stage).trim()) {
+      const stage = String(workflow_stage).trim()
+      if (!workflowStages.has(stage)) {
+        return res.status(400).json({ error: { message: 'Invalid workflow status filter' } })
+      }
+      conditions.push(workflowCondition(stage)!)
+    }
     if (cod_outstanding === 'true') {
       conditions.push("o.courier_payment_type='cod' AND COALESCE(cc.cod_amount-cc.remitted_amount,0)>0")
     }
-    let sql = `SELECT d.*, o.order_number, o.status AS order_status, o.payment_status,
+    let sql = `SELECT d.*, o.order_number, o.status AS order_status, ${workflowStatusSql} AS workflow_status, o.payment_status, o.delivery_type,
       o.courier_payment_type, o.delivery_fee_payment_method,
         COALESCE(NULLIF(o.delivery_address, ''), c.address, '') AS delivery_destination,
         c.name AS customer_name, r.name AS rider_name,
@@ -122,6 +178,14 @@ router.post('/orders/:orderId/cod', async (req, res) => {
       const orderResult = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [orderId])
       const order = orderResult.rows[0]
       if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 })
+      if (
+        req.user?.role !== 'admin' &&
+        req.user?.role !== 'owner' &&
+        order.created_by &&
+        order.created_by === req.user?.userId
+      ) {
+        throw Object.assign(new Error('A different authorised user must verify courier remittance for an order you created'), { statusCode: 403 })
+      }
 
       const codResult = await client.query('SELECT * FROM cod_collections WHERE order_id = $1 FOR UPDATE', [orderId])
       const cod = codResult.rows[0]
@@ -162,13 +226,17 @@ router.post('/orders/:orderId/cod', async (req, res) => {
       )
       const paidAmount = Number(paymentTotal.rows[0].total)
       const paymentStatus = paidAmount >= Number(order.total_amount) ? 'paid' : 'partially_paid'
+      const finalCompleted = fullyRemitted && paymentStatus === 'paid'
       await client.query(
         `UPDATE orders SET paid_amount = $1, payment_status = $2,
-          status = CASE WHEN $3 THEN 'collected_paid' ELSE status END, updated_at = NOW()
+          status = CASE WHEN $3 THEN 'collected_paid' ELSE status END,
+          commission_completion_by = CASE WHEN $3 THEN $5 ELSE commission_completion_by END,
+          commission_completion_at = CASE WHEN $3 THEN NOW() ELSE commission_completion_at END,
+          updated_at = NOW()
          WHERE id = $4`,
-        [paidAmount, paymentStatus, fullyRemitted, orderId]
+        [paidAmount, paymentStatus, finalCompleted, orderId, req.user?.userId || null]
       )
-      if (fullyRemitted) {
+      if (finalCompleted) {
         await client.query("UPDATE deliveries SET delivery_status = 'collected_paid' WHERE order_id = $1", [orderId])
       }
       await logAudit({
@@ -182,10 +250,35 @@ router.post('/orders/:orderId/cod', async (req, res) => {
         metadata: {
           order_number: order.order_number,
           courier_payment_type: order.courier_payment_type,
-          fully_remitted: fullyRemitted
+          fully_remitted: fullyRemitted,
+          order_completed: finalCompleted
         }
       })
-      return { paid_amount: paidAmount, payment_status: paymentStatus, cod_status: codStatus }
+      if (finalCompleted) {
+        await logAudit({
+          req,
+          client,
+          action: 'order_status_changed',
+          entityType: 'order',
+          entityId: orderId,
+          oldValues: { status: order.status, payment_status: order.payment_status },
+          newValues: { status: 'collected_paid', payment_status: paymentStatus },
+          metadata: {
+            order_number: order.order_number,
+            completion_source: 'speedaf_full_remittance',
+            remittance_reference: String(reference).trim()
+          }
+        })
+      }
+      let commissionsCreated = 0
+      if (finalCompleted) {
+        const items = await client.query('SELECT id FROM order_items WHERE order_id = $1 ORDER BY id', [orderId])
+        for (const item of items.rows) {
+          const commission = await evaluateAndEarnOrderItem(orderId, item.id, req.user?.userId || null, client)
+          if (commission.earned) commissionsCreated += 1
+        }
+      }
+      return { paid_amount: paidAmount, payment_status: paymentStatus, cod_status: codStatus, commissions_created: commissionsCreated }
     })
     res.status(201).json(result)
   } catch (error) {

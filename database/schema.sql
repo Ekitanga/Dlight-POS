@@ -6,6 +6,7 @@ CREATE TABLE users (
     phone VARCHAR(50),
     role VARCHAR(50) NOT NULL DEFAULT 'attendant',
     is_active BOOLEAN NOT NULL DEFAULT true,
+    commission_eligible BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -245,6 +246,14 @@ CREATE TABLE orders (
     notes TEXT,
     created_by UUID REFERENCES users(id),
     confirmed_by UUID REFERENCES users(id),
+    -- Snapshot whether the creator was a commission-eligible sales agent when
+    -- the order was created. Later user changes do not rewrite historic sales.
+    commission_salesperson_eligible BOOLEAN NOT NULL DEFAULT false,
+    commission_completion_by UUID REFERENCES users(id),
+    commission_completion_at TIMESTAMP,
+    commission_verified_by UUID REFERENCES users(id),
+    commission_verified_at TIMESTAMP,
+    commission_verification_reason TEXT,
     cancelled_by UUID REFERENCES users(id),
     cancelled_at TIMESTAMP,
     sale_date DATE NOT NULL DEFAULT CURRENT_DATE,
@@ -256,10 +265,13 @@ CREATE TABLE order_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
     product_id UUID NOT NULL REFERENCES products(id),
+    product_category_id UUID REFERENCES categories(id),
+    product_category_snapshot_verified BOOLEAN NOT NULL DEFAULT TRUE,
     supplier_id UUID REFERENCES suppliers(id),
     quantity INTEGER NOT NULL,
     internal_quantity INTEGER NOT NULL DEFAULT 0,
     supplier_quantity INTEGER NOT NULL DEFAULT 0,
+    returned_quantity INTEGER NOT NULL DEFAULT 0 CHECK (returned_quantity >= 0 AND returned_quantity <= quantity),
     unit_cost NUMERIC(12,2) NOT NULL DEFAULT 0,
     supplier_cost NUMERIC(12,2) NOT NULL DEFAULT 0,
     unit_price NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -483,6 +495,7 @@ CREATE TABLE settings (
     sidebar_style VARCHAR(10) DEFAULT 'dark',
     interface_density VARCHAR(12) DEFAULT 'comfortable',
     expense_categories JSONB NOT NULL DEFAULT '["Rent","Salaries","Electricity","Internet","Packaging","Fuel","Miscellaneous"]'::jsonb,
+    commission_module_enabled BOOLEAN NOT NULL DEFAULT true,
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -544,6 +557,22 @@ CREATE TABLE order_refunds (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+-- Item-level returns preserve the operational evidence needed to reverse a
+-- proportional commission without treating the whole order as returned.
+CREATE TABLE order_item_returns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    order_id UUID NOT NULL REFERENCES orders(id),
+    order_item_id UUID NOT NULL REFERENCES order_items(id),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    internal_quantity INTEGER NOT NULL DEFAULT 0 CHECK (internal_quantity >= 0),
+    supplier_quantity INTEGER NOT NULL DEFAULT 0 CHECK (supplier_quantity >= 0),
+    stock_condition VARCHAR(20) CHECK (stock_condition IN ('sellable', 'damaged')),
+    reason TEXT NOT NULL,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    CHECK (internal_quantity + supplier_quantity = quantity)
+);
+
 CREATE UNIQUE INDEX uq_pending_order_refund ON order_refunds(order_id) WHERE status = 'pending';
 CREATE UNIQUE INDEX uq_deliveries_order ON deliveries(order_id);
 CREATE UNIQUE INDEX uq_cod_collections_order ON cod_collections(order_id);
@@ -554,6 +583,7 @@ CREATE INDEX idx_orders_status ON orders(status);
 CREATE INDEX idx_orders_payment_status ON orders(payment_status);
 CREATE INDEX idx_orders_sale_date ON orders(sale_date DESC);
 CREATE INDEX idx_orders_created_at ON orders(created_at DESC);
+CREATE INDEX idx_order_item_returns_item ON order_item_returns(order_item_id, created_at DESC);
 CREATE INDEX idx_products_sku ON products(sku);
 CREATE INDEX idx_products_barcode ON products(barcode);
 CREATE INDEX idx_suppliers_active ON suppliers(is_active);

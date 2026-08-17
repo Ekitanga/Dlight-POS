@@ -10,6 +10,7 @@ interface User {
   full_name: string
   role: string
   is_active: boolean
+  commission_eligible: boolean
   created_at: string
   permissions: string[]
 }
@@ -27,6 +28,7 @@ interface UserFormData {
   role: string
   password: string
   is_active: boolean
+  commission_eligible: boolean
 }
 
 export function Users() {
@@ -39,10 +41,13 @@ export function Users() {
   const queryClient = useQueryClient()
 
   const attendantDefaults = [
-    'dashboard.view', 'orders.view', 'orders.create', 'orders.status',
+    'dashboard.personal_sales', 'dashboard.personal_orders', 'dashboard.pending_speedaf',
+    'commission.own_view', 'commission.own_daily', 'commission.own_monthly',
+    'commission.own_history', 'commission.own_transactions', 'commission.own_potential',
+    'orders.view', 'orders.create', 'orders.status',
     'customers.view', 'customers.create', 'customers.edit', 'products.view', 'suppliers.view',
     'riders.view', 'couriers.view', 'deliveries.view', 'deliveries.manage',
-    'cod.view', 'cod.remit', 'inventory.view', 'receipts.view'
+    'cod.view', 'inventory.view', 'receipts.view'
   ]
 
   const { data: users = [], isLoading, error } = useQuery<User[]>({
@@ -59,7 +64,7 @@ export function Users() {
   })
 
   const { register, handleSubmit, reset, watch, formState: { errors } } = useForm<UserFormData>({
-    defaultValues: { role: 'attendant', is_active: true }
+    defaultValues: { role: 'attendant', is_active: true, commission_eligible: true }
   })
   const selectedRole = watch('role')
 
@@ -99,7 +104,11 @@ export function Users() {
 
   const handleFormSubmit = (data: UserFormData) => {
     setFormError('')
-    const payload = { ...data, permissions: data.role === 'admin' ? [] : selectedPermissions }
+    const payload = {
+      ...data,
+      commission_eligible: !['admin', 'owner'].includes(data.role) && data.commission_eligible,
+      permissions: data.role === 'admin' ? [] : selectedPermissions
+    }
     if (editingUser) {
       updateUser.mutate(payload, {
         onError: (mutationError: any) => setFormError(mutationError.response?.data?.error?.message || 'Failed to update user')
@@ -120,7 +129,8 @@ export function Users() {
       full_name: user.full_name,
       role: user.role,
       password: '',
-      is_active: user.is_active
+      is_active: user.is_active,
+      commission_eligible: user.commission_eligible
     })
     setShowForm(true)
   }
@@ -129,7 +139,7 @@ export function Users() {
     setEditingUser(null)
     setSelectedPermissions(attendantDefaults)
     setFormError('')
-    reset({ email: '', full_name: '', role: 'attendant', password: '', is_active: true })
+    reset({ email: '', full_name: '', role: 'attendant', password: '', is_active: true, commission_eligible: true })
     setShowForm(true)
   }
 
@@ -218,6 +228,10 @@ export function Users() {
             <label className="md:col-span-2 inline-flex items-center gap-2 text-sm">
               <input type="checkbox" {...register('is_active')} className="h-4 w-4" />
               Active user
+            </label>
+            <label className="md:col-span-2 inline-flex items-start gap-2 rounded-lg border p-3 text-sm">
+              <input type="checkbox" {...register('commission_eligible')} disabled={['admin', 'owner'].includes(selectedRole)} className="mt-0.5 h-4 w-4" />
+              <span><span className="block font-medium">Eligible for sales commission</span><span className="text-xs text-muted-foreground">Only orders created by an eligible sales agent can earn commission. Administrators and owners never earn.</span></span>
             </label>
             <div className="md:col-span-2 border-t pt-4">
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -322,6 +336,7 @@ export function Users() {
                 <th className="text-left px-4 py-3 font-medium">Name</th>
                 <th className="text-left px-4 py-3 font-medium">Email</th>
                 <th className="text-left px-4 py-3 font-medium">Role</th>
+                <th className="text-left px-4 py-3 font-medium">Commission</th>
                 <th className="text-left px-4 py-3 font-medium">Status</th>
                 <th className="text-right px-4 py-3 font-medium">Actions</th>
               </tr>
@@ -337,6 +352,7 @@ export function Users() {
                       {user.role}
                     </span>
                   </td>
+                  <td className="px-4 py-3 text-sm">{user.commission_eligible ? 'Eligible' : 'Not eligible'}</td>
                   <td className="px-4 py-3 text-sm">
                     <span className={`px-2 py-1 rounded-full text-xs font-medium ${user.is_active ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>
                       {user.is_active ? 'Active' : 'Inactive'}
@@ -389,6 +405,7 @@ export function Users() {
               <div><span className="text-muted-foreground">Email:</span> {viewingUser.email}</div>
               <div><span className="text-muted-foreground">Role:</span> {viewingUser.role}</div>
               <div><span className="text-muted-foreground">Status:</span> {viewingUser.is_active ? 'Active' : 'Inactive'}</div>
+              <div><span className="text-muted-foreground">Sales commission:</span> {viewingUser.commission_eligible ? 'Eligible' : 'Not eligible'}</div>
               <div><span className="text-muted-foreground">Created:</span> {viewingUser.created_at ? new Date(viewingUser.created_at).toLocaleDateString() : '-'}</div>
               <div>
                 <span className="text-muted-foreground">Access:</span>{' '}

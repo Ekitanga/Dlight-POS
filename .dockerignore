@@ -7,6 +7,9 @@ dist
 .env.local
 database/backups
 packages/backend/database/backups
+backups
+.codex-temp
+scripts/start-live-simulation.ps1
 artifacts
 playwright-report
 test-results

@@ -1,7 +1,12 @@
-import { Pool } from 'pg'
+import { Pool, types } from 'pg'
 import dotenv from 'dotenv'
 
 dotenv.config()
+
+// PostgreSQL DATE values are business dates, not instants in time. Returning
+// them as YYYY-MM-DD prevents the Node process timezone from moving a sale,
+// payment, or commission date into the previous day during JSON serialization.
+types.setTypeParser(1082, value => value)
 
 let pool: Pool | null = null
 
