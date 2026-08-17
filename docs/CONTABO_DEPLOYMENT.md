@@ -241,7 +241,7 @@ curl -I https://169-58-30-49.sslip.io/health
 docker compose -f deploy/contabo/docker-compose.yml logs --tail=100 app
 ```
 
-The release script creates and validates a custom-format PostgreSQL backup before stopping the application and applying any SQL. It records each migration filename and SHA-256 checksum in `dlight_schema_migrations`, refuses an unexpected partial commission schema, and restarts the previous application image if migration verification fails.
+The release script stops the application, creates and validates a custom-format PostgreSQL backup, and then applies the SQL. It records each migration filename and SHA-256 checksum in `dlight_schema_migrations`, refuses an unexpected partial commission schema, and restarts the previous application image if backup or migration verification fails.
 
 After the application is healthy:
 

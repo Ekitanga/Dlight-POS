@@ -51,7 +51,7 @@ if [ ! -s "$BACKUP_PATH" ]; then
   echo "Backup creation failed or produced an empty file."
   exit 1
 fi
-compose exec -T db pg_restore --list "/migrations/backups/${BACKUP_NAME}" >/dev/null
+compose exec -T db pg_restore --list < "$BACKUP_PATH" >/dev/null
 
 db_psql -q -c "
   CREATE TABLE IF NOT EXISTS dlight_schema_migrations (
