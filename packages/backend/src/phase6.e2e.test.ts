@@ -603,6 +603,17 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(fee.category, 'Courier Transaction Fees')
     assert.equal(await count('SELECT COUNT(*) FROM speedaf_remittance_allocations WHERE batch_id=$1', [submitted.id]), 2)
     assert.equal(await count("SELECT COUNT(*) FROM audit_logs WHERE entity_id=$1 AND action='speedaf_remittance_batch_approved'", [submitted.id]), 1)
+
+    const paymentHistory = await request('GET', '/deliveries/cod/payment-history', admin.accessToken)
+    const recordedBatch = paymentHistory.find((payment: any) => payment.id === submitted.id)
+    assert.ok(recordedBatch)
+    assert.equal(recordedBatch.source, 'batch')
+    assert.equal(recordedBatch.allocations.length, 2)
+    assert.equal(recordedBatch.allocations.every((allocation: any) => allocation.tracking_url), true)
+    assert.equal(recordedBatch.allocations.every((allocation: any) => allocation.salesperson_name), true)
+    assert.equal(recordedBatch.allocations.reduce((sum: number, allocation: any) => sum + Number(allocation.commission_amount), 0), 100)
+    assert.equal(paymentHistory.some((payment: any) => payment.source === 'legacy_single'), true)
+    await request('GET', '/deliveries/cod/payment-history', attendant.accessToken, undefined, 403)
   })
 
   await t.test('5b. Speedaf item COD with delivery fee paid directly to Speedaf', async () => {

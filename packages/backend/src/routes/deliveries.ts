@@ -77,6 +77,55 @@ function withTrackingUrl<T extends { courier_tracking_number?: string | null }>(
   }
 }
 
+const speedafBatchSelect = `
+  SELECT b.*, creator.full_name AS created_by_name, approver.full_name AS approved_by_name,
+    COALESCE(json_agg(json_build_object(
+      'order_id', a.order_id,
+      'order_number', o.order_number,
+      'tracking_number', d.courier_tracking_number,
+      'customer_name', customer.name,
+      'salesperson_name', salesperson.full_name,
+      'gross_amount', a.gross_amount,
+      'commission_amount', COALESCE(order_commission.amount, 0)
+    ) ORDER BY o.order_number) FILTER (WHERE a.id IS NOT NULL), '[]') AS allocations
+  FROM speedaf_remittance_batches b
+  LEFT JOIN users creator ON creator.id = b.created_by
+  LEFT JOIN users approver ON approver.id = b.approved_by
+  LEFT JOIN speedaf_remittance_allocations a ON a.batch_id = b.id
+  LEFT JOIN orders o ON o.id = a.order_id
+  LEFT JOIN deliveries d ON d.order_id = o.id
+  LEFT JOIN customers customer ON customer.id = o.customer_id
+  LEFT JOIN users salesperson ON salesperson.id = o.created_by
+  LEFT JOIN LATERAL (
+    SELECT COALESCE(SUM(CASE
+      WHEN transaction_type = 'earned' THEN amount
+      WHEN transaction_type = 'reversal' THEN -amount
+      ELSE 0
+    END), 0) AS amount
+    FROM commission_transactions
+    WHERE order_id = o.id
+  ) order_commission ON TRUE
+  GROUP BY b.id, creator.full_name, approver.full_name
+  ORDER BY b.created_at DESC
+  LIMIT 200`
+
+function mapPaymentRecord(row: any, source = 'batch') {
+  return {
+    ...row,
+    source,
+    payment_number: row.payment_number || row.batch_number,
+    allocations: (Array.isArray(row.allocations) ? row.allocations : []).map((allocation: any) => ({
+      ...allocation,
+      tracking_url: trackingUrl(null, allocation.tracking_number)
+    }))
+  }
+}
+
+async function getSpeedafBatches() {
+  const result = await query(speedafBatchSelect)
+  return result.rows.map(row => mapPaymentRecord(row))
+}
+
 async function approveSpeedafBatch(client: any, batchId: string, approverId: string, req?: any) {
   const batchResult = await client.query(
     'SELECT * FROM speedaf_remittance_batches WHERE id = $1 FOR UPDATE',
@@ -329,24 +378,77 @@ router.get('/orders/:orderId/tracking/events', async (req, res) => {
 
 router.get('/cod/batches', async (_req, res) => {
   try {
-    const result = await query(
-      `SELECT b.*, creator.full_name AS created_by_name, approver.full_name AS approved_by_name,
-        COALESCE(json_agg(json_build_object(
-          'order_id', a.order_id, 'order_number', o.order_number,
-          'tracking_number', d.courier_tracking_number, 'gross_amount', a.gross_amount
-        ) ORDER BY o.order_number) FILTER (WHERE a.id IS NOT NULL), '[]') AS allocations
-       FROM speedaf_remittance_batches b
-       LEFT JOIN users creator ON creator.id = b.created_by
-       LEFT JOIN users approver ON approver.id = b.approved_by
-       LEFT JOIN speedaf_remittance_allocations a ON a.batch_id = b.id
-       LEFT JOIN orders o ON o.id = a.order_id
-       LEFT JOIN deliveries d ON d.order_id = o.id
-       GROUP BY b.id, creator.full_name, approver.full_name
-       ORDER BY b.created_at DESC LIMIT 100`
-    )
-    res.json(result.rows)
+    res.json(await getSpeedafBatches())
   } catch {
     res.status(500).json({ error: { message: 'Unable to load Speedaf payment batches' } })
+  }
+})
+
+router.get('/cod/payment-history', async (req, res) => {
+  if (!['admin', 'owner'].includes(req.user?.role || '')) {
+    return res.status(403).json({ error: { message: 'Management access is required' } })
+  }
+  try {
+    const [batches, legacyResult] = await Promise.all([
+      getSpeedafBatches(),
+      query(
+        `SELECT r.id,
+                'legacy_single' AS source,
+                'SINGLE-' || UPPER(SUBSTR(REPLACE(r.id::text, '-', ''), 1, 8)) AS payment_number,
+                r.received_at::date AS payment_date,
+                r.payment_method,
+                r.amount AS net_amount,
+                r.amount AS gross_amount,
+                0::numeric AS fee_amount,
+                r.reference AS external_reference,
+                NULL::text AS notes,
+                'approved' AS status,
+                creator.full_name AS created_by_name,
+                creator.full_name AS approved_by_name,
+                r.created_at,
+                r.received_at AS approved_at,
+                json_build_array(json_build_object(
+                  'order_id', o.id,
+                  'order_number', o.order_number,
+                  'tracking_number', d.courier_tracking_number,
+                  'customer_name', customer.name,
+                  'salesperson_name', salesperson.full_name,
+                  'gross_amount', r.amount,
+                  'commission_amount', COALESCE(order_commission.amount, 0)
+                )) AS allocations
+         FROM cod_remittances r
+         JOIN orders o ON o.id = r.order_id
+         JOIN deliveries d ON d.order_id = o.id
+         JOIN couriers courier ON courier.id = d.courier_id
+         LEFT JOIN customers customer ON customer.id = o.customer_id
+         LEFT JOIN users creator ON creator.id = r.created_by
+         LEFT JOIN users salesperson ON salesperson.id = o.created_by
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(SUM(CASE
+             WHEN transaction_type = 'earned' THEN amount
+             WHEN transaction_type = 'reversal' THEN -amount
+             ELSE 0
+           END), 0) AS amount
+           FROM commission_transactions
+           WHERE order_id = o.id
+         ) order_commission ON TRUE
+         WHERE LOWER(courier.name) LIKE '%speedaf%'
+           AND NOT EXISTS (
+             SELECT 1 FROM speedaf_remittance_batches batch
+             WHERE r.reference LIKE batch.batch_number || ':%'
+           )
+         ORDER BY r.received_at DESC
+         LIMIT 200`
+      )
+    ])
+    const legacy = legacyResult.rows.map(row => mapPaymentRecord(row, 'legacy_single'))
+    const combined = [...batches, ...legacy]
+      .sort((left, right) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime())
+      .slice(0, 200)
+    res.json(combined)
+  } catch (error) {
+    console.error('Speedaf payment history failed:', error)
+    res.status(500).json({ error: { message: 'Unable to load Speedaf payment history' } })
   }
 })
 

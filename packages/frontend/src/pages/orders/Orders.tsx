@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useDeferredValue, useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { Check, ChevronDown, Plus, Search, Eye, Edit, Package, X, ExternalLink } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
@@ -400,9 +400,6 @@ export function Orders() {
   const [returnSource, setReturnSource] = useState<'internal' | 'supplier'>('internal')
   const [returnStockCondition, setReturnStockCondition] = useState<'sellable' | 'damaged'>('sellable')
   const [returnReason, setReturnReason] = useState('')
-  const [codRemittanceAmount, setCodRemittanceAmount] = useState('')
-  const [codRemittanceMethod, setCodRemittanceMethod] = useState('mpesa')
-  const [codRemittanceReference, setCodRemittanceReference] = useState('')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
   const queryClient = useQueryClient()
@@ -443,13 +440,6 @@ export function Orders() {
     enabled: Boolean(selectedOrderId),
     queryFn: async () => (await axios.get(`/api/orders/${selectedOrderId}`)).data
   })
-
-  useEffect(() => {
-    const order = selectedOrderDetail?.order
-    if (order?.delivery_type === 'courier' && order.courier_payment_type === 'cod' && order.status === 'delivered') {
-      setCodRemittanceAmount(String(Number(order.cod_outstanding || 0)))
-    }
-  }, [selectedOrderDetail])
 
   const { register, handleSubmit, reset, watch, setValue, getValues, formState: { errors } } = useForm<OrderFormData>({
     defaultValues: {
@@ -628,35 +618,6 @@ export function Orders() {
     },
     onError: (error: any) => {
       setStatusError(error.response?.data?.error?.message || 'Failed to update order status')
-    }
-  })
-
-  const recordCodRemittance = useMutation({
-    mutationFn: async () => {
-      if (!selectedOrderId) return null
-      setStatusError('')
-      const amount = Number(codRemittanceAmount)
-      if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter the amount received from Speedaf')
-      if (!codRemittanceReference.trim()) throw new Error('Enter the Speedaf payment reference')
-      return (await axios.post(`/api/deliveries/orders/${selectedOrderId}/cod`, {
-        amount,
-        payment_method: codRemittanceMethod,
-        reference: codRemittanceReference.trim()
-      })).data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['orders'] })
-      queryClient.invalidateQueries({ queryKey: ['order-detail', selectedOrderId] })
-      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
-      queryClient.invalidateQueries({ queryKey: ['reports-overview'] })
-      void invalidateCommissionData(queryClient)
-      setCodRemittanceAmount('')
-      setCodRemittanceReference('')
-      setStatusError('')
-    },
-    onError: (error: any) => {
-      setStatusError(error.response?.data?.error?.message || error.message || 'Failed to record Speedaf remittance')
     }
   })
 
@@ -1209,9 +1170,6 @@ export function Orders() {
                         setStatusNotes('')
                         setStatusError('')
                         setSpeedafDeliveryConfirmed(false)
-                        setCodRemittanceAmount('')
-                        setCodRemittanceMethod('mpesa')
-                        setCodRemittanceReference('')
                       }}
                       className="p-1.5 text-muted-foreground hover:text-primary rounded"
                       title="View order"
@@ -1264,43 +1222,26 @@ export function Orders() {
               <div className="p-6 text-sm text-muted-foreground">Loading order details...</div>
             ) : selectedOrderDetail ? (
               <div className="space-y-6 p-6">
-                {workflowStage(selectedOrderDetail.order) === 'pending_payment' && hasPermission('cod.remit') && (
+                {workflowStage(selectedOrderDetail.order) === 'pending_payment' && (
                   <section className="rounded-lg border border-primary/30 bg-primary/5 p-4">
-                    <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                       <div>
-                        <h3 className="font-semibold">Record Speedaf Remittance</h3>
-                        <p className="text-sm text-muted-foreground">When the full outstanding amount is received, this order becomes paid and completed automatically.</p>
+                        <h3 className="font-semibold">Awaiting Speedaf payment</h3>
+                        <p className="text-sm text-muted-foreground">Speedaf payments are reconciled from the Deliveries page.</p>
+                        <div className="mt-2 text-sm">
+                          <span className="text-muted-foreground">Outstanding COD: </span>
+                          <strong>{formatMoney(selectedOrderDetail.order.cod_outstanding)}</strong>
+                        </div>
                       </div>
-                      <div className="mt-2 shrink-0 text-sm sm:mt-0 sm:text-right">
-                        <div className="text-muted-foreground">Outstanding COD</div>
-                        <strong className="text-lg">{formatMoney(selectedOrderDetail.order.cod_outstanding)}</strong>
-                      </div>
+                      {hasPermission('cod.remit') && (
+                        <Link
+                          to={`/deliveries?view=cod&workflow_stage=pending_payment&payment=1&order_id=${encodeURIComponent(selectedOrderDetail.order.id)}&search=${encodeURIComponent(selectedOrderDetail.order.order_number)}`}
+                          className="inline-flex shrink-0 items-center justify-center rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground"
+                        >
+                          Open in Deliveries
+                        </Link>
+                      )}
                     </div>
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <label className="text-sm">Amount Received
-                        <input type="number" min="0.01" max={Number(selectedOrderDetail.order.cod_outstanding || 0)} step="0.01" value={codRemittanceAmount} onChange={event => setCodRemittanceAmount(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2" placeholder="Amount received" />
-                      </label>
-                      <label className="text-sm">Received Via
-                        <select value={codRemittanceMethod} onChange={event => setCodRemittanceMethod(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2">
-                          <option value="mpesa">M-PESA</option>
-                          <option value="bank_transfer">Bank</option>
-                        </select>
-                      </label>
-                      <label className="text-sm md:col-span-2">Payment Reference <span className="text-destructive">*</span>
-                        <input value={codRemittanceReference} onChange={event => setCodRemittanceReference(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2" placeholder="Enter the M-Pesa transaction code or bank reference" />
-                      </label>
-                      <div className="flex flex-col gap-2 md:col-span-2 sm:flex-row sm:items-center sm:justify-between">
-                        <p className="text-xs text-muted-foreground">
-                          {!codRemittanceReference.trim()
-                            ? 'Enter the payment reference to enable confirmation.'
-                            : 'The reference prevents the same remittance from being recorded twice.'}
-                        </p>
-                        <button type="button" onClick={() => recordCodRemittance.mutate()} disabled={recordCodRemittance.isPending || Number(codRemittanceAmount) <= 0 || !codRemittanceReference.trim()} className="shrink-0 rounded-lg bg-primary px-4 py-2 text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50">
-                          {recordCodRemittance.isPending ? 'Recording...' : 'Confirm Payment'}
-                        </button>
-                      </div>
-                    </div>
-                    {statusError && <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{statusError}</div>}
                   </section>
                 )}
 

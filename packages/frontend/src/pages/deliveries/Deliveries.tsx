@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote, ExternalLink, RefreshCw, type LucideIcon } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
@@ -74,14 +74,45 @@ interface SpeedafPaymentBatch {
   status: 'pending_approval' | 'approved' | 'rejected'
   created_by_name?: string
   approved_by_name?: string
+  external_reference?: string
+  notes?: string
+  created_at?: string
+  approved_at?: string
   rejection_reason?: string
-  allocations: Array<{ order_id: string; order_number: string; tracking_number?: string; gross_amount: number }>
+  source?: 'batch' | 'legacy_single'
+  payment_number?: string
+  allocations: SpeedafPaymentAllocation[]
+}
+
+interface SpeedafPaymentAllocation {
+  order_id: string
+  order_number: string
+  tracking_number?: string
+  tracking_url?: string
+  customer_name?: string
+  salesperson_name?: string
+  gross_amount: number
+  commission_amount?: number
 }
 
 function nairobiToday() {
   return new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Africa/Nairobi', year: 'numeric', month: '2-digit', day: '2-digit'
   }).format(new Date())
+}
+
+function displayPaymentDate(value?: string) {
+  const date = String(value || '').slice(0, 10)
+  if (!date) return '-'
+  return new Date(`${date}T12:00:00`).toLocaleDateString('en-KE', {
+    day: 'numeric', month: 'short', year: 'numeric'
+  })
+}
+
+function paymentMethodLabel(value?: string) {
+  if (value === 'bank_transfer' || value === 'bank') return 'Bank'
+  if (value === 'mpesa') return 'M-PESA'
+  return String(value || '-').replace(/_/g, ' ')
 }
 
 const workflowStatuses = [
@@ -213,27 +244,35 @@ export function Deliveries() {
   const { hasPermission, user } = useAuthStore()
   const [searchParams] = useSearchParams()
   const codOnly = searchParams.get('view') === 'cod'
-  const [search, setSearch] = useState('')
+  const requestedWorkflowStatus = searchParams.get('workflow_stage') || ''
+  const isManager = ['admin', 'owner'].includes(user?.role || '')
+  const [search, setSearch] = useState(searchParams.get('search') || '')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
-  const [selectedWorkflowStatus, setSelectedWorkflowStatus] = useState('')
+  const [selectedWorkflowStatus, setSelectedWorkflowStatus] = useState(
+    workflowStatuses.includes(requestedWorkflowStatus as WorkflowStatus) ? requestedWorkflowStatus : ''
+  )
   const [selectedStatus, setSelectedStatus] = useState('')
   const [selectedDelivery, setSelectedDelivery] = useState<Delivery | null>(null)
   const [showStatusForm, setShowStatusForm] = useState(false)
-  const [remittanceAmount, setRemittanceAmount] = useState('')
-  const [remittanceReference, setRemittanceReference] = useState('')
-  const [remittanceError, setRemittanceError] = useState('')
   const [completionPaymentMethod, setCompletionPaymentMethod] = useState('cash')
   const [speedafDeliveryConfirmed, setSpeedafDeliveryConfirmed] = useState(false)
   const [trackingFeedback, setTrackingFeedback] = useState<{ orderId?: string; message: string; error: boolean } | null>(null)
-  const [showBulkPayment, setShowBulkPayment] = useState(false)
-  const [selectedBulkOrderIds, setSelectedBulkOrderIds] = useState<Set<string>>(new Set())
+  const [showBulkPayment, setShowBulkPayment] = useState(searchParams.get('payment') === '1')
+  const [selectedBulkOrderIds, setSelectedBulkOrderIds] = useState<Set<string>>(
+    new Set(searchParams.get('order_id') ? [searchParams.get('order_id')!] : [])
+  )
   const [bulkNetAmount, setBulkNetAmount] = useState('')
   const [bulkPaymentDate, setBulkPaymentDate] = useState(nairobiToday())
   const [bulkPaymentMethod, setBulkPaymentMethod] = useState('bank_transfer')
   const [bulkReference, setBulkReference] = useState('')
   const [bulkNotes, setBulkNotes] = useState('')
   const [bulkMessage, setBulkMessage] = useState<{ error: boolean; text: string } | null>(null)
+  const [paymentHistorySearch, setPaymentHistorySearch] = useState('')
+  const [paymentHistoryStatus, setPaymentHistoryStatus] = useState('')
+  const [paymentHistoryDateFrom, setPaymentHistoryDateFrom] = useState('')
+  const [paymentHistoryDateTo, setPaymentHistoryDateTo] = useState('')
+  const [selectedPayment, setSelectedPayment] = useState<SpeedafPaymentBatch | null>(null)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
   const queryClient = useQueryClient()
@@ -270,6 +309,12 @@ export function Deliveries() {
     enabled: showBulkPayment && hasPermission('cod.view')
   })
 
+  const { data: speedafPaymentHistory = [], isLoading: paymentHistoryLoading } = useQuery<SpeedafPaymentBatch[]>({
+    queryKey: ['speedaf-payment-history'],
+    queryFn: async () => (await axios.get('/api/deliveries/cod/payment-history')).data,
+    enabled: isManager && hasPermission('cod.view')
+  })
+
   const { register: registerStatus, handleSubmit: handleSubmitStatus, reset: resetStatus } = useForm<StatusFormData>({
     defaultValues: {
       delivery_status: 'assigned',
@@ -296,34 +341,6 @@ export function Deliveries() {
       setSelectedDelivery(null)
       setSpeedafDeliveryConfirmed(false)
       resetStatus()
-    }
-  })
-
-  const recordRemittance = useMutation({
-    mutationFn: async () => {
-      if (!selectedDelivery) return
-      const amount = Number(remittanceAmount)
-      if (!Number.isFinite(amount) || amount <= 0) {
-        throw new Error('Enter the amount received from Speedaf')
-      }
-      await axios.post(`/api/deliveries/orders/${selectedDelivery.order_id}/cod`, {
-        amount,
-        reference: remittanceReference
-      })
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-      queryClient.invalidateQueries({ queryKey: ['orders'] })
-      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
-      void invalidateCommissionData(queryClient)
-      setRemittanceAmount('')
-      setRemittanceReference('')
-      setRemittanceError('')
-      setShowStatusForm(false)
-      setSelectedDelivery(null)
-    },
-    onError: (error: any) => {
-      setRemittanceError(error.response?.data?.error?.message || error.message || 'Failed to record Speedaf payment')
     }
   })
 
@@ -364,6 +381,36 @@ export function Deliveries() {
   const bulkDifference = Math.round((bulkGrossAmount - parsedBulkNetAmount - calculatedBulkFee) * 100) / 100
   const bulkSelectionCovered = parsedBulkNetAmount > 0 && bulkGrossAmount >= parsedBulkNetAmount
   const bulkFeeRate = bulkGrossAmount > 0 ? calculatedBulkFee / bulkGrossAmount : 0
+  const filteredPaymentHistory = speedafPaymentHistory.filter(payment => {
+    const paymentDate = String(payment.payment_date || '').slice(0, 10)
+    if (paymentHistoryStatus && payment.status !== paymentHistoryStatus) return false
+    if (paymentHistoryDateFrom && paymentDate < paymentHistoryDateFrom) return false
+    if (paymentHistoryDateTo && paymentDate > paymentHistoryDateTo) return false
+    const needle = paymentHistorySearch.trim().toLowerCase()
+    if (!needle) return true
+    const searchable = [
+      payment.payment_number,
+      payment.batch_number,
+      payment.external_reference,
+      payment.created_by_name,
+      payment.approved_by_name,
+      ...payment.allocations.flatMap(allocation => [
+        allocation.order_number,
+        allocation.tracking_number,
+        allocation.customer_name,
+        allocation.salesperson_name
+      ])
+    ].filter(Boolean).join(' ').toLowerCase()
+    return searchable.includes(needle)
+  })
+  const approvedPayments = speedafPaymentHistory.filter(payment => payment.status === 'approved')
+  const paymentHistorySummary = {
+    received: approvedPayments.reduce((sum, payment) => sum + Number(payment.net_amount || 0), 0),
+    expected: approvedPayments.reduce((sum, payment) => sum + Number(payment.gross_amount || 0), 0),
+    fees: approvedPayments.reduce((sum, payment) => sum + Number(payment.fee_amount || 0), 0),
+    orders: new Set(approvedPayments.flatMap(payment => payment.allocations.map(allocation => allocation.order_id))).size,
+    pending: speedafPaymentHistory.filter(payment => payment.status === 'pending_approval').length
+  }
 
   const createSpeedafBatch = useMutation({
     mutationFn: async () => (await axios.post('/api/deliveries/cod/batches', {
@@ -390,6 +437,7 @@ export function Deliveries() {
       queryClient.invalidateQueries({ queryKey: ['deliveries'] })
       queryClient.invalidateQueries({ queryKey: ['orders'] })
       queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
+      queryClient.invalidateQueries({ queryKey: ['speedaf-payment-history'] })
       queryClient.invalidateQueries({ queryKey: ['expenses'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
       void invalidateCommissionData(queryClient)
@@ -407,6 +455,7 @@ export function Deliveries() {
       queryClient.invalidateQueries({ queryKey: ['deliveries'] })
       queryClient.invalidateQueries({ queryKey: ['orders'] })
       queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
+      queryClient.invalidateQueries({ queryKey: ['speedaf-payment-history'] })
       queryClient.invalidateQueries({ queryKey: ['expenses'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
       void invalidateCommissionData(queryClient)
@@ -420,6 +469,7 @@ export function Deliveries() {
     onSuccess: () => {
       setBulkMessage({ error: false, text: 'Speedaf payment batch rejected.' })
       queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
+      queryClient.invalidateQueries({ queryKey: ['speedaf-payment-history'] })
     },
     onError: (error: any) => setBulkMessage({ error: true, text: error.response?.data?.error?.message || 'Unable to reject batch' })
   })
@@ -609,6 +659,173 @@ export function Deliveries() {
         </section>
       )}
 
+      {isManager && hasPermission('cod.view') && (
+        <section className="rounded-xl border bg-card">
+          <div className="border-b p-4 sm:p-5">
+            <h2 className="text-lg font-semibold">Speedaf Payment History</h2>
+            <p className="text-sm text-muted-foreground">Bank receipts, Speedaf deductions and the orders allocated to every payment.</p>
+          </div>
+
+          <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5 lg:grid-cols-5">
+            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Payments received</div>
+              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.received)}</strong>
+            </button>
+            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Expected from Speedaf</div>
+              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.expected)}</strong>
+            </button>
+            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Speedaf fees</div>
+              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.fees)}</strong>
+            </button>
+            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Orders reconciled</div>
+              <strong className="mt-1 block text-lg">{paymentHistorySummary.orders}</strong>
+            </button>
+            <button type="button" onClick={() => setPaymentHistoryStatus('pending_approval')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Pending approval</div>
+              <strong className="mt-1 block text-lg">{paymentHistorySummary.pending}</strong>
+            </button>
+          </div>
+
+          <div className="grid gap-3 border-y bg-muted/20 p-4 sm:grid-cols-2 lg:grid-cols-[minmax(220px,1fr)_180px_160px_160px_auto]">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={paymentHistorySearch}
+                onChange={event => setPaymentHistorySearch(event.target.value)}
+                placeholder="Payment, order or tracking number"
+                className="w-full rounded-lg border bg-background py-2 pl-10 pr-3"
+              />
+            </div>
+            <select value={paymentHistoryStatus} onChange={event => setPaymentHistoryStatus(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Filter Speedaf payments by status">
+              <option value="">All payment statuses</option>
+              <option value="approved">Approved</option>
+              <option value="pending_approval">Pending approval</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <input type="date" value={paymentHistoryDateFrom} onChange={event => setPaymentHistoryDateFrom(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date from" />
+            <input type="date" value={paymentHistoryDateTo} onChange={event => setPaymentHistoryDateTo(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date to" />
+            <button type="button" onClick={() => { setPaymentHistorySearch(''); setPaymentHistoryStatus(''); setPaymentHistoryDateFrom(''); setPaymentHistoryDateTo('') }} className="rounded-lg border bg-background px-3 py-2 text-sm">
+              Clear
+            </button>
+          </div>
+
+          {paymentHistoryLoading ? (
+            <div className="p-8 text-center text-sm text-muted-foreground">Loading Speedaf payments...</div>
+          ) : filteredPaymentHistory.length === 0 ? (
+            <div className="p-8 text-center text-sm text-muted-foreground">No Speedaf payments match these filters.</div>
+          ) : (
+            <div className="mobile-scroll-table overflow-x-auto">
+              <table className="w-full min-w-[980px]">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-4 py-3 text-left font-medium">Payment</th>
+                    <th className="px-4 py-3 text-left font-medium">Date</th>
+                    <th className="px-4 py-3 text-left font-medium">Received</th>
+                    <th className="px-4 py-3 text-left font-medium">Expected</th>
+                    <th className="px-4 py-3 text-left font-medium">Fee</th>
+                    <th className="px-4 py-3 text-left font-medium">Orders</th>
+                    <th className="px-4 py-3 text-left font-medium">Status</th>
+                    <th className="px-4 py-3 text-left font-medium">Prepared by</th>
+                    <th className="px-4 py-3 text-right font-medium">Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPaymentHistory.map(payment => (
+                    <tr
+                      key={`${payment.source || 'batch'}-${payment.id}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedPayment(payment)}
+                      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setSelectedPayment(payment) }}
+                      className="cursor-pointer border-t hover:bg-muted/40"
+                    >
+                      <td className="px-4 py-3">
+                        <strong>{payment.payment_number || payment.batch_number}</strong>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">{paymentMethodLabel(payment.payment_method)}{payment.external_reference ? ` · ${payment.external_reference}` : ''}</span>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3">{displayPaymentDate(payment.payment_date)}</td>
+                      <td className="whitespace-nowrap px-4 py-3 font-medium">{formatMoney(payment.net_amount)}</td>
+                      <td className="whitespace-nowrap px-4 py-3">{formatMoney(payment.gross_amount)}</td>
+                      <td className="whitespace-nowrap px-4 py-3">{formatMoney(payment.fee_amount)}</td>
+                      <td className="px-4 py-3">{payment.allocations.length}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${payment.status === 'approved' ? 'bg-emerald-100 text-emerald-900' : payment.status === 'rejected' ? 'bg-rose-100 text-rose-900' : 'bg-amber-100 text-amber-900'}`}>
+                          {payment.status.replace(/_/g, ' ')}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">{payment.created_by_name || '-'}</td>
+                      <td className="px-4 py-3 text-right"><Eye className="ml-auto h-4 w-4 text-primary" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      )}
+
+      {selectedPayment && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-2 sm:p-4" onMouseDown={event => { if (event.target === event.currentTarget) setSelectedPayment(null) }}>
+          <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-background shadow-2xl">
+            <div className="flex items-start justify-between border-b p-4 sm:p-5">
+              <div>
+                <h2 className="text-lg font-semibold">{selectedPayment.payment_number || selectedPayment.batch_number}</h2>
+                <p className="text-sm text-muted-foreground">{displayPaymentDate(selectedPayment.payment_date)} · {selectedPayment.allocations.length} order{selectedPayment.allocations.length === 1 ? '' : 's'}</p>
+              </div>
+              <button type="button" onClick={() => setSelectedPayment(null)} className="rounded-lg border p-2 text-muted-foreground hover:text-foreground" aria-label="Close payment details"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="overflow-y-auto p-4 sm:p-5">
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Expected from Speedaf</div><strong className="mt-1 block">{formatMoney(selectedPayment.gross_amount)}</strong></div>
+                <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Amount received</div><strong className="mt-1 block">{formatMoney(selectedPayment.net_amount)}</strong></div>
+                <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Speedaf fee</div><strong className="mt-1 block">{formatMoney(selectedPayment.fee_amount)}</strong></div>
+                <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Status</div><strong className="mt-1 block capitalize">{selectedPayment.status.replace(/_/g, ' ')}</strong></div>
+              </div>
+              <dl className="mt-4 grid gap-3 rounded-lg bg-muted/40 p-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+                <div><dt className="text-xs text-muted-foreground">Received via</dt><dd className="font-medium">{paymentMethodLabel(selectedPayment.payment_method)}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Bank reference</dt><dd className="break-words font-medium">{selectedPayment.external_reference || 'Not provided'}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Prepared by</dt><dd className="font-medium">{selectedPayment.created_by_name || '-'}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Approved by</dt><dd className="font-medium">{selectedPayment.approved_by_name || '-'}</dd></div>
+              </dl>
+              {selectedPayment.notes && <div className="mt-3 rounded-lg border p-3 text-sm"><span className="text-xs text-muted-foreground">Notes</span><p className="mt-1">{selectedPayment.notes}</p></div>}
+
+              <h3 className="mt-5 font-semibold">Orders in this payment</h3>
+              <div className="mobile-scroll-table mt-2 overflow-x-auto rounded-lg border">
+                <table className="w-full min-w-[900px]">
+                  <thead className="bg-muted">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">#</th>
+                      <th className="px-3 py-2 text-left font-medium">Order</th>
+                      <th className="px-3 py-2 text-left font-medium">Tracking</th>
+                      <th className="px-3 py-2 text-left font-medium">Customer</th>
+                      <th className="px-3 py-2 text-left font-medium">Sales agent</th>
+                      <th className="px-3 py-2 text-right font-medium">Expected</th>
+                      <th className="px-3 py-2 text-right font-medium">Commission</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedPayment.allocations.map((allocation, index) => (
+                      <tr key={`${selectedPayment.id}-${allocation.order_id}-${index}`} className="border-t">
+                        <td className="px-3 py-2">{index + 1}</td>
+                        <td className="px-3 py-2"><Link to={`/orders?order_id=${allocation.order_id}`} className="font-medium text-primary hover:underline">{allocation.order_number}</Link></td>
+                        <td className="max-w-52 px-3 py-2"><TrackingLink trackingNumber={allocation.tracking_number} trackingUrl={allocation.tracking_url} /></td>
+                        <td className="px-3 py-2">{allocation.customer_name || '-'}</td>
+                        <td className="px-3 py-2">{allocation.salesperson_name || '-'}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right">{formatMoney(allocation.gross_amount)}</td>
+                        <td className="whitespace-nowrap px-3 py-2 text-right">{formatMoney(allocation.commission_amount || 0)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {selectedDelivery && showStatusForm && hasPermission('deliveries.manage') && (
         <div className="border rounded-lg p-6 bg-card">
           <h2 className="font-semibold mb-1">Advance Order Workflow</h2>
@@ -709,39 +926,33 @@ export function Deliveries() {
           )}
           {hasPermission('cod.remit') && selectedDelivery.courier_payment_type === 'cod' && selectedDelivery.delivery_status === 'delivered' && (
             <div className="mt-6 border-t pt-5">
-              <div className="mb-3">
-                <h3 className="font-medium">Record Speedaf Payment</h3>
-                <p className="text-sm text-muted-foreground">
-                  Outstanding: {formatMoney(selectedDelivery.cod_outstanding)}
-                </p>
-              </div>
-              <div className="grid grid-cols-1 gap-3 md:grid-cols-[1fr_1fr_auto]">
-                <input
-                  type="number"
-                  min="0.01"
-                  step="0.01"
-                  value={remittanceAmount}
-                  onChange={event => setRemittanceAmount(event.target.value)}
-                  className="px-3 py-2 border rounded-lg"
-                  placeholder="Amount received"
-                />
-                <input
-                  value={remittanceReference}
-                  onChange={event => setRemittanceReference(event.target.value)}
-                  className="px-3 py-2 border rounded-lg"
-                  placeholder="M-Pesa or bank reference"
-                />
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="font-medium">Speedaf payment reconciliation</h3>
+                  <p className="text-sm text-muted-foreground">Outstanding: {formatMoney(selectedDelivery.cod_outstanding)}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Single and multi-order payments use the same reconciliation record.</p>
+                </div>
                 <button
                   type="button"
-                  onClick={() => recordRemittance.mutate()}
-                  disabled={recordRemittance.isPending}
-                  className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50"
+                  onClick={() => {
+                    setShowBulkPayment(true)
+                    setSelectedWorkflowStatus('pending_payment')
+                    setSelectedStatus('')
+                    setSearch(selectedDelivery.order_number || '')
+                    setSelectedBulkOrderIds(new Set([selectedDelivery.order_id]))
+                    setBulkNetAmount('')
+                    setBulkMessage(null)
+                    setShowStatusForm(false)
+                    setSelectedDelivery(null)
+                    setPage(1)
+                    window.scrollTo({ top: 0, behavior: 'smooth' })
+                  }}
+                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-primary-foreground"
                 >
                   <Banknote className="h-4 w-4" />
-                  {recordRemittance.isPending ? 'Recording...' : 'Record Payment'}
+                  Select for Payment
                 </button>
               </div>
-              {remittanceError && <p className="mt-2 text-sm text-destructive">{remittanceError}</p>}
             </div>
           )}
         </div>
@@ -948,9 +1159,6 @@ export function Deliveries() {
                           onClick={() => {
                             setSelectedDelivery(delivery)
                             setShowStatusForm(true)
-                            setRemittanceAmount(delivery.cod_outstanding ? String(delivery.cod_outstanding) : '')
-                            setRemittanceReference('')
-                            setRemittanceError('')
                             setSpeedafDeliveryConfirmed(false)
                             resetStatus({
                               delivery_status: nextOrderStatus(delivery),
