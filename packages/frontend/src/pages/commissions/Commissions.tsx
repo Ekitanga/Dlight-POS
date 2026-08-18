@@ -6,6 +6,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { formatMoney } from '../../lib/format'
 import { invalidateCommissionData } from '../../lib/commissionCache'
 import { DateRangeFilter, todayDate } from '../../components/DateRangeFilter'
+import { MobileTableScroll } from '../../components/MobileTableScroll'
 import {
   Wallet, TrendingUp, TrendingDown, CreditCard, Settings2, History,
   CheckCircle2, XCircle, Users, BarChart3, Target,
@@ -370,12 +371,12 @@ export function Commissions() {
       )}
 
       {visibleTabs.length > 1 && (
-        <div className="flex gap-1 border-b">
+        <div className="mobile-tab-strip flex max-w-full gap-1 overflow-x-auto border-b" role="tablist" aria-label="Commission sections">
           {visibleTabs.map(t => (
             <button
               key={t.key}
               onClick={() => setTab(t.key)}
-              className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
+              className={`shrink-0 flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
                 activeTab === t.key
                   ? 'border-b-2 border-primary text-primary'
                   : 'text-muted-foreground hover:text-foreground'
@@ -430,7 +431,7 @@ export function Commissions() {
                      <h3 className="font-semibold">Daily breakdown</h3>
                      <p className="text-xs text-muted-foreground">Current month commission by day</p>
                    </div>
-                   <div className="overflow-x-auto">
+                   <MobileTableScroll label="daily commission">
                      <table className="w-full text-sm">
                        <thead className="bg-muted">
                          <tr>
@@ -459,7 +460,7 @@ export function Commissions() {
                          ))}
                        </tbody>
                      </table>
-                   </div>
+                   </MobileTableScroll>
                  </div>
                )}
 
@@ -469,7 +470,7 @@ export function Commissions() {
                      <h3 className="font-semibold">Monthly history</h3>
                      <p className="text-xs text-muted-foreground">Closed-period amounts carry forward. Last payment shows the latest recorded payment date.</p>
                    </div>
-                   <div className="overflow-x-auto">
+                   <MobileTableScroll label="monthly commission">
                      <table className="w-full text-sm">
                        <thead className="bg-muted">
                          <tr>
@@ -512,7 +513,7 @@ export function Commissions() {
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                   </MobileTableScroll>
                 </div>
               )}
             </div>
@@ -542,7 +543,7 @@ export function Commissions() {
           ) : transactions?.data?.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground">No transactions yet</div>
           ) : (
-            <div className="overflow-x-auto">
+            <MobileTableScroll label="commission transactions">
               <table className="w-full text-sm">
                 <thead className="bg-muted">
                   <tr>
@@ -596,7 +597,7 @@ export function Commissions() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </MobileTableScroll>
           )}
           {transactions?.pagination && transactions.pagination.totalPages > 1 && (
             <div className="px-4 py-3 border-t">
@@ -621,7 +622,7 @@ export function Commissions() {
           {potential?.potential?.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground">No potential commission at this time</div>
           ) : (
-            <div className="overflow-x-auto">
+            <MobileTableScroll label="pending commission">
               <table className="w-full text-sm">
                 <thead className="bg-muted">
                   <tr>
@@ -656,7 +657,7 @@ export function Commissions() {
                   ))}
                 </tbody>
               </table>
-            </div>
+            </MobileTableScroll>
           )}
         </div>
       )}
@@ -692,7 +693,7 @@ export function Commissions() {
               <div className="px-4 py-3 border-b">
                 <h3 className="font-semibold">Commission by Salesperson</h3>
               </div>
-              <div className="overflow-x-auto">
+              <MobileTableScroll label="salesperson commission">
                 <table className="w-full text-sm">
                   <thead className="bg-muted">
                     <tr>
@@ -717,7 +718,7 @@ export function Commissions() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </MobileTableScroll>
             </div>
           )}
 
@@ -751,7 +752,7 @@ export function Commissions() {
               </form>
             )}
             {managementTransactions?.data?.length ? (
-              <div className="overflow-x-auto">
+              <MobileTableScroll label="management commission">
                 <table className="w-full text-sm">
                   <thead className="bg-muted"><tr><th className="text-center px-4 py-3">Pay</th><th className="text-left px-4 py-3">Salesperson</th><th className="text-left px-4 py-3">Reference</th><th className="text-left px-4 py-3">Type</th><th className="text-right px-4 py-3">Amount</th><th className="text-right px-4 py-3">Paid / offset</th><th className="text-left px-4 py-3">Settlement record</th><th className="text-left px-4 py-3">Status</th><th className="text-right px-4 py-3">Action</th></tr></thead>
                   <tbody>{managementTransactions.data.map((tx: any) => {
@@ -773,7 +774,7 @@ export function Commissions() {
                     </tr>)
                   })}</tbody>
                 </table>
-              </div>
+              </MobileTableScroll>
             ) : <div className="p-6 text-center text-muted-foreground">No commission transactions in this period</div>}
             {selectedTransactionIds.size > 0 && canPay && (
               <form className="grid gap-3 border-t bg-muted/30 p-4 md:grid-cols-5" onSubmit={async event => {
@@ -941,12 +942,12 @@ export function Commissions() {
                       </dl>
                       <div className="mt-3"><span className="text-xs text-muted-foreground">Reason</span><p className="mt-1">{closure.reason}</p></div>
                       {closure.balances?.length > 0 && (
-                        <div className="mt-4 overflow-x-auto rounded border bg-card">
+                        <MobileTableScroll label="period closure balances" className="mt-4 rounded border bg-card">
                           <table className="w-full text-xs">
                             <thead className="bg-muted"><tr><th className="px-3 py-2 text-left">Salesperson</th><th className="px-3 py-2 text-right">Approved credit</th><th className="px-3 py-2 text-right">Approved deductions</th><th className="px-3 py-2 text-right">Paid</th><th className="px-3 py-2 text-right">Closing balance</th></tr></thead>
                             <tbody>{closure.balances.map((balance: any) => <tr key={balance.id || balance.salespersonId} className="border-t"><td className="px-3 py-2">{balance.salespersonName || balance.salespersonId}</td><td className="px-3 py-2 text-right">{formatMoney(balance.approvedCredits || 0)}</td><td className="px-3 py-2 text-right">{formatMoney(balance.approvedDeductions || 0)}</td><td className="px-3 py-2 text-right">{formatMoney(balance.paidAmount || 0)}</td><td className="px-3 py-2 text-right font-medium">{balance.closingBalance < 0 ? `Recovery ${formatMoney(Math.abs(balance.closingBalance))}` : formatMoney(balance.closingBalance || 0)}</td></tr>)}</tbody>
                           </table>
-                        </div>
+                        </MobileTableScroll>
                       )}
                     </div>
                   </details>
@@ -1142,7 +1143,7 @@ export function Commissions() {
             {rates?.rates?.length === 0 ? (
               <div className="p-6 text-center text-muted-foreground">No rates configured</div>
             ) : (
-              <div className="overflow-x-auto">
+              <MobileTableScroll label="commission rates">
                 <table className="w-full text-sm">
                   <thead className="bg-muted">
                     <tr>
@@ -1197,7 +1198,7 @@ export function Commissions() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </MobileTableScroll>
             )}
           </div>
 
@@ -1259,7 +1260,7 @@ export function Commissions() {
                     {retroResult.details?.length > 0 && (
                       <div>
                         <h4 className="font-medium text-sm mb-2">Evaluation details</h4>
-                        <div className="overflow-x-auto">
+                        <MobileTableScroll label="retroactive evaluation">
                           <table className="w-full text-xs">
                             <thead className="bg-muted">
                               <tr>
@@ -1292,7 +1293,7 @@ export function Commissions() {
                               ))}
                             </tbody>
                           </table>
-                        </div>
+                        </MobileTableScroll>
                       </div>
                     )}
                     {retroResult.mode === 'preview' && canReconcile && (retroResult.eligibleItems > 0 || retroResult.issues?.some((issue: any) => issue.type === 'missing_reversal')) && (
@@ -1332,7 +1333,7 @@ export function Commissions() {
             {eligibility?.eligibility?.length === 0 ? (
               <div className="p-6 text-center text-muted-foreground">No eligibility rules configured</div>
             ) : (
-              <div className="overflow-x-auto">
+              <MobileTableScroll label="eligibility rules">
                 <table className="w-full text-sm">
                   <thead className="bg-muted">
                     <tr>
@@ -1363,7 +1364,7 @@ export function Commissions() {
                     ))}
                   </tbody>
                 </table>
-              </div>
+              </MobileTableScroll>
             )}
           </div>
         </div>

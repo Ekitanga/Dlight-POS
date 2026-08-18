@@ -228,6 +228,50 @@
       border-radius: 0;
     }
 
+    .mobile-tab-strip {
+      margin-inline: -1rem;
+      padding-inline: 1rem;
+      overscroll-behavior-inline: contain;
+      scroll-snap-type: inline proximity;
+      scrollbar-width: thin;
+      scrollbar-color: hsl(var(--primary)) hsl(var(--muted));
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-x;
+    }
+
+    .mobile-tab-strip > * {
+      scroll-snap-align: start;
+    }
+
+    .page-container .overflow-x-auto {
+      max-width: 100%;
+      overscroll-behavior-inline: contain;
+      scrollbar-gutter: stable;
+      scrollbar-width: auto;
+      scrollbar-color: hsl(var(--primary)) hsl(var(--muted));
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-x pan-y;
+    }
+
+    .mobile-tab-strip::-webkit-scrollbar,
+    .page-container .overflow-x-auto::-webkit-scrollbar {
+      height: 12px;
+    }
+
+    .mobile-tab-strip::-webkit-scrollbar-track,
+    .page-container .overflow-x-auto::-webkit-scrollbar-track {
+      border-radius: 999px;
+      background: hsl(var(--muted));
+    }
+
+    .mobile-tab-strip::-webkit-scrollbar-thumb,
+    .page-container .overflow-x-auto::-webkit-scrollbar-thumb {
+      min-width: 3rem;
+      border: 2px solid hsl(var(--muted));
+      border-radius: 999px;
+      background: hsl(var(--primary));
+    }
+
     .mobile-scroll-table table {
       min-width: 760px;
     }

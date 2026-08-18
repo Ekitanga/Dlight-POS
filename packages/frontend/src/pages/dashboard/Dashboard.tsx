@@ -187,6 +187,93 @@ function StatsCard({ title, subtitle, description, value, icon, trend, urgent, o
     : <div className="h-full rounded-lg border bg-card p-3 sm:p-5">{content}</div>
 }
 
+function MobileDetail({ label, children, full = false }: { label: string; children: React.ReactNode; full?: boolean }) {
+  return (
+    <div className={full ? 'col-span-2' : ''}>
+      <dt className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 break-words text-sm">{children}</dd>
+    </div>
+  )
+}
+
+function MobileDrilldownRows({ data, canOpenOrders, onOpenOrder }: {
+  data: DrilldownResponse
+  canOpenOrders: boolean
+  onOpenOrder: (orderId: string) => void
+}) {
+  return (
+    <div className="space-y-3 md:hidden" data-testid="mobile-drilldown-cards">
+      {data.rows.map((row, index) => {
+        if (data.kind === 'salespeople') {
+          return (
+            <article key={row.salesperson_id} className="rounded-lg border bg-card p-4 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0"><p className="font-semibold">{row.full_name}</p><p className="truncate text-xs text-muted-foreground">{row.email}</p></div>
+                <span className="shrink-0 rounded-full bg-muted px-2 py-1 text-xs">#{index + 1}</span>
+              </div>
+              <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
+                <MobileDetail label="Orders">{row.orders}</MobileDetail>
+                <MobileDetail label="Recorded">{formatMoney(row.recorded)}</MobileDetail>
+                <MobileDetail label="Reversals">{formatMoney(row.reversals)}</MobileDetail>
+                <MobileDetail label="Paid">{formatMoney(row.paid)}</MobileDetail>
+                <MobileDetail label="Balance" full><strong>{formatMoney(row.balance)}</strong></MobileDetail>
+              </dl>
+            </article>
+          )
+        }
+
+        if (data.kind === 'commissions') {
+          return (
+            <article key={row.transaction_id} className="rounded-lg border bg-card p-4 shadow-sm">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  {row.order_id && canOpenOrders
+                    ? <button type="button" onClick={() => onOpenOrder(row.order_id)} className="font-semibold text-primary hover:underline">{row.order_number}</button>
+                    : <p className="font-semibold">{row.order_number || 'Commission entry'}</p>}
+                  <p className="text-xs text-muted-foreground">{row.salesperson_name}</p>
+                </div>
+                <span className="shrink-0 rounded-full bg-muted px-2 py-1 text-xs capitalize">{displayStatus(row.transaction_status)}</span>
+              </div>
+              <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
+                <MobileDetail label="Product" full>{row.product_name || '-'}{row.reason && <span className="mt-1 block text-xs text-muted-foreground">{row.reason}</span>}</MobileDetail>
+                <MobileDetail label="Sale date">{displayDate(row.sale_date || row.policy_date)}</MobileDetail>
+                <MobileDetail label="Earned">{displayDate(row.earned_date || row.qualification_date)}</MobileDetail>
+                <MobileDetail label="Quantity">{Number(row.eligible_quantity || 0)}</MobileDetail>
+                <MobileDetail label="Rate">{formatMoney(row.rate_per_item)}</MobileDetail>
+                <MobileDetail label="Commission"><strong>{formatMoney(row.signed_amount)}</strong></MobileDetail>
+                <MobileDetail label="Outstanding">{formatMoney(row.outstanding_amount)}</MobileDetail>
+              </dl>
+            </article>
+          )
+        }
+
+        return (
+          <article key={row.order_id} className="rounded-lg border bg-card p-4 shadow-sm">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                {canOpenOrders
+                  ? <button type="button" onClick={() => onOpenOrder(row.order_id)} className="font-semibold text-primary hover:underline">{row.order_number}</button>
+                  : <p className="font-semibold">{row.order_number}</p>}
+                <p className="text-xs text-muted-foreground">Created by {row.creator_name || '-'}</p>
+              </div>
+              <span className={`shrink-0 rounded-full px-2 py-1 text-xs font-medium capitalize ${commissionStatusClass(row.commission_status)}`}>{displayStatus(row.commission_status)}</span>
+            </div>
+            <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
+              <MobileDetail label="Products" full>{row.product_summary}<span className="mt-1 block text-xs text-muted-foreground">{Number(row.total_quantity || 0)} item(s)</span></MobileDetail>
+              <MobileDetail label="Sale date">{displayDate(row.sale_date)}</MobileDetail>
+              <MobileDetail label="Completed">{displayDate(row.completion_date)}</MobileDetail>
+              <MobileDetail label="Sale">{formatMoney(row.sale_amount)}</MobileDetail>
+              <MobileDetail label="Commission"><strong>{formatMoney(row.commission_amount)}</strong></MobileDetail>
+              <MobileDetail label="Order status"><span className="capitalize">{displayStatus(row.status)}</span></MobileDetail>
+              <MobileDetail label="Payment"><span className="capitalize">{displayStatus(row.payment_status)}</span></MobileDetail>
+            </dl>
+          </article>
+        )
+      })}
+    </div>
+  )
+}
+
 function DashboardDrilldown({
   selection,
   data,
@@ -246,7 +333,7 @@ function DashboardDrilldown({
           {isLoading && <div className="rounded-lg border bg-muted/20 p-8 text-center text-muted-foreground">Loading details…</div>}
           {Boolean(error) && <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">{(error as any)?.response?.data?.error?.message || 'Unable to load dashboard details'}</div>}
           {data?.summary && (
-            <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
+            <div className="mb-4 grid grid-cols-1 gap-3 min-[430px]:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-lg border p-3"><p className="text-xs text-muted-foreground">Completed orders</p><p className="mt-1 text-lg font-semibold">{data.summary.completedOrders.toLocaleString()}</p></div>
               <div className="rounded-lg border p-3"><p className="text-xs text-muted-foreground">Orders with recorded commission</p><p className="mt-1 text-lg font-semibold">{data.summary.commissionEarningOrders.toLocaleString()}</p></div>
               <div className="rounded-lg border p-3"><p className="text-xs text-muted-foreground">Completed sales</p><p className="mt-1 text-lg font-semibold">{formatMoney(data.summary.totalCompletedSales)}</p></div>
@@ -255,7 +342,9 @@ function DashboardDrilldown({
           )}
           {data && data.rows.length === 0 && <div className="rounded-lg border bg-muted/20 p-8 text-center text-muted-foreground">No records contribute to this card.</div>}
           {data && data.rows.length > 0 && (
-            <div className="overflow-x-auto rounded-lg border">
+            <>
+            <MobileDrilldownRows data={data} canOpenOrders={canOpenOrders} onOpenOrder={onOpenOrder} />
+            <div className="hidden overflow-x-auto rounded-lg border md:block">
               {data.kind === 'orders' && (
                 <table className="w-full min-w-[1420px] text-sm">
                   <thead className="bg-muted/70"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Created by</th><th className="px-3 py-3 text-left">Sale date</th><th className="px-3 py-3 text-left">Delivered</th><th className="px-3 py-3 text-left">Final completion</th><th className="px-3 py-3 text-left">Products</th><th className="px-3 py-3 text-right">Sale</th><th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3 text-right">Commission</th><th className="px-3 py-3 text-left">Commission status</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Payment</th></tr></thead>
@@ -288,6 +377,7 @@ function DashboardDrilldown({
                 <table className="w-full min-w-[800px] text-sm"><thead className="bg-muted/70"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Salesperson</th><th className="px-3 py-3 text-right">Orders</th><th className="px-3 py-3 text-right">Recorded</th><th className="px-3 py-3 text-right">Reversals</th><th className="px-3 py-3 text-right">Balance</th><th className="px-3 py-3 text-right">Paid</th></tr></thead><tbody>{data.rows.map((row, index) => <tr key={row.salesperson_id} className="border-t"><td className="px-3 py-3 text-right text-muted-foreground">{index + 1}</td><td className="px-3 py-3 font-medium">{row.full_name}<div className="text-xs font-normal text-muted-foreground">{row.email}</div></td><td className="px-3 py-3 text-right">{row.orders}</td><td className="px-3 py-3 text-right">{formatMoney(row.recorded)}</td><td className="px-3 py-3 text-right">{formatMoney(row.reversals)}</td><td className="px-3 py-3 text-right font-medium">{formatMoney(row.balance)}</td><td className="px-3 py-3 text-right">{formatMoney(row.paid)}</td></tr>)}</tbody></table>
               )}
             </div>
+            </>
           )}
           {data?.truncated && <p className="mt-3 text-xs text-amber-700">Showing the newest 100 of {data.total} records. Open the full module for the complete list.</p>}
         </div>
@@ -426,7 +516,7 @@ export function Dashboard() {
     return (
       <div className="space-y-6">
         <div className="h-8 bg-muted rounded w-48 animate-pulse" />
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+        <div className="grid grid-cols-1 min-[430px]:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
           {[...Array(8)].map((_, i) => (
             <div key={i} className="h-28 bg-muted rounded-xl animate-pulse" />
           ))}
@@ -472,7 +562,7 @@ export function Dashboard() {
       {!isAdministrativeRole && (canPersonalSales || canPersonalOrders || canPersonalSpeedaf) && (
         <section className="space-y-3">
           <div><h2 className="text-lg font-semibold">My activity</h2><p className="text-sm text-muted-foreground">Sales and orders attributed to your account</p></div>
-          <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+          <div className="grid grid-cols-1 gap-3 min-[430px]:grid-cols-2 sm:gap-4 lg:grid-cols-4">
             {canPersonalSales && <StatsCard title="My sales today" value={formatMoney(stats?.myTodaySales)} icon={<DollarSign className="h-6 w-6" />} onClick={() => openDrilldown('my_sales_today', 'My completed sales today')} />}
             {canPersonalSales && <StatsCard title="My sales — selected period" value={formatMoney(stats?.myPeriodSales)} icon={<TrendingUp className="h-6 w-6" />} onClick={() => openDrilldown('my_sales_period', 'My completed sales for the selected period')} />}
             {canPersonalOrders && <StatsCard title="My orders — selected period" value={stats?.myPeriodOrders || 0} icon={<Package className="h-6 w-6" />} onClick={() => openDrilldown('my_orders_period', 'My orders for the selected period')} />}
@@ -486,7 +576,7 @@ export function Dashboard() {
       {(canManagementSales || canManagementProfit || canManagementExpenses || canManagementSuppliers || canManagementRiders || canManagementInventory) && (
         <section className="space-y-3">
         <div><h2 className="text-lg font-semibold">Business overview</h2><p className="text-sm text-muted-foreground">Company-wide figures available to management</p></div>
-      <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
+      <div className="grid grid-cols-1 gap-3 min-[430px]:grid-cols-2 sm:gap-4 lg:grid-cols-4">
         {canManagementInventory && (
         <StatsCard
           title="Shop Stock Value"
@@ -722,7 +812,23 @@ export function Dashboard() {
                 {managementSalespeople.length === 0 ? (
                   <div className="p-6 text-center text-sm text-muted-foreground">No commission activity in this period.</div>
                 ) : (
-                  <div className="overflow-x-auto">
+                  <>
+                  <div className="space-y-3 p-3 md:hidden">
+                    {managementSalespeople.map(salesperson => (
+                      <article key={salesperson.salespersonId} className="rounded-lg border bg-card p-4">
+                        <div className="min-w-0"><p className="font-semibold">{salesperson.fullName}</p><p className="truncate text-xs text-muted-foreground">{salesperson.email}</p></div>
+                        <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
+                          <MobileDetail label="Orders">{salesperson.orderCount.toLocaleString()}</MobileDetail>
+                          <MobileDetail label="Eligible items">{salesperson.eligibleQuantity.toLocaleString()}</MobileDetail>
+                          <MobileDetail label="Recorded">{formatMoney(salesperson.grossEarned)}</MobileDetail>
+                          <MobileDetail label="Approved">{formatMoney(salesperson.approvedPayable)}</MobileDetail>
+                          <MobileDetail label="Paid">{formatMoney(salesperson.paid)}</MobileDetail>
+                          <MobileDetail label="Outstanding"><strong>{formatMoney(Math.max(0, salesperson.outstandingAmount))}</strong></MobileDetail>
+                        </dl>
+                      </article>
+                    ))}
+                  </div>
+                  <div className="hidden overflow-x-auto md:block">
                     <table className="w-full min-w-[920px] text-sm">
                       <thead className="bg-muted/70">
                         <tr><th className="px-4 py-3 text-left">Sales agent</th><th className="px-4 py-3 text-right">Orders</th><th className="px-4 py-3 text-right">Eligible items</th><th className="px-4 py-3 text-right">Recorded</th><th className="px-4 py-3 text-right">Approved</th><th className="px-4 py-3 text-right">Paid</th><th className="px-4 py-3 text-right">Outstanding</th></tr>
@@ -740,6 +846,7 @@ export function Dashboard() {
                       ))}</tbody>
                     </table>
                   </div>
+                  </>
                 )}
               </div>
             </>
