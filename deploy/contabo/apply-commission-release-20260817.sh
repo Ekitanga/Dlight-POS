@@ -75,6 +75,7 @@ MIGRATIONS=(
   commission_period_closure_migration.sql
   commission_operational_hardening_migration.sql
   commission_business_policy_migration.sql
+  commission_initial_activation_fix_migration.sql
 )
 
 for migration in "${MIGRATIONS[@]}"; do

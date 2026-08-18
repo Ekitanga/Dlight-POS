@@ -34,7 +34,8 @@ for (const file of [
   'database/commission_category_snapshot_provenance_migration.sql',
   'database/commission_period_closure_migration.sql',
   'database/commission_operational_hardening_migration.sql',
-  'database/commission_business_policy_migration.sql'
+  'database/commission_business_policy_migration.sql',
+  'database/commission_initial_activation_fix_migration.sql'
 ]) {
   await db.query(await fs.readFile(path.join(root, file), 'utf8'))
 }
@@ -1800,6 +1801,57 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(Number(reversals.rows[0].eligible_quantity), 3)
     assert.equal(Number(reversals.rows[0].rate_per_item), 50)
     assert.equal(Number(reversals.rows[0].amount), 150)
+  })
+
+  await t.test('19. a backdated first activation retires only the generated disabled placeholder', async () => {
+    const placeholder = await row(
+      `INSERT INTO commission_programmes
+         (status, effective_from, reason, created_at, updated_at)
+       VALUES
+         ('disabled', '2050-02-01 10:00:00',
+          'Initial KSh 50 commission configuration; activate only after management review.',
+          NOW(), NOW())
+       RETURNING id`
+    )
+    await db.query(
+      `INSERT INTO commission_rates
+         (programme_id, rate_per_item, effective_from, scope_type, scope_name, created_at)
+       VALUES ($1, 50, '2049-01-01', 'global', 'Initial default rate', NOW())`,
+      [placeholder.id]
+    )
+
+    const activation = await request('POST', '/commissions/programme', admin.accessToken, {
+      status: 'active',
+      effective_from: '2049-01-01',
+      reason: 'Backdated initial activation test'
+    }, 201)
+
+    const retiredPlaceholder = await row(
+      `SELECT effective_from::text, effective_to::text
+       FROM commission_programmes WHERE id = $1`,
+      [placeholder.id]
+    )
+    assert.equal(retiredPlaceholder.effective_to, retiredPlaceholder.effective_from)
+
+    const selectedAfterPlaceholder = await row(
+      `SELECT id, status
+       FROM commission_programmes
+       WHERE effective_from <= '2050-03-01'::timestamp
+         AND (effective_to IS NULL OR effective_to >= '2050-03-01'::timestamp)
+       ORDER BY effective_from DESC, created_at DESC, id DESC
+       LIMIT 1`
+    )
+    assert.equal(selectedAfterPlaceholder.id, activation.id)
+    assert.equal(selectedAfterPlaceholder.status, 'active')
+
+    const deliberateDisabled = await row(
+      `SELECT COUNT(*)::int AS count
+       FROM commission_programmes
+       WHERE status = 'disabled'
+         AND created_by IS NOT NULL
+         AND effective_to IS NULL`
+    )
+    assert.ok(deliberateDisabled.count > 0)
   })
 })
 

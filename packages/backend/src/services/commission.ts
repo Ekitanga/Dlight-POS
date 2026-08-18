@@ -62,6 +62,9 @@ export async function getActiveProgramme(): Promise<CommissionProgramme | null> 
   return getProgrammeAsOf(new Date().toISOString())
 }
 
+const INITIAL_PROGRAMME_PLACEHOLDER_REASON =
+  'Initial KSh 50 commission configuration; activate only after management review.'
+
 export async function isCommissionModuleEnabled(executor?: DbExecutor): Promise<boolean> {
   const result = await executorOrDefault(executor).query(
     'SELECT commission_module_enabled FROM settings ORDER BY id DESC LIMIT 1'
@@ -284,6 +287,23 @@ export async function updateProgrammeStatus(
       if (Number(rateCount.rows[0]?.count || 0) === 0) {
         throw Object.assign(new Error('Configure an explicit commission rate while the programme is disabled or suspended before activating it.'), { statusCode: 400 })
       }
+
+      // A fresh installation includes a later-dated disabled placeholder. When
+      // management backdates the first real activation, that placeholder must
+      // not override the new policy once its original timestamp is reached.
+      // Only the exact system-created placeholder is retired here; deliberate
+      // suspensions and disablements remain part of the effective-date timeline.
+      await client.query(
+        `UPDATE commission_programmes placeholder
+         SET effective_to = placeholder.effective_from, updated_at = NOW()
+         WHERE placeholder.id <> $1
+           AND placeholder.status = 'disabled'
+           AND placeholder.created_by IS NULL
+           AND placeholder.reason = $2
+           AND placeholder.effective_from > $3::timestamp
+           AND (placeholder.effective_to IS NULL OR placeholder.effective_to > placeholder.effective_from)`,
+        [created.id, INITIAL_PROGRAMME_PLACEHOLDER_REASON, normalizedFrom]
+      )
     }
     await logAudit({
       client,
