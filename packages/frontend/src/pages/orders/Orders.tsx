@@ -391,6 +391,7 @@ export function Orders() {
   const [formError, setFormError] = useState('')
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(searchParams.get('order_id'))
   const [selectedStatus, setSelectedStatus] = useState('')
+  const [speedafDeliveryConfirmed, setSpeedafDeliveryConfirmed] = useState(false)
   const [completionPaymentMethod, setCompletionPaymentMethod] = useState('cash')
   const [statusNotes, setStatusNotes] = useState('')
   const [statusError, setStatusError] = useState('')
@@ -596,6 +597,13 @@ export function Orders() {
   const updateOrderStatus = useMutation({
     mutationFn: async () => {
       if (!selectedOrderId || !selectedStatus) return null
+      const order = selectedOrderDetail?.order
+      const needsSpeedafConfirmation = selectedStatus === 'delivered' &&
+        order?.courier_payment_type === 'cod' &&
+        order.courier_name?.toLowerCase().includes('speedaf')
+      if (needsSpeedafConfirmation && !speedafDeliveryConfirmed) {
+        throw new Error('Confirm that the Speedaf parcel was delivered and collected')
+      }
       setStatusError('')
       const response = await axios.put(`/api/orders/${selectedOrderId}/status`, {
         status: selectedStatus,
@@ -615,7 +623,8 @@ export function Orders() {
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
       void invalidateCommissionData(queryClient)
       setStatusNotes('')
-      if (updatedOrder) setSelectedStatus(validStatusOptions(updatedOrder)[0]?.value || '')
+      setSpeedafDeliveryConfirmed(false)
+      if (updatedOrder) setSelectedStatus(defaultNextStatus(updatedOrder))
     },
     onError: (error: any) => {
       setStatusError(error.response?.data?.error?.message || 'Failed to update order status')
@@ -746,6 +755,11 @@ export function Orders() {
       if (['in_transit', 'pending_payment', 'completed'].includes(stage)) options.push({ value: 'returned', label: 'Mark Returned' })
     }
     return options
+  }
+
+  const defaultNextStatus = (order: Order) => {
+    const firstRoutineAction = validStatusOptions(order).find(option => !['returned', 'cancelled'].includes(option.value))
+    return firstRoutineAction?.value || ''
   }
 
   const canEditOrderDetails = (order: Order) => ['pending', 'confirmed'].includes(simplifiedStatus(order.status, order))
@@ -1190,10 +1204,11 @@ export function Orders() {
                       type="button"
                       onClick={() => {
                         setSelectedOrderId(order.id)
-                        setSelectedStatus(validStatusOptions(order)[0]?.value || '')
+                        setSelectedStatus(defaultNextStatus(order))
                         setCompletionPaymentMethod('cash')
                         setStatusNotes('')
                         setStatusError('')
+                        setSpeedafDeliveryConfirmed(false)
                         setCodRemittanceAmount('')
                         setCodRemittanceMethod('mpesa')
                         setCodRemittanceReference('')
@@ -1236,7 +1251,7 @@ export function Orders() {
                 )}
                 <button
                   type="button"
-                  onClick={() => setSelectedOrderId(null)}
+                  onClick={() => { setSelectedOrderId(null); setSpeedafDeliveryConfirmed(false) }}
                   className="rounded p-1.5 text-muted-foreground hover:text-foreground"
                   title="Close"
                 >
@@ -1249,58 +1264,6 @@ export function Orders() {
               <div className="p-6 text-sm text-muted-foreground">Loading order details...</div>
             ) : selectedOrderDetail ? (
               <div className="space-y-6 p-6">
-                {canUpdateOrderStatus() && <div className="rounded-lg border p-4">
-                  <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr_auto] gap-3 items-end">
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Next Action</label>
-                      {validStatusOptions(selectedOrderDetail.order).length > 0 ? <select
-                        value={selectedStatus}
-                        onChange={(event) => setSelectedStatus(event.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg"
-                      >
-                        {validStatusOptions(selectedOrderDetail.order).map(option => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select> : <div className="rounded-lg border bg-muted px-3 py-2 text-sm">
-                        {workflowStage(selectedOrderDetail.order) === 'pending_payment'
-                          ? 'Waiting for Speedaf remittance'
-                          : 'No further order action required'}
-                      </div>}
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium mb-1">Status Notes</label>
-                      <input
-                        value={statusNotes}
-                        onChange={(event) => setStatusNotes(event.target.value)}
-                        className="w-full px-3 py-2 border rounded-lg"
-                        placeholder="Optional reason or delivery note"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => updateOrderStatus.mutate()}
-                      disabled={updateOrderStatus.isPending || !selectedStatus}
-                      className="px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50"
-                    >
-                      {updateOrderStatus.isPending ? 'Updating...' : 'Update Status'}
-                    </button>
-                  </div>
-                  {selectedStatus === 'delivered' && selectedOrderDetail.order.delivery_type === 'rider' && selectedOrderDetail.order.payment_status !== 'paid' && (
-                    <div className="mt-3 max-w-sm">
-                      <label className="block text-sm font-medium mb-1">Payment Received Via</label>
-                      <select value={completionPaymentMethod} onChange={event => setCompletionPaymentMethod(event.target.value)} className="w-full rounded-lg border px-3 py-2">
-                        <option value="cash">Cash</option>
-                        <option value="mpesa">M-PESA</option>
-                        <option value="bank_transfer">Bank</option>
-                      </select>
-                    </div>
-                  )}
-                  <p className="text-xs text-muted-foreground mt-2">
-                    Status changes here update the order, delivery tracking, COD tracking, and related payable records automatically.
-                  </p>
-                  {statusError && workflowStage(selectedOrderDetail.order) !== 'pending_payment' && <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{statusError}</div>}
-                </div>}
-
                 {workflowStage(selectedOrderDetail.order) === 'pending_payment' && hasPermission('cod.remit') && (
                   <section className="rounded-lg border border-primary/30 bg-primary/5 p-4">
                     <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
@@ -1340,6 +1303,93 @@ export function Orders() {
                     {statusError && <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{statusError}</div>}
                   </section>
                 )}
+
+                {canUpdateOrderStatus() && <div className="rounded-lg border p-4">
+                  <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr_auto] gap-3 items-end">
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Next Action</label>
+                      {validStatusOptions(selectedOrderDetail.order).length > 0 ? <select
+                        value={selectedStatus}
+                        onChange={(event) => { setSelectedStatus(event.target.value); setSpeedafDeliveryConfirmed(false) }}
+                        className="w-full px-3 py-2 border rounded-lg"
+                      >
+                        {!selectedStatus && <option value="">Select an action</option>}
+                        {validStatusOptions(selectedOrderDetail.order).map(option => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select> : <div className="rounded-lg border bg-muted px-3 py-2 text-sm">
+                        {workflowStage(selectedOrderDetail.order) === 'pending_payment'
+                          ? 'Waiting for Speedaf remittance'
+                          : 'No further order action required'}
+                      </div>}
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Status Notes</label>
+                      <input
+                        value={statusNotes}
+                        onChange={(event) => setStatusNotes(event.target.value)}
+                        className="w-full px-3 py-2 border rounded-lg"
+                        placeholder="Optional reason or delivery note"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (selectedStatus === 'returned' && !window.confirm('Confirm that this order was returned. This action can affect stock, payments and commission.')) return
+                        updateOrderStatus.mutate()
+                      }}
+                      disabled={
+                        updateOrderStatus.isPending ||
+                        !selectedStatus ||
+                        (selectedStatus === 'delivered' &&
+                          selectedOrderDetail.order.courier_payment_type === 'cod' &&
+                          selectedOrderDetail.order.courier_name?.toLowerCase().includes('speedaf') &&
+                          !speedafDeliveryConfirmed)
+                      }
+                      className={`px-4 py-2 rounded-lg disabled:opacity-50 ${selectedStatus === 'returned' ? 'bg-destructive text-destructive-foreground' : 'bg-primary text-primary-foreground'}`}
+                    >
+                      {updateOrderStatus.isPending
+                        ? 'Updating...'
+                        : selectedStatus === 'delivered' && selectedOrderDetail.order.courier_payment_type === 'cod'
+                          ? 'Move to Pending Payment'
+                          : selectedStatus === 'returned'
+                            ? 'Confirm Return'
+                            : 'Update Status'}
+                    </button>
+                  </div>
+                  {selectedStatus === 'delivered' &&
+                    selectedOrderDetail.order.courier_payment_type === 'cod' &&
+                    selectedOrderDetail.order.courier_name?.toLowerCase().includes('speedaf') && (
+                      <div className="mt-3 rounded-lg border border-orange-200 bg-orange-50 p-4 text-sm text-orange-950 dark:border-orange-800 dark:bg-orange-950/30 dark:text-orange-100">
+                        <p className="font-medium">Confirm the Speedaf delivery</p>
+                        <p className="mt-1 opacity-80">Open the tracking link and confirm that the parcel was delivered and collected.</p>
+                        <div className="mt-2"><OrderTrackingLink order={selectedOrderDetail.order} /></div>
+                        <label className="mt-3 flex cursor-pointer items-start gap-2 font-medium">
+                          <input
+                            type="checkbox"
+                            checked={speedafDeliveryConfirmed}
+                            onChange={event => setSpeedafDeliveryConfirmed(event.target.checked)}
+                            className="mt-0.5 h-4 w-4 rounded border-orange-400"
+                          />
+                          <span>I confirm the parcel was delivered and collected.</span>
+                        </label>
+                      </div>
+                    )}
+                  {selectedStatus === 'delivered' && selectedOrderDetail.order.delivery_type === 'rider' && selectedOrderDetail.order.payment_status !== 'paid' && (
+                    <div className="mt-3 max-w-sm">
+                      <label className="block text-sm font-medium mb-1">Payment Received Via</label>
+                      <select value={completionPaymentMethod} onChange={event => setCompletionPaymentMethod(event.target.value)} className="w-full rounded-lg border px-3 py-2">
+                        <option value="cash">Cash</option>
+                        <option value="mpesa">M-PESA</option>
+                        <option value="bank_transfer">Bank</option>
+                      </select>
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground mt-2">
+                    Status changes here update the order, delivery tracking, COD tracking, and related payable records automatically.
+                  </p>
+                  {statusError && workflowStage(selectedOrderDetail.order) !== 'pending_payment' && <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{statusError}</div>}
+                </div>}
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>

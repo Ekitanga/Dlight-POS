@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote, ExternalLink, type LucideIcon } from 'lucide-react'
+import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote, ExternalLink, RefreshCw, type LucideIcon } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { formatMoney } from '../../lib/format'
@@ -30,6 +30,13 @@ interface Delivery {
   courier_customer_fee?: number
   courier_actual_fee?: number
   delivered_at?: string
+  tracking_provider?: string
+  tracking_provider_status?: string
+  tracking_message?: string
+  tracking_event_at?: string
+  tracking_checked_at?: string
+  tracking_sync_error?: string
+  tracking_auto_updated_at?: string
   notes: string
   created_at: string
   order_status?: string
@@ -48,6 +55,33 @@ interface StatusFormData {
   delivery_status: string
   earned_amount: number
   notes: string
+}
+
+interface TrackingConfig {
+  configured: boolean
+  automatic: boolean
+  interval_minutes: number
+}
+
+interface SpeedafPaymentBatch {
+  id: string
+  batch_number: string
+  payment_date: string
+  payment_method: string
+  net_amount: number
+  gross_amount: number
+  fee_amount: number
+  status: 'pending_approval' | 'approved' | 'rejected'
+  created_by_name?: string
+  approved_by_name?: string
+  rejection_reason?: string
+  allocations: Array<{ order_id: string; order_number: string; tracking_number?: string; gross_amount: number }>
+}
+
+function nairobiToday() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date())
 }
 
 const workflowStatuses = [
@@ -176,7 +210,7 @@ function TrackingLink({ trackingNumber, trackingUrl }: { trackingNumber?: string
 }
 
 export function Deliveries() {
-  const { hasPermission } = useAuthStore()
+  const { hasPermission, user } = useAuthStore()
   const [searchParams] = useSearchParams()
   const codOnly = searchParams.get('view') === 'cod'
   const [search, setSearch] = useState('')
@@ -190,6 +224,16 @@ export function Deliveries() {
   const [remittanceReference, setRemittanceReference] = useState('')
   const [remittanceError, setRemittanceError] = useState('')
   const [completionPaymentMethod, setCompletionPaymentMethod] = useState('cash')
+  const [speedafDeliveryConfirmed, setSpeedafDeliveryConfirmed] = useState(false)
+  const [trackingFeedback, setTrackingFeedback] = useState<{ orderId?: string; message: string; error: boolean } | null>(null)
+  const [showBulkPayment, setShowBulkPayment] = useState(false)
+  const [selectedBulkOrderIds, setSelectedBulkOrderIds] = useState<Set<string>>(new Set())
+  const [bulkNetAmount, setBulkNetAmount] = useState('')
+  const [bulkPaymentDate, setBulkPaymentDate] = useState(nairobiToday())
+  const [bulkPaymentMethod, setBulkPaymentMethod] = useState('bank_transfer')
+  const [bulkReference, setBulkReference] = useState('')
+  const [bulkNotes, setBulkNotes] = useState('')
+  const [bulkMessage, setBulkMessage] = useState<{ error: boolean; text: string } | null>(null)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
   const queryClient = useQueryClient()
@@ -208,9 +252,23 @@ export function Deliveries() {
       params.set('page_size', String(pageSize))
       const response = await axios.get(`/api/deliveries?${params.toString()}`)
       return response.data
-    }
+    },
+    refetchInterval: 60_000
   })
   const deliveries = deliveryPage?.data || []
+
+  const { data: trackingConfig } = useQuery<TrackingConfig>({
+    queryKey: ['speedaf-tracking-config'],
+    queryFn: async () => (await axios.get('/api/deliveries/tracking/config')).data,
+    staleTime: 5 * 60_000,
+    retry: false
+  })
+
+  const { data: speedafBatches = [] } = useQuery<SpeedafPaymentBatch[]>({
+    queryKey: ['speedaf-payment-batches'],
+    queryFn: async () => (await axios.get('/api/deliveries/cod/batches')).data,
+    enabled: showBulkPayment && hasPermission('cod.view')
+  })
 
   const { register: registerStatus, handleSubmit: handleSubmitStatus, reset: resetStatus } = useForm<StatusFormData>({
     defaultValues: {
@@ -236,6 +294,7 @@ export function Deliveries() {
       void invalidateCommissionData(queryClient)
       setShowStatusForm(false)
       setSelectedDelivery(null)
+      setSpeedafDeliveryConfirmed(false)
       resetStatus()
     }
   })
@@ -268,8 +327,110 @@ export function Deliveries() {
     }
   })
 
+  const refreshTracking = useMutation({
+    mutationFn: async (orderId?: string) => {
+      const endpoint = orderId
+        ? `/api/deliveries/orders/${orderId}/tracking/sync`
+        : '/api/deliveries/tracking/sync'
+      const response = await axios.post(endpoint)
+      return { ...response.data, orderId }
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      setTrackingFeedback({
+        orderId: result.orderId,
+        error: false,
+        message: result.movedToPendingPayment
+          ? `${result.movedToPendingPayment} order${result.movedToPendingPayment === 1 ? '' : 's'} moved to Pending Payment.`
+          : `Checked ${result.checked} tracking number${result.checked === 1 ? '' : 's'}. No new delivery collections found.`
+      })
+    },
+    onError: (error: any, orderId) => {
+      setTrackingFeedback({
+        orderId,
+        error: true,
+        message: error.response?.data?.error?.message || error.message || 'Unable to refresh Speedaf tracking'
+      })
+    }
+  })
+
+  const bulkGrossAmount = deliveries
+    .filter(delivery => selectedBulkOrderIds.has(delivery.order_id))
+    .reduce((sum, delivery) => sum + Number(delivery.cod_outstanding || 0), 0)
+  const parsedBulkNetAmount = Number(bulkNetAmount || 0)
+  const calculatedBulkFee = Math.max(0, Math.round((bulkGrossAmount - parsedBulkNetAmount) * 100) / 100)
+  const bulkDifference = Math.round((bulkGrossAmount - parsedBulkNetAmount - calculatedBulkFee) * 100) / 100
+  const bulkSelectionCovered = parsedBulkNetAmount > 0 && bulkGrossAmount >= parsedBulkNetAmount
+  const bulkFeeRate = bulkGrossAmount > 0 ? calculatedBulkFee / bulkGrossAmount : 0
+
+  const createSpeedafBatch = useMutation({
+    mutationFn: async () => (await axios.post('/api/deliveries/cod/batches', {
+      order_ids: Array.from(selectedBulkOrderIds),
+      net_amount: parsedBulkNetAmount,
+      payment_date: bulkPaymentDate,
+      payment_method: bulkPaymentMethod,
+      external_reference: bulkReference.trim(),
+      notes: bulkNotes.trim(),
+      approve_now: ['admin', 'owner'].includes(user?.role || '')
+    })).data,
+    onSuccess: (batch) => {
+      const approved = batch.status === 'approved'
+      setBulkMessage({
+        error: false,
+        text: approved
+          ? `${batch.batch_number} approved. ${batch.completed_orders} orders completed and the Speedaf fee was recorded.`
+          : `${batch.batch_number} submitted for manager approval.`
+      })
+      setSelectedBulkOrderIds(new Set())
+      setBulkNetAmount('')
+      setBulkReference('')
+      setBulkNotes('')
+      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
+      queryClient.invalidateQueries({ queryKey: ['expenses'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
+    },
+    onError: (error: any) => setBulkMessage({
+      error: true,
+      text: error.response?.data?.error?.message || error.message || 'Unable to record Speedaf payment'
+    })
+  })
+
+  const approveSpeedafBatch = useMutation({
+    mutationFn: async (batchId: string) => (await axios.post(`/api/deliveries/cod/batches/${batchId}/approve`)).data,
+    onSuccess: () => {
+      setBulkMessage({ error: false, text: 'Speedaf payment batch approved.' })
+      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
+      queryClient.invalidateQueries({ queryKey: ['expenses'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
+    },
+    onError: (error: any) => setBulkMessage({ error: true, text: error.response?.data?.error?.message || 'Unable to approve batch' })
+  })
+
+  const rejectSpeedafBatch = useMutation({
+    mutationFn: async ({ batchId, reason }: { batchId: string; reason: string }) =>
+      (await axios.post(`/api/deliveries/cod/batches/${batchId}/reject`, { reason })).data,
+    onSuccess: () => {
+      setBulkMessage({ error: false, text: 'Speedaf payment batch rejected.' })
+      queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
+    },
+    onError: (error: any) => setBulkMessage({ error: true, text: error.response?.data?.error?.message || 'Unable to reject batch' })
+  })
+
   const onStatusUpdate = (data: StatusFormData) => {
     if (selectedDelivery) {
+      const needsSpeedafConfirmation =
+        nextOrderStatus(selectedDelivery) === 'delivered' &&
+        selectedDelivery.courier_payment_type === 'cod' &&
+        selectedDelivery.courier_name?.toLowerCase().includes('speedaf')
+      if (needsSpeedafConfirmation && !speedafDeliveryConfirmed) return
       updateStatus.mutate({ ...data, order_id: selectedDelivery.order_id })
     }
   }
@@ -339,7 +500,114 @@ export function Deliveries() {
           <h1 className="text-2xl font-bold">Deliveries</h1>
           <p className="text-muted-foreground">Track deliveries created from orders</p>
         </div>
+        {hasPermission('cod.remit') && (
+          <button
+            type="button"
+            onClick={() => {
+              setShowBulkPayment(value => !value)
+              setSelectedWorkflowStatus('pending_payment')
+              setSelectedStatus('')
+              setPage(1)
+              setBulkMessage(null)
+            }}
+            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground"
+          >
+            <Banknote className="h-4 w-4" />
+            {showBulkPayment ? 'Close Payment' : 'Record Speedaf Payment'}
+          </button>
+        )}
       </div>
+
+      {showBulkPayment && hasPermission('cod.remit') && (
+        <section className="rounded-xl border border-primary/30 bg-primary/5 p-4 sm:p-5">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Record Speedaf Payment</h2>
+              <p className="text-sm text-muted-foreground">Select the paid orders below. The difference between their COD total and the bank amount is recorded as the Speedaf fee.</p>
+            </div>
+            <span className="text-sm font-medium">{selectedBulkOrderIds.size} order{selectedBulkOrderIds.size === 1 ? '' : 's'} selected</span>
+          </div>
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="text-sm">Amount received
+              <input type="number" min="0.01" step="0.01" value={bulkNetAmount} onChange={event => setBulkNetAmount(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2" placeholder="Bank amount" />
+            </label>
+            <label className="text-sm">Payment date
+              <input type="date" value={bulkPaymentDate} onChange={event => setBulkPaymentDate(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2" />
+            </label>
+            <label className="text-sm">Received via
+              <select value={bulkPaymentMethod} onChange={event => setBulkPaymentMethod(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2">
+                <option value="bank_transfer">Bank</option>
+                <option value="mpesa">M-PESA</option>
+              </select>
+            </label>
+            <label className="text-sm">Bank narration/reference <span className="text-muted-foreground">(optional)</span>
+              <input value={bulkReference} onChange={event => setBulkReference(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2" placeholder="If available" />
+            </label>
+          </div>
+
+          <div className="mt-4 grid gap-3 rounded-lg border bg-background p-3 sm:grid-cols-4">
+            <div><div className="text-xs text-muted-foreground">Orders selected</div><strong>{selectedBulkOrderIds.size}</strong></div>
+            <div><div className="text-xs text-muted-foreground">Expected from Speedaf</div><strong>{formatMoney(bulkGrossAmount)}</strong></div>
+            <div><div className="text-xs text-muted-foreground">Amount received</div><strong>{formatMoney(parsedBulkNetAmount)}</strong></div>
+            <div><div className="text-xs text-muted-foreground">Speedaf fee</div><strong>{formatMoney(calculatedBulkFee)}</strong></div>
+          </div>
+          <p className={`mt-2 text-sm ${bulkFeeRate > 0.1 ? 'text-destructive' : 'text-muted-foreground'}`}>
+            {parsedBulkNetAmount <= 0
+              ? 'Enter the amount received before selecting orders.'
+              : !bulkSelectionCovered
+                ? `${formatMoney(parsedBulkNetAmount - bulkGrossAmount)} still needs to be covered by the paid orders.`
+                : bulkFeeRate > 0.1
+                  ? 'The calculated fee is unusually high. Remove an incorrect order or check the bank amount.'
+                  : 'The received amount is covered. Remaining orders are locked to prevent over-selection.'}
+          </p>
+          <label className="mt-3 block text-sm">Notes <span className="text-muted-foreground">(optional)</span>
+            <input value={bulkNotes} onChange={event => setBulkNotes(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2" placeholder="Payment or reconciliation notes" />
+          </label>
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-xs text-muted-foreground">
+              {['admin', 'owner'].includes(user?.role || '')
+                ? 'Confirmation will complete the selected orders and record the fee expense.'
+                : 'This will be submitted for manager verification before orders and commissions are updated.'}
+            </p>
+            <button
+              type="button"
+              onClick={() => createSpeedafBatch.mutate()}
+              disabled={createSpeedafBatch.isPending || selectedBulkOrderIds.size === 0 || parsedBulkNetAmount <= 0 || parsedBulkNetAmount > bulkGrossAmount || bulkDifference !== 0 || bulkFeeRate > 0.1}
+              className="rounded-lg bg-primary px-4 py-2 text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {createSpeedafBatch.isPending ? 'Recording...' : ['admin', 'owner'].includes(user?.role || '') ? 'Confirm Bulk Payment' : 'Submit for Approval'}
+            </button>
+          </div>
+          {bulkMessage && <div className={`mt-3 rounded-lg px-3 py-2 text-sm ${bulkMessage.error ? 'bg-destructive/10 text-destructive' : 'bg-emerald-100 text-emerald-900'}`}>{bulkMessage.text}</div>}
+
+          {speedafBatches.some(batch => batch.status === 'pending_approval') && (
+            <div className="mt-5 border-t pt-4">
+              <h3 className="font-medium">Awaiting manager approval</h3>
+              <div className="mt-2 space-y-2">
+                {speedafBatches.filter(batch => batch.status === 'pending_approval').map(batch => (
+                  <div key={batch.id} className="flex flex-col gap-2 rounded-lg border bg-background p-3 text-sm lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <strong>{batch.batch_number}</strong>
+                      <span className="ml-2 text-muted-foreground">{batch.allocations.length} orders · Gross {formatMoney(batch.gross_amount)} · Received {formatMoney(batch.net_amount)} · Fee {formatMoney(batch.fee_amount)}</span>
+                      <div className="mt-1 text-xs text-muted-foreground">Prepared by {batch.created_by_name || 'User'} on {new Date(batch.payment_date).toLocaleDateString()}</div>
+                    </div>
+                    {['admin', 'owner'].includes(user?.role || '') && (
+                      <div className="flex gap-2">
+                        <button type="button" onClick={() => approveSpeedafBatch.mutate(batch.id)} disabled={approveSpeedafBatch.isPending} className="rounded bg-emerald-700 px-3 py-1.5 text-white disabled:opacity-50">Approve</button>
+                        <button type="button" onClick={() => {
+                          const reason = window.prompt('Reason for rejecting this Speedaf payment batch')?.trim()
+                          if (reason) rejectSpeedafBatch.mutate({ batchId: batch.id, reason })
+                        }} disabled={rejectSpeedafBatch.isPending} className="rounded border border-destructive px-3 py-1.5 text-destructive disabled:opacity-50">Reject</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
 
       {selectedDelivery && showStatusForm && hasPermission('deliveries.manage') && (
         <div className="border rounded-lg p-6 bg-card">
@@ -376,17 +644,53 @@ export function Deliveries() {
                 rows={2}
               />
             </div>
+            {nextOrderStatus(selectedDelivery) === 'delivered' &&
+              selectedDelivery.courier_payment_type === 'cod' &&
+              selectedDelivery.courier_name?.toLowerCase().includes('speedaf') && (
+                <div className="md:col-span-2 rounded-lg border border-orange-200 bg-orange-50 p-4 text-sm text-orange-950">
+                  <p className="font-medium">Confirm delivery before continuing</p>
+                  <p className="mt-1 text-orange-900/80">
+                    Open the tracking link and confirm that the parcel was delivered and the customer payment was collected by Speedaf.
+                  </p>
+                  <div className="mt-3">
+                    <TrackingLink
+                      trackingNumber={selectedDelivery.courier_tracking_number}
+                      trackingUrl={selectedDelivery.tracking_url}
+                    />
+                  </div>
+                  <label className="mt-3 flex cursor-pointer items-start gap-2 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={speedafDeliveryConfirmed}
+                      onChange={event => setSpeedafDeliveryConfirmed(event.target.checked)}
+                      className="mt-0.5 h-4 w-4 rounded border-orange-400"
+                    />
+                    <span>I confirm the parcel was delivered and collected.</span>
+                  </label>
+                </div>
+              )}
             <div className="md:col-span-2 flex gap-2">
               <button
                 type="submit"
-                disabled={updateStatus.isPending || !nextOrderStatus(selectedDelivery)}
+                disabled={
+                  updateStatus.isPending ||
+                  !nextOrderStatus(selectedDelivery) ||
+                  (nextOrderStatus(selectedDelivery) === 'delivered' &&
+                    selectedDelivery.courier_payment_type === 'cod' &&
+                    selectedDelivery.courier_name?.toLowerCase().includes('speedaf') &&
+                    !speedafDeliveryConfirmed)
+                }
                 className="px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50"
               >
-                {updateStatus.isPending ? 'Updating...' : 'Update Status'}
+                {updateStatus.isPending
+                  ? 'Updating...'
+                  : nextOrderStatus(selectedDelivery) === 'delivered' && selectedDelivery.courier_payment_type === 'cod'
+                    ? 'Move to Pending Payment'
+                    : 'Update Status'}
               </button>
               <button
                 type="button"
-                onClick={() => { setShowStatusForm(false); setSelectedDelivery(null) }}
+                onClick={() => { setShowStatusForm(false); setSelectedDelivery(null); setSpeedafDeliveryConfirmed(false) }}
                 className="px-4 py-2 border rounded-lg"
               >
                 Cancel
@@ -455,6 +759,18 @@ export function Deliveries() {
           />
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {hasPermission('deliveries.manage') && trackingConfig?.configured && (
+            <button
+              type="button"
+              onClick={() => { setTrackingFeedback(null); refreshTracking.mutate(undefined) }}
+              disabled={refreshTracking.isPending}
+              className="inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm disabled:opacity-50"
+              title="Check all active Speedaf tracking numbers"
+            >
+              <RefreshCw className={`h-4 w-4 ${refreshTracking.isPending ? 'animate-spin' : ''}`} />
+              Check Speedaf updates
+            </button>
+          )}
           <select
             value={selectedWorkflowStatus}
             onChange={(event) => { setSelectedWorkflowStatus(event.target.value); setPage(1) }}
@@ -492,6 +808,11 @@ export function Deliveries() {
           )}
         </div>
       </div>
+      {trackingFeedback && !trackingFeedback.orderId && (
+        <div className={`rounded-lg border px-4 py-3 text-sm ${trackingFeedback.error ? 'border-destructive/30 bg-destructive/5 text-destructive' : 'border-emerald-300 bg-emerald-50 text-emerald-900'}`}>
+          {trackingFeedback.message}
+        </div>
+      )}
       {codOnly && <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm"><strong>Outstanding COD filter active.</strong> Showing courier deliveries awaiting remittance.</div>}
       <div className="rounded-lg border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
         Delivery fee shows what the client was charged. Provider charge shows the rider or courier cost. Business margin is only the amount Dlight gains or loses from delivery handling.
@@ -516,11 +837,13 @@ export function Deliveries() {
           <table className="w-full">
             <thead className="bg-muted">
               <tr>
+                {showBulkPayment && <th className="w-16 px-4 py-3 text-left font-medium">Select</th>}
                 <th className="text-left px-4 py-3 font-medium">Order #</th>
                 <th className="text-left px-4 py-3 font-medium">Customer</th>
                 <th className="text-left px-4 py-3 font-medium">Handled By</th>
                 <th className="text-left px-4 py-3 font-medium">Destination</th>
                 <th className="text-left px-4 py-3 font-medium">Order Status</th>
+                <th className="text-left px-4 py-3 font-medium">Expected from Speedaf</th>
                 <th className="text-left px-4 py-3 font-medium">Customer Fee</th>
                 <th className="text-left px-4 py-3 font-medium">Provider Charge</th>
                 <th className="text-left px-4 py-3 font-medium">Business Margin</th>
@@ -534,6 +857,21 @@ export function Deliveries() {
                 const StatusIcon = presentation.Icon
                 return (
                   <tr key={delivery.id} className="border-t hover:bg-muted/50 transition-colors">
+                    {showBulkPayment && <td className="px-4 py-3">
+                      <input
+                        type="checkbox"
+                        aria-label={`Select ${delivery.order_number || 'order'} for Speedaf payment`}
+                        checked={selectedBulkOrderIds.has(delivery.order_id)}
+                        disabled={!selectedBulkOrderIds.has(delivery.order_id) && (parsedBulkNetAmount <= 0 || bulkSelectionCovered)}
+                        onChange={event => setSelectedBulkOrderIds(previous => {
+                          const next = new Set(previous)
+                          if (event.target.checked) next.add(delivery.order_id)
+                          else next.delete(delivery.order_id)
+                          return next
+                        })}
+                        className="h-4 w-4 rounded disabled:cursor-not-allowed disabled:opacity-40"
+                      />
+                    </td>}
                     <td className="px-4 py-3 font-medium">{delivery.order_number || '-'}</td>
                     <td className="px-4 py-3 text-sm">{delivery.customer_name || '-'}</td>
                     <td className="px-4 py-3 text-sm">{deliveryHandler(delivery)}</td>
@@ -544,6 +882,24 @@ export function Deliveries() {
                       {delivery.courier_tracking_number && (
                         <span className="mt-1 block max-w-full text-xs">
                           <TrackingLink trackingNumber={delivery.courier_tracking_number} trackingUrl={delivery.tracking_url} />
+                        </span>
+                      )}
+                      {delivery.tracking_message && (
+                        <span className="mt-1 block max-w-64 truncate text-xs text-muted-foreground" title={delivery.tracking_message}>
+                          Latest: {delivery.tracking_message}
+                        </span>
+                      )}
+                      {delivery.tracking_checked_at && (
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                          Checked {new Date(delivery.tracking_checked_at).toLocaleString('en-KE')}
+                        </span>
+                      )}
+                      {delivery.tracking_sync_error && (
+                        <span className="mt-1 block max-w-64 text-xs text-destructive">{delivery.tracking_sync_error}</span>
+                      )}
+                      {trackingFeedback && trackingFeedback.orderId === delivery.order_id && (
+                        <span className={`mt-1 block max-w-64 text-xs ${trackingFeedback.error ? 'text-destructive' : 'text-emerald-700'}`}>
+                          {trackingFeedback.message}
                         </span>
                       )}
                     </td>
@@ -557,6 +913,18 @@ export function Deliveries() {
                       </span>
                       <p className="mt-1 text-xs text-muted-foreground">Delivery: {deliveryStateLabel(delivery)}</p>
                     </td>
+                    <td className="whitespace-nowrap px-4 py-3">
+                      {delivery.courier_payment_type === 'cod' ? (
+                        <div>
+                          <span className="font-semibold">{formatMoney(delivery.cod_outstanding)}</span>
+                          {Number(delivery.remitted_amount || 0) > 0 && (
+                            <span className="mt-0.5 block text-xs text-muted-foreground">
+                              {formatMoney(delivery.remitted_amount)} already received
+                            </span>
+                          )}
+                        </div>
+                      ) : '-'}
+                    </td>
                     <td className="px-4 py-3">{formatMoney(customerDeliveryFee(delivery))}</td>
                     <td className="px-4 py-3">{formatMoney(actualDeliveryCost(delivery))}</td>
                     <td className={`px-4 py-3 font-medium ${deliveryMargin(delivery) < 0 ? 'text-destructive' : deliveryMargin(delivery) > 0 ? 'text-emerald-600' : ''}`}>
@@ -564,6 +932,18 @@ export function Deliveries() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
+                        {hasPermission('deliveries.manage') && trackingConfig?.configured && delivery.courier_tracking_number && delivery.courier_name?.toLowerCase().includes('speedaf') && (
+                          <button
+                            type="button"
+                            onClick={() => { setTrackingFeedback(null); refreshTracking.mutate(delivery.order_id) }}
+                            disabled={refreshTracking.isPending}
+                            className="rounded p-1.5 text-muted-foreground hover:text-primary disabled:opacity-50"
+                            title="Check this Speedaf tracking number now"
+                            aria-label={`Check tracking for ${delivery.order_number || delivery.courier_tracking_number}`}
+                          >
+                            <RefreshCw className={`h-4 w-4 ${refreshTracking.isPending && refreshTracking.variables === delivery.order_id ? 'animate-spin' : ''}`} />
+                          </button>
+                        )}
                         {hasPermission('deliveries.manage') && <button
                           onClick={() => {
                             setSelectedDelivery(delivery)
@@ -571,6 +951,7 @@ export function Deliveries() {
                             setRemittanceAmount(delivery.cod_outstanding ? String(delivery.cod_outstanding) : '')
                             setRemittanceReference('')
                             setRemittanceError('')
+                            setSpeedafDeliveryConfirmed(false)
                             resetStatus({
                               delivery_status: nextOrderStatus(delivery),
                               earned_amount: delivery.earned_amount || 0,

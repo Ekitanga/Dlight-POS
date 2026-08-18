@@ -307,9 +307,38 @@ CREATE TABLE deliveries (
     courier_customer_fee NUMERIC(12,2) NOT NULL DEFAULT 0,
     courier_actual_fee NUMERIC(12,2) NOT NULL DEFAULT 0,
     delivered_at TIMESTAMP,
+    tracking_provider VARCHAR(40),
+    tracking_provider_status VARCHAR(80),
+    tracking_message TEXT,
+    tracking_event_at TIMESTAMP,
+    tracking_checked_at TIMESTAMP,
+    tracking_sync_error TEXT,
+    tracking_auto_updated_at TIMESTAMP,
     notes TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE courier_tracking_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    delivery_id UUID NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
+    order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    provider VARCHAR(40) NOT NULL,
+    tracking_number VARCHAR(100) NOT NULL,
+    provider_status VARCHAR(80),
+    message TEXT NOT NULL,
+    location TEXT,
+    event_at TIMESTAMP,
+    external_event_key VARCHAR(64) NOT NULL UNIQUE,
+    raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+    observed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    triggered_transition BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_courier_tracking_events_order_event
+    ON courier_tracking_events(order_id, event_at DESC);
+CREATE INDEX idx_courier_tracking_events_tracking
+    ON courier_tracking_events(provider, tracking_number);
 
 CREATE TABLE rider_settlements (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -543,6 +572,45 @@ CREATE TABLE cod_remittances (
 );
 
 CREATE UNIQUE INDEX uq_cod_remittance_reference ON cod_remittances(reference) WHERE reference IS NOT NULL;
+
+CREATE TABLE speedaf_remittance_batches (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_number VARCHAR(40) NOT NULL UNIQUE,
+    payment_date DATE NOT NULL,
+    payment_method payment_method NOT NULL CHECK (payment_method IN ('mpesa', 'bank_transfer')),
+    net_amount NUMERIC(12,2) NOT NULL CHECK (net_amount > 0),
+    gross_amount NUMERIC(12,2) NOT NULL CHECK (gross_amount >= net_amount),
+    fee_amount NUMERIC(12,2) NOT NULL CHECK (fee_amount >= 0),
+    external_reference VARCHAR(255),
+    notes TEXT,
+    status VARCHAR(30) NOT NULL DEFAULT 'pending_approval' CHECK (status IN ('pending_approval', 'approved', 'rejected')),
+    created_by UUID NOT NULL REFERENCES users(id),
+    submitted_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    approved_by UUID REFERENCES users(id),
+    approved_at TIMESTAMP,
+    rejected_by UUID REFERENCES users(id),
+    rejected_at TIMESTAMP,
+    rejection_reason TEXT,
+    fee_expense_id UUID REFERENCES expenses(id),
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE speedaf_remittance_allocations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id UUID NOT NULL REFERENCES speedaf_remittance_batches(id) ON DELETE CASCADE,
+    order_id UUID NOT NULL REFERENCES orders(id),
+    cod_collection_id UUID NOT NULL REFERENCES cod_collections(id),
+    gross_amount NUMERIC(12,2) NOT NULL CHECK (gross_amount > 0),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (batch_id, order_id)
+);
+
+CREATE UNIQUE INDEX uq_speedaf_active_batch_order
+    ON speedaf_remittance_allocations(order_id) WHERE active;
+CREATE INDEX idx_speedaf_batches_status_date
+    ON speedaf_remittance_batches(status, payment_date DESC);
 
 CREATE TABLE order_refunds (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

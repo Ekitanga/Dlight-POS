@@ -60,7 +60,7 @@ await db.query(
       OR (p.module = 'customers' AND p.action IN ('view', 'create'))
       OR (p.module IN ('products', 'suppliers', 'riders', 'couriers', 'inventory', 'receipts') AND p.action = 'view')
       OR (p.module = 'deliveries' AND p.action IN ('view', 'manage'))
-      OR (p.module = 'cod' AND p.action = 'view')`,
+      OR (p.module = 'cod' AND p.action IN ('view', 'remit'))`,
   [attendantUser.id, adminUser.id]
 )
 await db.query(
@@ -115,6 +115,7 @@ process.env.JWT_REFRESH_SECRET = 'phase6-refresh-secret-that-is-long-and-safe'
 const { default: app } = await import('./index.js')
 const { pool: appPool } = await import('./db/pool.js')
 const { evaluateOrderItemFromRecords } = await import('./services/commission.js')
+const { isSpeedafDeliveredCollectedEvent, syncSpeedafTracking } = await import('./services/speedafTracking.js')
 const server = app.listen(0)
 await new Promise<void>(resolve => server.once('listening', resolve))
 const address = server.address()
@@ -497,6 +498,111 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id]), 1)
     await waitForAudit('cod_remittance_recorded', order.id)
     await assertGlobalIntegrity()
+  })
+
+  await t.test('5a. Speedaf tracking moves a collected parcel to pending payment only', async () => {
+    assert.equal(isSpeedafDeliveredCollectedEvent('Parcel delivered Collectedand Received'), true)
+    assert.equal(isSpeedafDeliveredCollectedEvent('Parcel delivered - Collected and Received'), true)
+    assert.equal(isSpeedafDeliveredCollectedEvent('  PARCEL   DELIVERED: collected AND\tRECEIVED  '), true)
+    assert.equal(isSpeedafDeliveredCollectedEvent('Parcel delivered'), false)
+
+    const order = await createOrder({
+      ...customer('Auto Tracking'), delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-AUTO', courier_payment_type: 'cod',
+      delivery_fee_payment_method: 'pay_on_delivery', payment_method: 'pay_on_delivery',
+      items: [internalItem(stockProduct.id, 1, 800)]
+    }, attendant.accessToken)
+    await advance(order.id, ['confirmed', 'in_transit'])
+
+    const provider = async () => [{
+      tracking_number: 'SPD-P6-AUTO',
+      status: 'delivered',
+      shipment: {
+        status: 'delivered',
+        states: [{
+          state: 'Parcel delivered Collectedand Received by courier; Collection site is Nairobi.',
+          date: '2026-08-18T10:00:00.000Z',
+          location: 'Nairobi'
+        }]
+      }
+    }]
+    const synced = await syncSpeedafTracking({ orderId: order.id, source: 'manual', userId: adminUser.id, provider })
+    assert.equal(synced.movedToPendingPayment, 1)
+
+    const updated = await row(
+      `SELECT status, payment_status, paid_amount, commission_completion_at FROM orders WHERE id=$1`,
+      [order.id]
+    )
+    assert.equal(updated.status, 'delivered')
+    assert.notEqual(updated.payment_status, 'paid')
+    assert.equal(Number(updated.paid_amount), 0)
+    assert.equal(updated.commission_completion_at, null)
+    assert.equal((await row('SELECT status FROM cod_collections WHERE order_id=$1', [order.id])).status, 'delivered_awaiting_remittance')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id]), 0)
+    assert.equal(await count("SELECT COUNT(*) FROM courier_tracking_events WHERE order_id=$1 AND triggered_transition", [order.id]), 1)
+    assert.equal(await count("SELECT COUNT(*) FROM audit_logs WHERE entity_id=$1 AND action='speedaf_tracking_auto_delivered'", [order.id]), 1)
+
+    const repeated = await syncSpeedafTracking({ orderId: order.id, source: 'manual', userId: adminUser.id, provider })
+    assert.equal(repeated.movedToPendingPayment, 0)
+    assert.equal(await count("SELECT COUNT(*) FROM courier_tracking_events WHERE order_id=$1", [order.id]), 1)
+    assert.equal(await count("SELECT COUNT(*) FROM audit_logs WHERE entity_id=$1 AND action='speedaf_tracking_auto_delivered'", [order.id]), 1)
+  })
+
+  await t.test('5aa. attendant prepares a multi-order Speedaf payment and manager approves it', async () => {
+    const first = await createOrder({
+      ...customer('Bulk COD One'), delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-BULK-1', courier_payment_type: 'cod',
+      delivery_fee_payment_method: 'pay_on_delivery', payment_method: 'pay_on_delivery',
+      items: [internalItem(stockProduct.id, 1, 600)]
+    }, attendant.accessToken)
+    const second = await createOrder({
+      ...customer('Bulk COD Two'), delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-BULK-2', courier_payment_type: 'cod',
+      delivery_fee_payment_method: 'pay_on_delivery', payment_method: 'pay_on_delivery',
+      items: [internalItem(stockProduct.id, 1, 900)]
+    }, attendant.accessToken)
+    await advance(first.id, ['confirmed', 'in_transit', 'delivered'])
+    await advance(second.id, ['confirmed', 'in_transit', 'delivered'])
+
+    await request('POST', '/deliveries/cod/batches', attendant.accessToken, {
+      order_ids: [first.id, second.id], net_amount: 1200, payment_date: isoDate(),
+      payment_method: 'bank_transfer', notes: 'Selection exceeds the allowed fee tolerance'
+    }, 400)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM speedaf_remittance_batches
+       WHERE notes='Selection exceeds the allowed fee tolerance'`
+    ), 0)
+
+    const submitted = await request('POST', '/deliveries/cod/batches', attendant.accessToken, {
+      order_ids: [first.id, second.id], net_amount: 1446, payment_date: isoDate(),
+      payment_method: 'bank_transfer', notes: 'Phase 6 bulk Speedaf test', approve_now: true
+    }, 201)
+    assert.equal(submitted.status, 'pending_approval')
+    assert.equal(Number(submitted.gross_amount), 1500)
+    assert.equal(Number(submitted.fee_amount), 54)
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [first.id])).status, 'delivered')
+
+    await request('POST', '/deliveries/cod/batches', attendant.accessToken, {
+      order_ids: [first.id], net_amount: 600, payment_date: isoDate(),
+      payment_method: 'bank_transfer', notes: 'Duplicate active allocation'
+    }, 409)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM speedaf_remittance_batches
+       WHERE notes='Duplicate active allocation'`
+    ), 0)
+
+    const approved = await request('POST', `/deliveries/cod/batches/${submitted.id}/approve`, admin.accessToken, {}, 200)
+    assert.equal(approved.status, 'approved')
+    assert.equal(approved.completed_orders, 2)
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [first.id])).status, 'collected_paid')
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [second.id])).status, 'collected_paid')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=ANY($1::uuid[]) AND transaction_type='earned'", [[first.id, second.id]]), 2)
+    const fee = await row('SELECT amount,status,category FROM expenses WHERE id=$1', [approved.fee_expense_id])
+    assert.equal(Number(fee.amount), 54)
+    assert.equal(fee.status, 'approved')
+    assert.equal(fee.category, 'Courier Transaction Fees')
+    assert.equal(await count('SELECT COUNT(*) FROM speedaf_remittance_allocations WHERE batch_id=$1', [submitted.id]), 2)
+    assert.equal(await count("SELECT COUNT(*) FROM audit_logs WHERE entity_id=$1 AND action='speedaf_remittance_batch_approved'", [submitted.id]), 1)
   })
 
   await t.test('5b. Speedaf item COD with delivery fee paid directly to Speedaf', async () => {
