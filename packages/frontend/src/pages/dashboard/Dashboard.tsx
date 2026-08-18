@@ -1,7 +1,7 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import axios from 'axios'
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../../stores/authStore'
 import { DateRangeFilter, formatDisplayDate, presetDateRange, todayDate } from '../../components/DateRangeFilter'
@@ -21,6 +21,7 @@ import {
   CheckCircle2,
   FileText,
   History,
+  ChevronLeft,
   ChevronRight,
   ExternalLink,
   X
@@ -274,6 +275,58 @@ function MobileDrilldownRows({ data, canOpenOrders, onOpenOrder }: {
   )
 }
 
+function DesktopDrilldownTable({ children, label }: { children: React.ReactNode; label: string }) {
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const [canMoveLeft, setCanMoveLeft] = useState(false)
+  const [canMoveRight, setCanMoveRight] = useState(false)
+
+  const updatePosition = useCallback(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    setCanMoveLeft(viewport.scrollLeft > 2)
+    setCanMoveRight(viewport.scrollLeft + viewport.clientWidth < viewport.scrollWidth - 2)
+  }, [])
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    updatePosition()
+    const observer = new ResizeObserver(updatePosition)
+    observer.observe(viewport)
+    if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
+    return () => observer.disconnect()
+  }, [children, updatePosition])
+
+  const move = (direction: -1 | 1) => {
+    const viewport = viewportRef.current
+    if (!viewport) return
+    viewport.scrollBy({ left: direction * Math.max(320, viewport.clientWidth * 0.75), behavior: 'smooth' })
+  }
+
+  return (
+    <div className="hidden min-h-0 flex-1 flex-col overflow-hidden rounded-lg border md:flex">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b bg-muted/40 px-3 py-2">
+        <span className="text-xs text-muted-foreground">Move across columns</span>
+        <div className="flex gap-2">
+          <button type="button" aria-label={`Show previous ${label} columns`} disabled={!canMoveLeft} onClick={() => move(-1)} className="inline-flex h-9 items-center gap-1 rounded-md border bg-background px-3 text-xs font-medium disabled:opacity-35"><ChevronLeft className="h-4 w-4" /> Left</button>
+          <button type="button" aria-label={`Show more ${label} columns`} disabled={!canMoveRight} onClick={() => move(1)} className="inline-flex h-9 items-center gap-1 rounded-md border bg-background px-3 text-xs font-medium disabled:opacity-35">Right <ChevronRight className="h-4 w-4" /></button>
+        </div>
+      </div>
+      <div
+        ref={viewportRef}
+        data-desktop-table-scroll={label}
+        role="region"
+        aria-label={`${label} table`}
+        tabIndex={0}
+        onScroll={updatePosition}
+        className="min-h-0 flex-1 overflow-auto"
+      >
+        {children}
+      </div>
+    </div>
+  )
+}
+
 function DashboardDrilldown({
   selection,
   data,
@@ -317,7 +370,7 @@ function DashboardDrilldown({
           <button type="button" onClick={onClose} className="rounded-md border p-2 hover:bg-muted" aria-label="Close details"><X className="h-4 w-4" /></button>
         </div>
 
-        <div className="flex-1 overflow-auto p-4 sm:p-6">
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4 sm:p-6 md:overflow-hidden">
           {selection.card === 'my_completed_orders' && (
             <div className="mb-4 rounded-lg border bg-muted/20 p-3">
               <DateRangeFilter
@@ -344,10 +397,10 @@ function DashboardDrilldown({
           {data && data.rows.length > 0 && (
             <>
             <MobileDrilldownRows data={data} canOpenOrders={canOpenOrders} onOpenOrder={onOpenOrder} />
-            <div className="hidden overflow-x-auto rounded-lg border md:block">
+            <DesktopDrilldownTable label={data.kind === 'salespeople' ? 'salesperson commission' : data.kind === 'commissions' ? 'commission sales' : 'completed orders'}>
               {data.kind === 'orders' && (
                 <table className="w-full min-w-[1420px] text-sm">
-                  <thead className="bg-muted/70"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Created by</th><th className="px-3 py-3 text-left">Sale date</th><th className="px-3 py-3 text-left">Delivered</th><th className="px-3 py-3 text-left">Final completion</th><th className="px-3 py-3 text-left">Products</th><th className="px-3 py-3 text-right">Sale</th><th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3 text-right">Commission</th><th className="px-3 py-3 text-left">Commission status</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Payment</th></tr></thead>
+                  <thead className="sticky top-0 z-10 bg-muted"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Created by</th><th className="px-3 py-3 text-left">Sale date</th><th className="px-3 py-3 text-left">Delivered</th><th className="px-3 py-3 text-left">Final completion</th><th className="px-3 py-3 text-left">Products</th><th className="px-3 py-3 text-right">Sale</th><th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3 text-right">Commission</th><th className="px-3 py-3 text-left">Commission status</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Payment</th></tr></thead>
                   <tbody>{data.rows.map((row, index) => <tr key={row.order_id} className="border-t hover:bg-muted/30">
                     <td className="px-3 py-3 text-right text-muted-foreground">{index + 1}</td>
                     <td className="px-3 py-3 font-medium">{canOpenOrders ? <button type="button" onClick={() => onOpenOrder(row.order_id)} className="text-primary hover:underline">{row.order_number}</button> : row.order_number}</td>
@@ -362,7 +415,7 @@ function DashboardDrilldown({
               )}
               {data.kind === 'commissions' && (
                 <table className="w-full min-w-[1320px] text-sm">
-                  <thead className="bg-muted/70"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Sale date</th><th className="px-3 py-3 text-left">Delivered</th><th className="px-3 py-3 text-left">Final completion</th><th className="px-3 py-3 text-left">Earned</th><th className="px-3 py-3 text-left">Salesperson</th><th className="px-3 py-3 text-left">Product</th><th className="px-3 py-3 text-right">Qty</th><th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3 text-right">Commission</th><th className="px-3 py-3 text-right">Paid</th><th className="px-3 py-3 text-right">Outstanding</th><th className="px-3 py-3 text-left">Status</th></tr></thead>
+                  <thead className="sticky top-0 z-10 bg-muted"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Sale date</th><th className="px-3 py-3 text-left">Delivered</th><th className="px-3 py-3 text-left">Final completion</th><th className="px-3 py-3 text-left">Earned</th><th className="px-3 py-3 text-left">Salesperson</th><th className="px-3 py-3 text-left">Product</th><th className="px-3 py-3 text-right">Qty</th><th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3 text-right">Commission</th><th className="px-3 py-3 text-right">Paid</th><th className="px-3 py-3 text-right">Outstanding</th><th className="px-3 py-3 text-left">Status</th></tr></thead>
                   <tbody>{data.rows.map((row, index) => <tr key={row.transaction_id} className="border-t hover:bg-muted/30">
                     <td className="px-3 py-3 text-right text-muted-foreground">{index + 1}</td>
                     <td className="px-3 py-3 font-medium">{row.order_id && canOpenOrders ? <button type="button" onClick={() => onOpenOrder(row.order_id)} className="text-primary hover:underline">{row.order_number}</button> : row.order_number}</td>
@@ -374,9 +427,9 @@ function DashboardDrilldown({
                 </table>
               )}
               {data.kind === 'salespeople' && (
-                <table className="w-full min-w-[800px] text-sm"><thead className="bg-muted/70"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Salesperson</th><th className="px-3 py-3 text-right">Orders</th><th className="px-3 py-3 text-right">Recorded</th><th className="px-3 py-3 text-right">Reversals</th><th className="px-3 py-3 text-right">Balance</th><th className="px-3 py-3 text-right">Paid</th></tr></thead><tbody>{data.rows.map((row, index) => <tr key={row.salesperson_id} className="border-t"><td className="px-3 py-3 text-right text-muted-foreground">{index + 1}</td><td className="px-3 py-3 font-medium">{row.full_name}<div className="text-xs font-normal text-muted-foreground">{row.email}</div></td><td className="px-3 py-3 text-right">{row.orders}</td><td className="px-3 py-3 text-right">{formatMoney(row.recorded)}</td><td className="px-3 py-3 text-right">{formatMoney(row.reversals)}</td><td className="px-3 py-3 text-right font-medium">{formatMoney(row.balance)}</td><td className="px-3 py-3 text-right">{formatMoney(row.paid)}</td></tr>)}</tbody></table>
+                <table className="w-full min-w-[800px] text-sm"><thead className="sticky top-0 z-10 bg-muted"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Salesperson</th><th className="px-3 py-3 text-right">Orders</th><th className="px-3 py-3 text-right">Recorded</th><th className="px-3 py-3 text-right">Reversals</th><th className="px-3 py-3 text-right">Balance</th><th className="px-3 py-3 text-right">Paid</th></tr></thead><tbody>{data.rows.map((row, index) => <tr key={row.salesperson_id} className="border-t"><td className="px-3 py-3 text-right text-muted-foreground">{index + 1}</td><td className="px-3 py-3 font-medium">{row.full_name}<div className="text-xs font-normal text-muted-foreground">{row.email}</div></td><td className="px-3 py-3 text-right">{row.orders}</td><td className="px-3 py-3 text-right">{formatMoney(row.recorded)}</td><td className="px-3 py-3 text-right">{formatMoney(row.reversals)}</td><td className="px-3 py-3 text-right font-medium">{formatMoney(row.balance)}</td><td className="px-3 py-3 text-right">{formatMoney(row.paid)}</td></tr>)}</tbody></table>
               )}
-            </div>
+            </DesktopDrilldownTable>
             </>
           )}
           {data?.truncated && <p className="mt-3 text-xs text-amber-700">Showing the newest 100 of {data.total} records. Open the full module for the complete list.</p>}
