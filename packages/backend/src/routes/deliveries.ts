@@ -298,7 +298,7 @@ router.get('/', async (req, res) => {
       conditions.push(workflowCondition(stage)!)
     }
     if (cod_outstanding === 'true') {
-      conditions.push("o.courier_payment_type='cod' AND COALESCE(cc.cod_amount-cc.remitted_amount,0)>0")
+      conditions.push("o.courier_payment_type='cod' AND cc.status NOT IN ('remitted','closed','returned','lost') AND COALESCE(cc.cod_amount-cc.remitted_amount,0)>0")
     }
     let sql = `SELECT d.*, o.order_number, o.status AS order_status, ${workflowStatusSql} AS workflow_status, o.payment_status, o.delivery_type,
       o.courier_payment_type, o.delivery_fee_payment_method,

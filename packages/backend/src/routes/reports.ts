@@ -546,7 +546,7 @@ router.get('/cod-outstanding', async (req, res) => {
   try {
     const params: any[] = []
     const conditions = dateConditions('cc', 'created_at', req.query, params)
-    conditions.push("cc.status NOT IN ('closed', 'remitted')")
+    conditions.push("cc.status NOT IN ('closed', 'remitted', 'returned', 'lost')")
     const result = await query(`
       SELECT cc.*, o.order_number, cr.name as courier_name,
         c.name AS customer, o.courier_tracking_number AS tracking_number,
@@ -568,7 +568,7 @@ router.get('/cod-ageing', async (req, res) => {
   try {
     const params: any[] = []
     const conditions = dateConditions('cc', 'created_at', req.query, params)
-    conditions.push("cc.status NOT IN ('closed', 'remitted')")
+    conditions.push("cc.status NOT IN ('closed', 'remitted', 'returned', 'lost')")
     const result = await query(`
       SELECT o.order_number, cr.name AS courier, o.courier_tracking_number AS tracking_number,
         c.name AS customer, cc.cod_amount,
