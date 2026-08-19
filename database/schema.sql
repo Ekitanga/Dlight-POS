@@ -583,7 +583,7 @@ CREATE TABLE speedaf_remittance_batches (
     fee_amount NUMERIC(12,2) NOT NULL CHECK (fee_amount >= 0),
     external_reference VARCHAR(255),
     notes TEXT,
-    status VARCHAR(30) NOT NULL DEFAULT 'pending_approval' CHECK (status IN ('pending_approval', 'approved', 'rejected')),
+    status VARCHAR(30) NOT NULL DEFAULT 'pending_approval' CHECK (status IN ('pending_approval', 'approved', 'rejected', 'reverted')),
     created_by UUID NOT NULL REFERENCES users(id),
     submitted_at TIMESTAMP NOT NULL DEFAULT NOW(),
     approved_by UUID REFERENCES users(id),
@@ -591,6 +591,9 @@ CREATE TABLE speedaf_remittance_batches (
     rejected_by UUID REFERENCES users(id),
     rejected_at TIMESTAMP,
     rejection_reason TEXT,
+    reverted_by UUID REFERENCES users(id),
+    reverted_at TIMESTAMP,
+    revert_reason TEXT,
     fee_expense_id UUID REFERENCES expenses(id),
     created_at TIMESTAMP NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMP NOT NULL DEFAULT NOW()

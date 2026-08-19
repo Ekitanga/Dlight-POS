@@ -652,7 +652,7 @@ export async function evaluateOrderItem(
   if (!ignoreExistingEarned) {
     const existingResult = await executorOrDefault(executor).query(
       `SELECT id FROM commission_transactions
-       WHERE order_item_id = $1 AND transaction_type = 'earned'`,
+       WHERE order_item_id = $1 AND transaction_type = 'earned' AND transaction_status <> 'reversed'`,
       [orderItemId]
     )
     if (existingResult.rows.length > 0) {
@@ -946,7 +946,7 @@ export async function earnCommission(
     }
     const existingResult = await client.query(
       `SELECT id FROM commission_transactions
-       WHERE order_item_id = $1 AND transaction_type = 'earned'
+       WHERE order_item_id = $1 AND transaction_type = 'earned' AND transaction_status <> 'reversed'
        FOR UPDATE`,
       [orderItemId]
     )
@@ -1035,6 +1035,19 @@ export async function reverseCommission(
        RETURNING id, amount`,
       [original.programme_id, original.salesperson_id, orderId, orderItemId, original.product_id, original.category_id, reversalQuantity, rate, reversalAmount, reversalStatus, currentDate, currentTimestamp, currentMonth, originalTransactionId, referenceType, referenceId, reason, createdBy]
     )
+
+    if (alreadyReversed + reversalQuantity >= Number(original.eligible_quantity)) {
+      await client.query(
+        `UPDATE commission_transactions
+         SET transaction_status = 'reversed'
+         WHERE id = $1
+           AND NOT EXISTS (
+             SELECT 1 FROM commission_period_closures
+             WHERE period_start = $2::date AND status = 'closed'
+           )`,
+        [originalTransactionId, original.commission_month]
+      )
+    }
 
     await logAudit({
       client,
@@ -1225,7 +1238,7 @@ export async function getPotentialCommission(salespersonId: string) {
        AND o.status NOT IN ('cancelled', 'returned')
        AND NOT EXISTS (
          SELECT 1 FROM commission_transactions ct
-         WHERE ct.order_item_id = oi.id AND ct.transaction_type = 'earned'
+         WHERE ct.order_item_id = oi.id AND ct.transaction_type = 'earned' AND ct.transaction_status <> 'reversed'
        )
      ORDER BY o.created_at DESC
      LIMIT 100`,
@@ -2666,7 +2679,7 @@ export async function evaluateOrdersForDateRange(
     const duplicateResult = await client.query(
       `SELECT order_item_id, COUNT(*)::int AS count
        FROM commission_transactions
-       WHERE transaction_type = 'earned' AND order_item_id IS NOT NULL
+       WHERE transaction_type = 'earned' AND transaction_status <> 'reversed' AND order_item_id IS NOT NULL
        GROUP BY order_item_id
        HAVING COUNT(*) > 1`
     )

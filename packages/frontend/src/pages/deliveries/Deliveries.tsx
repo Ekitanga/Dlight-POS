@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote, ExternalLink, RefreshCw, type LucideIcon } from 'lucide-react'
+import { Search, Truck, CheckCircle, Clock, AlertCircle, X, Eye, Banknote, ExternalLink, RefreshCw, RotateCcw, type LucideIcon } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { formatMoney } from '../../lib/format'
@@ -71,14 +71,17 @@ interface SpeedafPaymentBatch {
   net_amount: number
   gross_amount: number
   fee_amount: number
-  status: 'pending_approval' | 'approved' | 'rejected'
+  status: 'pending_approval' | 'approved' | 'rejected' | 'reverted'
   created_by_name?: string
   approved_by_name?: string
+  reverted_by_name?: string
   external_reference?: string
   notes?: string
   created_at?: string
   approved_at?: string
   rejection_reason?: string
+  revert_reason?: string
+  reverted_at?: string
   source?: 'batch' | 'legacy_single'
   payment_number?: string
   allocations: SpeedafPaymentAllocation[]
@@ -113,6 +116,13 @@ function paymentMethodLabel(value?: string) {
   if (value === 'bank_transfer' || value === 'bank') return 'Bank'
   if (value === 'mpesa') return 'M-PESA'
   return String(value || '-').replace(/_/g, ' ')
+}
+
+function paymentStatusLabel(status: SpeedafPaymentBatch['status']) {
+  if (status === 'approved') return 'Recorded'
+  if (status === 'reverted') return 'Reverted'
+  if (status === 'rejected') return 'Discarded'
+  return 'Earlier record awaiting completion'
 }
 
 const workflowStatuses = [
@@ -394,6 +404,7 @@ export function Deliveries() {
       payment.external_reference,
       payment.created_by_name,
       payment.approved_by_name,
+      payment.reverted_by_name,
       ...payment.allocations.flatMap(allocation => [
         allocation.order_number,
         allocation.tracking_number,
@@ -409,7 +420,7 @@ export function Deliveries() {
     expected: approvedPayments.reduce((sum, payment) => sum + Number(payment.gross_amount || 0), 0),
     fees: approvedPayments.reduce((sum, payment) => sum + Number(payment.fee_amount || 0), 0),
     orders: new Set(approvedPayments.flatMap(payment => payment.allocations.map(allocation => allocation.order_id))).size,
-    pending: speedafPaymentHistory.filter(payment => payment.status === 'pending_approval').length
+    reverted: speedafPaymentHistory.filter(payment => payment.status === 'reverted').length
   }
 
   const createSpeedafBatch = useMutation({
@@ -419,16 +430,12 @@ export function Deliveries() {
       payment_date: bulkPaymentDate,
       payment_method: bulkPaymentMethod,
       external_reference: bulkReference.trim(),
-      notes: bulkNotes.trim(),
-      approve_now: ['admin', 'owner'].includes(user?.role || '')
+      notes: bulkNotes.trim()
     })).data,
     onSuccess: (batch) => {
-      const approved = batch.status === 'approved'
       setBulkMessage({
         error: false,
-        text: approved
-          ? `${batch.batch_number} approved. ${batch.completed_orders} orders completed and the Speedaf fee was recorded.`
-          : `${batch.batch_number} submitted for manager approval.`
+        text: `${batch.batch_number} recorded. ${batch.completed_orders} order${batch.completed_orders === 1 ? '' : 's'} completed and the Speedaf fee was recorded.`
       })
       setSelectedBulkOrderIds(new Set())
       setBulkNetAmount('')
@@ -451,7 +458,7 @@ export function Deliveries() {
   const approveSpeedafBatch = useMutation({
     mutationFn: async (batchId: string) => (await axios.post(`/api/deliveries/cod/batches/${batchId}/approve`)).data,
     onSuccess: () => {
-      setBulkMessage({ error: false, text: 'Speedaf payment batch approved.' })
+      setBulkMessage({ error: false, text: 'Earlier Speedaf payment record completed.' })
       queryClient.invalidateQueries({ queryKey: ['deliveries'] })
       queryClient.invalidateQueries({ queryKey: ['orders'] })
       queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
@@ -460,18 +467,35 @@ export function Deliveries() {
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
       void invalidateCommissionData(queryClient)
     },
-    onError: (error: any) => setBulkMessage({ error: true, text: error.response?.data?.error?.message || 'Unable to approve batch' })
+    onError: (error: any) => setBulkMessage({ error: true, text: error.response?.data?.error?.message || 'Unable to complete the earlier payment record' })
   })
 
   const rejectSpeedafBatch = useMutation({
     mutationFn: async ({ batchId, reason }: { batchId: string; reason: string }) =>
       (await axios.post(`/api/deliveries/cod/batches/${batchId}/reject`, { reason })).data,
     onSuccess: () => {
-      setBulkMessage({ error: false, text: 'Speedaf payment batch rejected.' })
+      setBulkMessage({ error: false, text: 'Earlier Speedaf payment record discarded.' })
       queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
       queryClient.invalidateQueries({ queryKey: ['speedaf-payment-history'] })
     },
     onError: (error: any) => setBulkMessage({ error: true, text: error.response?.data?.error?.message || 'Unable to reject batch' })
+  })
+
+  const revertSpeedafBatch = useMutation({
+    mutationFn: async ({ batchId, reason }: { batchId: string; reason: string }) =>
+      (await axios.post(`/api/deliveries/cod/batches/${batchId}/revert`, { reason })).data,
+    onSuccess: (batch) => {
+      setBulkMessage({ error: false, text: `${batch.batch_number} reverted. ${batch.reopened_orders} order${batch.reopened_orders === 1 ? '' : 's'} returned to Pending Payment.` })
+      setSelectedPayment(null)
+      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['speedaf-payment-batches'] })
+      queryClient.invalidateQueries({ queryKey: ['speedaf-payment-history'] })
+      queryClient.invalidateQueries({ queryKey: ['expenses'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      void invalidateCommissionData(queryClient)
+    },
+    onError: (error: any) => setBulkMessage({ error: true, text: error.response?.data?.error?.message || 'Unable to revert Speedaf payment' })
   })
 
   const onStatusUpdate = (data: StatusFormData) => {
@@ -616,9 +640,7 @@ export function Deliveries() {
           </label>
           <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <p className="text-xs text-muted-foreground">
-              {['admin', 'owner'].includes(user?.role || '')
-                ? 'Confirmation will complete the selected orders and record the fee expense.'
-                : 'This will be submitted for manager verification before orders and commissions are updated.'}
+              Confirmation completes the selected orders, records their commissions and records any Speedaf fee.
             </p>
             <button
               type="button"
@@ -626,14 +648,15 @@ export function Deliveries() {
               disabled={createSpeedafBatch.isPending || selectedBulkOrderIds.size === 0 || parsedBulkNetAmount <= 0 || parsedBulkNetAmount > bulkGrossAmount || bulkDifference !== 0 || bulkFeeRate > 0.1}
               className="rounded-lg bg-primary px-4 py-2 text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {createSpeedafBatch.isPending ? 'Recording...' : ['admin', 'owner'].includes(user?.role || '') ? 'Confirm Bulk Payment' : 'Submit for Approval'}
+              {createSpeedafBatch.isPending ? 'Recording...' : 'Confirm Payment'}
             </button>
           </div>
           {bulkMessage && <div className={`mt-3 rounded-lg px-3 py-2 text-sm ${bulkMessage.error ? 'bg-destructive/10 text-destructive' : 'bg-emerald-100 text-emerald-900'}`}>{bulkMessage.text}</div>}
 
-          {speedafBatches.some(batch => batch.status === 'pending_approval') && (
+          {isManager && speedafBatches.some(batch => batch.status === 'pending_approval') && (
             <div className="mt-5 border-t pt-4">
-              <h3 className="font-medium">Awaiting manager approval</h3>
+              <h3 className="font-medium">Earlier uncompleted payment records</h3>
+              <p className="mt-1 text-xs text-muted-foreground">These were submitted before payments began completing orders immediately.</p>
               <div className="mt-2 space-y-2">
                 {speedafBatches.filter(batch => batch.status === 'pending_approval').map(batch => (
                   <div key={batch.id} className="flex flex-col gap-2 rounded-lg border bg-background p-3 text-sm lg:flex-row lg:items-center lg:justify-between">
@@ -642,15 +665,13 @@ export function Deliveries() {
                       <span className="ml-2 text-muted-foreground">{batch.allocations.length} orders · Gross {formatMoney(batch.gross_amount)} · Received {formatMoney(batch.net_amount)} · Fee {formatMoney(batch.fee_amount)}</span>
                       <div className="mt-1 text-xs text-muted-foreground">Prepared by {batch.created_by_name || 'User'} on {new Date(batch.payment_date).toLocaleDateString()}</div>
                     </div>
-                    {['admin', 'owner'].includes(user?.role || '') && (
-                      <div className="flex gap-2">
-                        <button type="button" onClick={() => approveSpeedafBatch.mutate(batch.id)} disabled={approveSpeedafBatch.isPending} className="rounded bg-emerald-700 px-3 py-1.5 text-white disabled:opacity-50">Approve</button>
-                        <button type="button" onClick={() => {
-                          const reason = window.prompt('Reason for rejecting this Speedaf payment batch')?.trim()
-                          if (reason) rejectSpeedafBatch.mutate({ batchId: batch.id, reason })
-                        }} disabled={rejectSpeedafBatch.isPending} className="rounded border border-destructive px-3 py-1.5 text-destructive disabled:opacity-50">Reject</button>
-                      </div>
-                    )}
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => approveSpeedafBatch.mutate(batch.id)} disabled={approveSpeedafBatch.isPending} className="rounded bg-emerald-700 px-3 py-1.5 text-white disabled:opacity-50">Complete record</button>
+                      <button type="button" onClick={() => {
+                        const reason = window.prompt('Reason for discarding this earlier Speedaf payment record')?.trim()
+                        if (reason) rejectSpeedafBatch.mutate({ batchId: batch.id, reason })
+                      }} disabled={rejectSpeedafBatch.isPending} className="rounded border border-destructive px-3 py-1.5 text-destructive disabled:opacity-50">Discard</button>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -662,8 +683,8 @@ export function Deliveries() {
       {isManager && hasPermission('cod.view') && (
         <section className="rounded-xl border bg-card">
           <div className="border-b p-4 sm:p-5">
-            <h2 className="text-lg font-semibold">Speedaf Payment History</h2>
-            <p className="text-sm text-muted-foreground">Bank receipts, Speedaf deductions and the orders allocated to every payment.</p>
+            <h2 className="text-lg font-semibold">Recent Speedaf Payments</h2>
+            <p className="text-sm text-muted-foreground">Review recorded bank receipts, Speedaf deductions and every order included in each payment.</p>
           </div>
 
           <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5 lg:grid-cols-5">
@@ -683,9 +704,9 @@ export function Deliveries() {
               <div className="text-xs text-muted-foreground">Orders reconciled</div>
               <strong className="mt-1 block text-lg">{paymentHistorySummary.orders}</strong>
             </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('pending_approval')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
-              <div className="text-xs text-muted-foreground">Pending approval</div>
-              <strong className="mt-1 block text-lg">{paymentHistorySummary.pending}</strong>
+            <button type="button" onClick={() => setPaymentHistoryStatus('reverted')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Reverted payments</div>
+              <strong className="mt-1 block text-lg">{paymentHistorySummary.reverted}</strong>
             </button>
           </div>
 
@@ -701,9 +722,10 @@ export function Deliveries() {
             </div>
             <select value={paymentHistoryStatus} onChange={event => setPaymentHistoryStatus(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Filter Speedaf payments by status">
               <option value="">All payment statuses</option>
-              <option value="approved">Approved</option>
-              <option value="pending_approval">Pending approval</option>
-              <option value="rejected">Rejected</option>
+              <option value="approved">Recorded</option>
+              <option value="reverted">Reverted</option>
+              <option value="pending_approval">Earlier uncompleted</option>
+              <option value="rejected">Discarded</option>
             </select>
             <input type="date" value={paymentHistoryDateFrom} onChange={event => setPaymentHistoryDateFrom(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date from" />
             <input type="date" value={paymentHistoryDateTo} onChange={event => setPaymentHistoryDateTo(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date to" />
@@ -728,7 +750,7 @@ export function Deliveries() {
                     <th className="px-4 py-3 text-left font-medium">Fee</th>
                     <th className="px-4 py-3 text-left font-medium">Orders</th>
                     <th className="px-4 py-3 text-left font-medium">Status</th>
-                    <th className="px-4 py-3 text-left font-medium">Prepared by</th>
+                    <th className="px-4 py-3 text-left font-medium">Recorded by</th>
                     <th className="px-4 py-3 text-right font-medium">Details</th>
                   </tr>
                 </thead>
@@ -752,8 +774,8 @@ export function Deliveries() {
                       <td className="whitespace-nowrap px-4 py-3">{formatMoney(payment.fee_amount)}</td>
                       <td className="px-4 py-3">{payment.allocations.length}</td>
                       <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${payment.status === 'approved' ? 'bg-emerald-100 text-emerald-900' : payment.status === 'rejected' ? 'bg-rose-100 text-rose-900' : 'bg-amber-100 text-amber-900'}`}>
-                          {payment.status.replace(/_/g, ' ')}
+                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${payment.status === 'approved' ? 'bg-emerald-100 text-emerald-900' : payment.status === 'reverted' || payment.status === 'rejected' ? 'bg-rose-100 text-rose-900' : 'bg-amber-100 text-amber-900'}`}>
+                          {paymentStatusLabel(payment.status)}
                         </span>
                       </td>
                       <td className="px-4 py-3">{payment.created_by_name || '-'}</td>
@@ -782,15 +804,16 @@ export function Deliveries() {
                 <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Expected from Speedaf</div><strong className="mt-1 block">{formatMoney(selectedPayment.gross_amount)}</strong></div>
                 <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Amount received</div><strong className="mt-1 block">{formatMoney(selectedPayment.net_amount)}</strong></div>
                 <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Speedaf fee</div><strong className="mt-1 block">{formatMoney(selectedPayment.fee_amount)}</strong></div>
-                <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Status</div><strong className="mt-1 block capitalize">{selectedPayment.status.replace(/_/g, ' ')}</strong></div>
+                <div className="rounded-lg border p-3"><div className="text-xs text-muted-foreground">Status</div><strong className="mt-1 block">{paymentStatusLabel(selectedPayment.status)}</strong></div>
               </div>
               <dl className="mt-4 grid gap-3 rounded-lg bg-muted/40 p-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
                 <div><dt className="text-xs text-muted-foreground">Received via</dt><dd className="font-medium">{paymentMethodLabel(selectedPayment.payment_method)}</dd></div>
                 <div><dt className="text-xs text-muted-foreground">Bank reference</dt><dd className="break-words font-medium">{selectedPayment.external_reference || 'Not provided'}</dd></div>
-                <div><dt className="text-xs text-muted-foreground">Prepared by</dt><dd className="font-medium">{selectedPayment.created_by_name || '-'}</dd></div>
-                <div><dt className="text-xs text-muted-foreground">Approved by</dt><dd className="font-medium">{selectedPayment.approved_by_name || '-'}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Recorded by</dt><dd className="font-medium">{selectedPayment.created_by_name || '-'}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Reviewed action</dt><dd className="font-medium">{selectedPayment.status === 'reverted' ? `Reverted by ${selectedPayment.reverted_by_name || 'management'}` : 'No correction recorded'}</dd></div>
               </dl>
               {selectedPayment.notes && <div className="mt-3 rounded-lg border p-3 text-sm"><span className="text-xs text-muted-foreground">Notes</span><p className="mt-1">{selectedPayment.notes}</p></div>}
+              {selectedPayment.revert_reason && <div className="mt-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm"><span className="text-xs text-muted-foreground">Reason for reverting</span><p className="mt-1">{selectedPayment.revert_reason}</p></div>}
 
               <h3 className="mt-5 font-semibold">Orders in this payment</h3>
               <div className="mobile-scroll-table mt-2 overflow-x-auto rounded-lg border">
@@ -821,6 +844,29 @@ export function Deliveries() {
                   </tbody>
                 </table>
               </div>
+              {selectedPayment.source === 'batch' && selectedPayment.status === 'approved' && (
+                <div className="mt-5 flex flex-col gap-2 rounded-lg border border-destructive/30 bg-destructive/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <h4 className="font-medium">Payment captured incorrectly?</h4>
+                    <p className="text-xs text-muted-foreground">Reverting returns all orders in this payment to Pending Payment and reverses their commissions and Speedaf fee.</p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={revertSpeedafBatch.isPending}
+                    onClick={() => {
+                      const reason = window.prompt('Why are you reverting this Speedaf payment? This reason will be kept in the audit history.')?.trim()
+                      if (!reason) return
+                      if (window.confirm(`Revert ${selectedPayment.payment_number || selectedPayment.batch_number} and return ${selectedPayment.allocations.length} order${selectedPayment.allocations.length === 1 ? '' : 's'} to Pending Payment?`)) {
+                        revertSpeedafBatch.mutate({ batchId: selectedPayment.id, reason })
+                      }
+                    }}
+                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-destructive px-4 py-2 text-sm font-medium text-destructive disabled:opacity-50"
+                  >
+                    <RotateCcw className="h-4 w-4" />
+                    {revertSpeedafBatch.isPending ? 'Reverting...' : 'Revert payment'}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

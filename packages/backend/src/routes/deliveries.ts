@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { query, transaction } from '../db/index.js'
 import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 import { logAudit } from '../utils/audit.js'
-import { evaluateAndEarnOrderItem } from '../services/commission.js'
+import { evaluateAndEarnOrderItem, reverseCommission } from '../services/commission.js'
 import { syncSpeedafTracking } from '../services/speedafTracking.js'
 
 const router = Router()
@@ -79,6 +79,7 @@ function withTrackingUrl<T extends { courier_tracking_number?: string | null }>(
 
 const speedafBatchSelect = `
   SELECT b.*, creator.full_name AS created_by_name, approver.full_name AS approved_by_name,
+    reverter.full_name AS reverted_by_name,
     COALESCE(json_agg(json_build_object(
       'order_id', a.order_id,
       'order_number', o.order_number,
@@ -91,6 +92,7 @@ const speedafBatchSelect = `
   FROM speedaf_remittance_batches b
   LEFT JOIN users creator ON creator.id = b.created_by
   LEFT JOIN users approver ON approver.id = b.approved_by
+  LEFT JOIN users reverter ON reverter.id = b.reverted_by
   LEFT JOIN speedaf_remittance_allocations a ON a.batch_id = b.id
   LEFT JOIN orders o ON o.id = a.order_id
   LEFT JOIN deliveries d ON d.order_id = o.id
@@ -105,7 +107,7 @@ const speedafBatchSelect = `
     FROM commission_transactions
     WHERE order_id = o.id
   ) order_commission ON TRUE
-  GROUP BY b.id, creator.full_name, approver.full_name
+  GROUP BY b.id, creator.full_name, approver.full_name, reverter.full_name
   ORDER BY b.created_at DESC
   LIMIT 200`
 
@@ -126,7 +128,7 @@ async function getSpeedafBatches() {
   return result.rows.map(row => mapPaymentRecord(row))
 }
 
-async function approveSpeedafBatch(client: any, batchId: string, approverId: string, req?: any) {
+async function recordSpeedafBatch(client: any, batchId: string, recordedBy: string, req?: any) {
   const batchResult = await client.query(
     'SELECT * FROM speedaf_remittance_batches WHERE id = $1 FOR UPDATE',
     [batchId]
@@ -171,19 +173,19 @@ async function approveSpeedafBatch(client: any, batchId: string, approverId: str
         (cod_collection_id, order_id, amount, payment_method, reference, received_at, created_by)
        VALUES ($1, $2, $3, $4, $5, $6::date + TIME '12:00', $7)`,
       [allocation.cod_collection_id, allocation.order_id, allocation.gross_amount, batch.payment_method,
-        internalReference, batch.payment_date, approverId]
+        internalReference, batch.payment_date, recordedBy]
     )
     await client.query(
       `INSERT INTO order_payments (order_id, amount, payment_method, payment_date, reference, created_by)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [allocation.order_id, allocation.gross_amount, batch.payment_method, batch.payment_date, internalReference, approverId]
+      [allocation.order_id, allocation.gross_amount, batch.payment_method, batch.payment_date, internalReference, recordedBy]
     )
 
     const newRemittedAmount = Number(allocation.remitted_amount) + Number(allocation.gross_amount)
     await client.query(
       `UPDATE cod_collections SET remitted_amount = $1, status = 'remitted', remitted_at = $2::date + TIME '12:00',
          closed_at = $2::date + TIME '12:00', closed_by = $3 WHERE id = $4`,
-      [newRemittedAmount, batch.payment_date, approverId, allocation.cod_collection_id]
+      [newRemittedAmount, batch.payment_date, recordedBy, allocation.cod_collection_id]
     )
     const paymentTotal = Number((await client.query(
       'SELECT COALESCE(SUM(amount), 0) AS total FROM order_payments WHERE order_id = $1',
@@ -197,20 +199,27 @@ async function approveSpeedafBatch(client: any, batchId: string, approverId: str
       `UPDATE orders SET paid_amount = $1, payment_status = 'paid', status = 'collected_paid',
          commission_completion_by = $2, commission_completion_at = $3::date + TIME '12:00', updated_at = NOW()
        WHERE id = $4`,
-      [paymentTotal, approverId, batch.payment_date, allocation.order_id]
+      [paymentTotal, recordedBy, batch.payment_date, allocation.order_id]
     )
     await client.query("UPDATE deliveries SET delivery_status = 'collected_paid' WHERE order_id = $1", [allocation.order_id])
 
     const items = await client.query('SELECT id FROM order_items WHERE order_id = $1 ORDER BY id', [allocation.order_id])
     for (const item of items.rows) {
-      const commission = await evaluateAndEarnOrderItem(allocation.order_id, item.id, approverId, client)
+      const commission = await evaluateAndEarnOrderItem(
+        allocation.order_id,
+        item.id,
+        recordedBy,
+        client,
+        'speedaf_remittance_batch',
+        batch.id
+      )
       if (commission.earned) commissionsCreated += 1
     }
     completedOrders += 1
     await logAudit({
       req,
       client,
-      userId: approverId,
+      userId: recordedBy,
       action: 'cod_remittance_recorded',
       entityType: 'order',
       entityId: allocation.order_id,
@@ -229,20 +238,20 @@ async function approveSpeedafBatch(client: any, batchId: string, approverId: str
        VALUES ('Courier Transaction Fees', $1, $2, 'one_off', $3, $4, $5, 'approved', $6, NOW(), $7)
        RETURNING id`,
       [`Speedaf remittance fee for ${batch.batch_number}`, batch.fee_amount, batch.payment_date,
-        batch.payment_method, batch.external_reference || batch.batch_number, approverId, batch.created_by]
+        batch.payment_method, batch.external_reference || batch.batch_number, recordedBy, batch.created_by]
     )).rows[0].id
   }
   const approved = (await client.query(
     `UPDATE speedaf_remittance_batches
      SET status = 'approved', approved_by = $2, approved_at = NOW(), fee_expense_id = $3, updated_at = NOW()
      WHERE id = $1 RETURNING *`,
-    [batch.id, approverId, feeExpenseId]
+    [batch.id, recordedBy, feeExpenseId]
   )).rows[0]
   await logAudit({
     req,
     client,
-    userId: approverId,
-    action: 'speedaf_remittance_batch_approved',
+    userId: recordedBy,
+    action: 'speedaf_remittance_batch_recorded',
     entityType: 'speedaf_remittance_batch',
     entityId: batch.id,
     oldValues: { status: batch.status },
@@ -454,7 +463,7 @@ router.get('/cod/payment-history', async (req, res) => {
 
 router.post('/cod/batches', async (req, res) => {
   try {
-    const { order_ids, net_amount, payment_date, payment_method, external_reference, notes, approve_now } = req.body
+    const { order_ids, net_amount, payment_date, payment_method, external_reference, notes } = req.body
     const orderIds = Array.from(new Set(Array.isArray(order_ids) ? order_ids.map(String) : [])).filter(Boolean)
     const netAmount = Number(net_amount)
     const method = payment_method === 'bank' ? 'bank_transfer' : payment_method
@@ -516,11 +525,8 @@ router.post('/cod/batches', async (req, res) => {
         newValues: { batch_number: created.batch_number, net_amount: netAmount, gross_amount: grossAmount, fee_amount: feeAmount },
         metadata: { order_ids: orderIds, order_count: orderIds.length }
       })
-      const isManager = ['admin', 'owner'].includes(req.user?.role || '')
-      if (approve_now && isManager && req.user?.userId) {
-        return approveSpeedafBatch(client, created.id, req.user.userId, req)
-      }
-      return created
+      if (!req.user?.userId) throw Object.assign(new Error('Authentication required'), { statusCode: 401 })
+      return recordSpeedafBatch(client, created.id, req.user.userId, req)
     })
     res.status(201).json(result)
   } catch (error: any) {
@@ -545,10 +551,190 @@ router.post('/cod/batches/:batchId/approve', async (req, res) => {
     return res.status(403).json({ error: { message: 'Manager approval is required' } })
   }
   try {
-    const result = await transaction(client => approveSpeedafBatch(client, req.params.batchId, req.user!.userId, req))
+    // Kept for payment batches submitted before immediate reconciliation was
+    // introduced. New batches are recorded during creation.
+    const result = await transaction(client => recordSpeedafBatch(client, req.params.batchId, req.user!.userId, req))
     res.json(result)
   } catch (error: any) {
     res.status(error.statusCode || 500).json({ error: { message: error.statusCode ? error.message : 'Unable to approve Speedaf payment batch' } })
+  }
+})
+
+router.post('/cod/batches/:batchId/revert', async (req, res) => {
+  if (!['admin', 'owner'].includes(req.user?.role || '')) {
+    return res.status(403).json({ error: { message: 'Management access is required' } })
+  }
+  const reason = String(req.body?.reason || '').trim()
+  if (!reason) return res.status(400).json({ error: { message: 'A reason for reverting this payment is required' } })
+
+  try {
+    const result = await transaction(async client => {
+      const batch = (await client.query(
+        'SELECT * FROM speedaf_remittance_batches WHERE id = $1 FOR UPDATE',
+        [req.params.batchId]
+      )).rows[0]
+      if (!batch) throw Object.assign(new Error('Speedaf payment not found'), { statusCode: 404 })
+      if (batch.status !== 'approved') {
+        throw Object.assign(new Error('Only a recorded Speedaf payment can be reverted'), { statusCode: 409 })
+      }
+
+      const allocations = (await client.query(
+        `SELECT a.*, o.order_number, o.status AS order_status, o.payment_status, o.paid_amount, o.total_amount,
+                cc.status AS cod_status, cc.remitted_amount
+         FROM speedaf_remittance_allocations a
+         JOIN orders o ON o.id = a.order_id
+         JOIN cod_collections cc ON cc.id = a.cod_collection_id
+         JOIN deliveries d ON d.order_id = o.id
+         WHERE a.batch_id = $1 AND a.active
+         ORDER BY o.order_number
+         FOR UPDATE OF o, cc, d`,
+        [batch.id]
+      )).rows
+      if (!allocations.length) throw Object.assign(new Error('This payment has no active order allocations'), { statusCode: 409 })
+
+      const closedCommissionPeriod = (await client.query(
+        `SELECT 1
+         FROM commission_transactions ct
+         JOIN commission_period_closures closure
+           ON closure.period_start = ct.commission_month AND closure.status = 'closed'
+         WHERE ct.order_id = ANY($1::uuid[])
+           AND ct.transaction_type = 'earned'
+           AND ct.transaction_status <> 'reversed'
+         LIMIT 1`,
+        [allocations.map((allocation: any) => allocation.order_id)]
+      )).rows[0]
+      if (closedCommissionPeriod) {
+        throw Object.assign(new Error('This payment belongs to a closed commission period and cannot be reopened here. Use a reviewed management adjustment.'), { statusCode: 409 })
+      }
+
+      // Validate every allocation first so the transaction cannot partially
+      // reopen a multi-order payment.
+      for (const allocation of allocations) {
+        if (allocation.order_status !== 'collected_paid' || !['remitted', 'closed'].includes(allocation.cod_status)) {
+          throw Object.assign(new Error(`Order ${allocation.order_number} has changed and cannot be safely reverted`), { statusCode: 409 })
+        }
+        if (Number(allocation.remitted_amount) + 0.005 < Number(allocation.gross_amount)) {
+          throw Object.assign(new Error(`Order ${allocation.order_number} no longer contains this full remittance`), { statusCode: 409 })
+        }
+        const internalReference = `${batch.batch_number}:${allocation.order_number}`
+        const evidence = (await client.query(
+          `SELECT
+             (SELECT COUNT(*)::int FROM cod_remittances WHERE order_id = $1 AND reference = $2) AS cod_count,
+             (SELECT COUNT(*)::int FROM order_payments WHERE order_id = $1 AND reference = $2) AS payment_count`,
+          [allocation.order_id, internalReference]
+        )).rows[0]
+        if (Number(evidence.cod_count) !== 1 || Number(evidence.payment_count) !== 1) {
+          throw Object.assign(new Error(`Payment evidence for order ${allocation.order_number} is incomplete; no changes were made`), { statusCode: 409 })
+        }
+      }
+
+      let commissionsReversed = 0
+      for (const allocation of allocations) {
+        const internalReference = `${batch.batch_number}:${allocation.order_number}`
+        await client.query('DELETE FROM cod_remittances WHERE order_id = $1 AND reference = $2', [allocation.order_id, internalReference])
+        await client.query('DELETE FROM order_payments WHERE order_id = $1 AND reference = $2', [allocation.order_id, internalReference])
+
+        const remainingRemitted = Math.max(0, Number(allocation.remitted_amount) - Number(allocation.gross_amount))
+        const previousRemittanceAt = (await client.query(
+          'SELECT MAX(received_at) AS received_at FROM cod_remittances WHERE cod_collection_id = $1',
+          [allocation.cod_collection_id]
+        )).rows[0]?.received_at || null
+        await client.query(
+          `UPDATE cod_collections
+           SET remitted_amount = $1,
+               status = CASE WHEN $1::numeric > 0 THEN 'partially_remitted' ELSE 'delivered_awaiting_remittance' END,
+               remitted_at = $2, closed_at = NULL, closed_by = NULL
+           WHERE id = $3`,
+          [remainingRemitted, previousRemittanceAt, allocation.cod_collection_id]
+        )
+
+        const paymentTotal = Number((await client.query(
+          'SELECT COALESCE(SUM(amount), 0) AS total FROM order_payments WHERE order_id = $1',
+          [allocation.order_id]
+        )).rows[0].total)
+        const paymentStatus = paymentTotal <= 0
+          ? 'pending'
+          : paymentTotal + 0.005 < Number(allocation.total_amount) ? 'partially_paid' : 'paid'
+        await client.query(
+          `UPDATE orders
+           SET paid_amount = $1, payment_status = $2, status = 'delivered',
+               commission_completion_by = NULL, commission_completion_at = NULL,
+               commission_verified_by = NULL, commission_verified_at = NULL,
+               commission_verification_reason = NULL, updated_at = NOW()
+           WHERE id = $3`,
+          [paymentTotal, paymentStatus, allocation.order_id]
+        )
+        await client.query("UPDATE deliveries SET delivery_status = 'delivered' WHERE order_id = $1", [allocation.order_id])
+
+        const earnings = (await client.query(
+          `SELECT id, order_item_id, eligible_quantity
+           FROM commission_transactions
+           WHERE order_id = $1 AND transaction_type = 'earned' AND transaction_status <> 'reversed'
+           ORDER BY created_at
+           FOR UPDATE`,
+          [allocation.order_id]
+        )).rows
+        for (const earning of earnings) {
+          const reversed = await reverseCommission(
+            earning.id,
+            allocation.order_id,
+            earning.order_item_id,
+            Number(earning.eligible_quantity),
+            `Speedaf payment ${batch.batch_number} reverted: ${reason}`,
+            req.user?.userId || null,
+            client,
+            'speedaf_remittance_batch_revert',
+            batch.id
+          )
+          if (reversed) commissionsReversed += 1
+        }
+
+        await logAudit({
+          req,
+          client,
+          action: 'speedaf_payment_reverted_for_order',
+          entityType: 'order',
+          entityId: allocation.order_id,
+          oldValues: { status: allocation.order_status, payment_status: allocation.payment_status, paid_amount: allocation.paid_amount, cod_status: allocation.cod_status, remitted_amount: allocation.remitted_amount },
+          newValues: { status: 'delivered', payment_status: paymentStatus, paid_amount: paymentTotal, cod_status: remainingRemitted > 0 ? 'partially_remitted' : 'delivered_awaiting_remittance', remitted_amount: remainingRemitted },
+          metadata: { batch_id: batch.id, batch_number: batch.batch_number, reason }
+        })
+      }
+
+      if (batch.fee_expense_id) {
+        await client.query(
+          "UPDATE expenses SET status = 'rejected', approved_by = $2, approved_at = NOW() WHERE id = $1",
+          [batch.fee_expense_id, req.user?.userId]
+        )
+      }
+      await client.query('UPDATE speedaf_remittance_allocations SET active = FALSE WHERE batch_id = $1', [batch.id])
+      const reverted = (await client.query(
+        `UPDATE speedaf_remittance_batches
+         SET status = 'reverted', reverted_by = $2, reverted_at = NOW(), revert_reason = $3, updated_at = NOW()
+         WHERE id = $1 RETURNING *`,
+        [batch.id, req.user?.userId, reason]
+      )).rows[0]
+      await logAudit({
+        req,
+        client,
+        action: 'speedaf_remittance_batch_reverted',
+        entityType: 'speedaf_remittance_batch',
+        entityId: batch.id,
+        oldValues: { status: batch.status, gross_amount: batch.gross_amount, net_amount: batch.net_amount, fee_amount: batch.fee_amount },
+        newValues: { status: 'reverted', reason },
+        metadata: { batch_number: batch.batch_number, reopened_orders: allocations.length, commissions_reversed: commissionsReversed }
+      })
+      return { ...reverted, reopened_orders: allocations.length, commissions_reversed: commissionsReversed }
+    })
+    res.json(result)
+  } catch (error: any) {
+    console.error('Speedaf payment revert failed:', error)
+    const migrationMissing = ['42P01', '42703'].includes(error.code)
+    res.status(error.statusCode || (migrationMissing ? 409 : 500)).json({
+      error: { message: migrationMissing
+        ? 'The Speedaf immediate-reconciliation database migration has not been applied'
+        : error.statusCode ? error.message : 'Unable to revert Speedaf payment' }
+    })
   }
 })
 

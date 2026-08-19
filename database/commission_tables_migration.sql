@@ -82,9 +82,9 @@ CREATE TABLE commission_payments (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
--- An order item can earn only once. Reversals are counter-entries, never a
--- license for a retroactive process to create a second earned transaction.
-CREATE UNIQUE INDEX uq_commission_transaction_order_item ON commission_transactions(order_item_id) WHERE transaction_type = 'earned';
+-- Only one active earning may exist per order item. A fully reversed earning
+-- remains as history while allowing a later corrected completion to qualify.
+CREATE UNIQUE INDEX uq_commission_transaction_order_item ON commission_transactions(order_item_id) WHERE transaction_type = 'earned' AND transaction_status <> 'reversed';
 CREATE INDEX idx_commission_transactions_salesperson ON commission_transactions(salesperson_id);
 CREATE INDEX idx_commission_transactions_month ON commission_transactions(commission_month);
 CREATE INDEX idx_commission_transactions_order ON commission_transactions(order_id);

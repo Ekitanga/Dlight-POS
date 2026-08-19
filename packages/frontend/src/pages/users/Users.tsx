@@ -47,7 +47,7 @@ export function Users() {
     'orders.view', 'orders.create', 'orders.status',
     'customers.view', 'customers.create', 'customers.edit', 'products.view', 'suppliers.view',
     'riders.view', 'couriers.view', 'deliveries.view', 'deliveries.manage',
-    'cod.view', 'inventory.view', 'receipts.view'
+    'cod.view', 'cod.remit', 'inventory.view', 'receipts.view'
   ]
 
   const { data: users = [], isLoading, error } = useQuery<User[]>({

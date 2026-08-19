@@ -35,7 +35,8 @@ for (const file of [
   'database/commission_period_closure_migration.sql',
   'database/commission_operational_hardening_migration.sql',
   'database/commission_business_policy_migration.sql',
-  'database/commission_initial_activation_fix_migration.sql'
+  'database/commission_initial_activation_fix_migration.sql',
+  'database/speedaf_immediate_reconciliation_migration.sql'
 ]) {
   await db.query(await fs.readFile(path.join(root, file), 'utf8'))
 }
@@ -548,7 +549,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(await count("SELECT COUNT(*) FROM audit_logs WHERE entity_id=$1 AND action='speedaf_tracking_auto_delivered'", [order.id]), 1)
   })
 
-  await t.test('5aa. attendant prepares a multi-order Speedaf payment and manager approves it', async () => {
+  await t.test('5aa. attendant records a multi-order Speedaf payment and management can revert it', async () => {
     const first = await createOrder({
       ...customer('Bulk COD One'), delivery_type: 'courier', courier_id: courier.id,
       courier_tracking_number: 'SPD-P6-BULK-1', courier_payment_type: 'cod',
@@ -575,12 +576,19 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
 
     const submitted = await request('POST', '/deliveries/cod/batches', attendant.accessToken, {
       order_ids: [first.id, second.id], net_amount: 1446, payment_date: isoDate(),
-      payment_method: 'bank_transfer', notes: 'Phase 6 bulk Speedaf test', approve_now: true
+      payment_method: 'bank_transfer', notes: 'Phase 6 bulk Speedaf test'
     }, 201)
-    assert.equal(submitted.status, 'pending_approval')
+    assert.equal(submitted.status, 'approved')
     assert.equal(Number(submitted.gross_amount), 1500)
     assert.equal(Number(submitted.fee_amount), 54)
-    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [first.id])).status, 'delivered')
+    assert.equal(submitted.completed_orders, 2)
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [first.id])).status, 'collected_paid')
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [second.id])).status, 'collected_paid')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=ANY($1::uuid[]) AND transaction_type='earned'", [[first.id, second.id]]), 2)
+    const fee = await row('SELECT amount,status,category FROM expenses WHERE id=$1', [submitted.fee_expense_id])
+    assert.equal(Number(fee.amount), 54)
+    assert.equal(fee.status, 'approved')
+    assert.equal(fee.category, 'Courier Transaction Fees')
 
     await request('POST', '/deliveries/cod/batches', attendant.accessToken, {
       order_ids: [first.id], net_amount: 600, payment_date: isoDate(),
@@ -591,18 +599,8 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
        WHERE notes='Duplicate active allocation'`
     ), 0)
 
-    const approved = await request('POST', `/deliveries/cod/batches/${submitted.id}/approve`, admin.accessToken, {}, 200)
-    assert.equal(approved.status, 'approved')
-    assert.equal(approved.completed_orders, 2)
-    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [first.id])).status, 'collected_paid')
-    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [second.id])).status, 'collected_paid')
-    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=ANY($1::uuid[]) AND transaction_type='earned'", [[first.id, second.id]]), 2)
-    const fee = await row('SELECT amount,status,category FROM expenses WHERE id=$1', [approved.fee_expense_id])
-    assert.equal(Number(fee.amount), 54)
-    assert.equal(fee.status, 'approved')
-    assert.equal(fee.category, 'Courier Transaction Fees')
     assert.equal(await count('SELECT COUNT(*) FROM speedaf_remittance_allocations WHERE batch_id=$1', [submitted.id]), 2)
-    assert.equal(await count("SELECT COUNT(*) FROM audit_logs WHERE entity_id=$1 AND action='speedaf_remittance_batch_approved'", [submitted.id]), 1)
+    assert.equal(await count("SELECT COUNT(*) FROM audit_logs WHERE entity_id=$1 AND action='speedaf_remittance_batch_recorded'", [submitted.id]), 1)
 
     const paymentHistory = await request('GET', '/deliveries/cod/payment-history', admin.accessToken)
     const recordedBatch = paymentHistory.find((payment: any) => payment.id === submitted.id)
@@ -614,6 +612,34 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(recordedBatch.allocations.reduce((sum: number, allocation: any) => sum + Number(allocation.commission_amount), 0), 100)
     assert.equal(paymentHistory.some((payment: any) => payment.source === 'legacy_single'), true)
     await request('GET', '/deliveries/cod/payment-history', attendant.accessToken, undefined, 403)
+
+    await request('POST', `/deliveries/cod/batches/${submitted.id}/revert`, attendant.accessToken, {
+      reason: 'Attendant must not be able to revert a payment'
+    }, 403)
+    const reverted = await request('POST', `/deliveries/cod/batches/${submitted.id}/revert`, admin.accessToken, {
+      reason: 'Test payment was captured against the wrong orders'
+    }, 200)
+    assert.equal(reverted.status, 'reverted')
+    assert.equal(reverted.reopened_orders, 2)
+    assert.equal(reverted.commissions_reversed, 2)
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [first.id])).status, 'delivered')
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [second.id])).status, 'delivered')
+    assert.equal((await row('SELECT status FROM cod_collections WHERE order_id=$1', [first.id])).status, 'delivered_awaiting_remittance')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=ANY($1::uuid[]) AND transaction_type='reversal'", [[first.id, second.id]]), 2)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=ANY($1::uuid[]) AND transaction_type='earned' AND transaction_status <> 'reversed'", [[first.id, second.id]]), 0)
+    assert.equal(await count("SELECT COUNT(*) FROM order_payments WHERE reference LIKE $1", [`${submitted.batch_number}:%`]), 0)
+    assert.equal(await count("SELECT COUNT(*) FROM cod_remittances WHERE reference LIKE $1", [`${submitted.batch_number}:%`]), 0)
+    assert.equal((await row('SELECT status FROM expenses WHERE id=$1', [submitted.fee_expense_id])).status, 'rejected')
+    assert.equal(await count('SELECT COUNT(*) FROM speedaf_remittance_allocations WHERE batch_id=$1 AND active', [submitted.id]), 0)
+    assert.equal(await count("SELECT COUNT(*) FROM audit_logs WHERE entity_id=$1 AND action='speedaf_remittance_batch_reverted'", [submitted.id]), 1)
+
+    const corrected = await request('POST', '/deliveries/cod/batches', attendant.accessToken, {
+      order_ids: [first.id, second.id], net_amount: 1446, payment_date: isoDate(),
+      payment_method: 'bank_transfer', notes: 'Corrected Phase 6 bulk Speedaf test'
+    }, 201)
+    assert.equal(corrected.status, 'approved')
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [first.id])).status, 'collected_paid')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=ANY($1::uuid[]) AND transaction_type='earned' AND transaction_status <> 'reversed'", [[first.id, second.id]]), 2)
   })
 
   await t.test('5b. Speedaf item COD with delivery fee paid directly to Speedaf', async () => {
