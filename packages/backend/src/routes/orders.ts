@@ -577,7 +577,9 @@ router.get('/', async (req, res) => {
     } else if (workflow_stage === 'in_transit') {
       conditions.push("o.status IN ('in_transit', 'dispatched')")
     } else if (workflow_stage === 'pending_payment') {
-      conditions.push("o.delivery_type = 'courier' AND o.courier_payment_type = 'cod' AND o.status = 'delivered'")
+      conditions.push(`o.delivery_type = 'courier' AND o.courier_payment_type = 'cod' AND o.status = 'delivered'
+        AND NOT EXISTS (SELECT 1 FROM order_refunds r WHERE r.order_id = o.id AND r.status = 'pending')
+        AND NOT EXISTS (SELECT 1 FROM cod_collections cc WHERE cc.order_id = o.id AND cc.status IN ('returned', 'lost'))`)
     } else if (workflow_stage === 'completed') {
       conditions.push("((o.status = 'delivered' AND NOT (o.delivery_type = 'courier' AND o.courier_payment_type = 'cod')) OR o.status = 'collected_paid')")
     } else if (workflow_stage === 'returned') {
