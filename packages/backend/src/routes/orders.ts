@@ -1006,6 +1006,26 @@ router.post('/:orderId/items/:itemId/returns', async (req, res) => {
         metadata: { order_number: order.order_number, reason: returnReason }
       })
 
+      const itemTotals = await client.query(
+        `SELECT COUNT(*)::int AS total, COUNT(*) FILTER (WHERE returned_quantity >= quantity)::int AS returned
+         FROM order_items WHERE order_id = $1`,
+        [orderId]
+      )
+      if (itemTotals.rows[0].total > 0 && itemTotals.rows[0].returned >= itemTotals.rows[0].total) {
+        await client.query(
+          `UPDATE orders SET status = 'returned', updated_at = NOW() WHERE id = $1 AND status <> 'returned'`,
+          [orderId]
+        )
+        await client.query(
+          `UPDATE cod_collections SET status = CASE WHEN status IN ('remitted', 'closed') THEN status ELSE 'returned' END WHERE order_id = $1`,
+          [orderId]
+        )
+        await client.query(
+          `UPDATE deliveries SET delivery_status = 'returned' WHERE order_id = $1`,
+          [orderId]
+        )
+      }
+
       return { item: updatedItem.rows[0], return: returnRecord.rows[0], reversals }
     })
 
