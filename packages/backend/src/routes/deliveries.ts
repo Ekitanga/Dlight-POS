@@ -30,7 +30,7 @@ function workflowCondition(stage: string): string | null {
     case 'in_transit':
       return "o.status IN ('in_transit', 'dispatched')"
     case 'pending_payment':
-      return "o.delivery_type = 'courier' AND o.courier_payment_type = 'cod' AND o.status = 'delivered' AND NOT EXISTS (SELECT 1 FROM order_refunds r WHERE r.order_id = o.id AND r.status = 'pending') AND NOT EXISTS (SELECT 1 FROM cod_collections cc WHERE cc.order_id = o.id AND cc.status IN ('returned', 'lost'))"
+      return "o.delivery_type = 'courier' AND o.courier_payment_type = 'cod' AND o.status = 'delivered' AND NOT EXISTS (SELECT 1 FROM order_refunds r WHERE r.order_id = o.id AND r.status = 'pending') AND NOT EXISTS (SELECT 1 FROM cod_collections cc WHERE cc.order_id = o.id AND cc.status IN ('returned', 'lost')) AND NOT EXISTS (SELECT 1 FROM order_item_returns oir WHERE oir.order_id = o.id)"
     case 'completed':
       return "((o.status = 'delivered' AND NOT (o.delivery_type = 'courier' AND o.courier_payment_type = 'cod')) OR o.status = 'collected_paid')"
     case 'returned':
