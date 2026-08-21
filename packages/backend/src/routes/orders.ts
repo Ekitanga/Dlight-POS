@@ -132,34 +132,158 @@ async function recalculateCustomerBalance(client: any, customerId: string) {
 }
 
 async function reverseOpenOrderRecords(client: any, req: any, order: any) {
+  // 1. Reverse any recorded Speedaf remittance allocated to this order. This
+  //    mirrors the per-allocation logic of a Speedaf batch revert, but scoped
+  //    to a single order so an admin can correct a mis-categorised order
+  //    without disturbing the rest of the batch.
+  const allocations = await client.query(
+    `SELECT a.id AS allocation_id, a.batch_id, a.gross_amount, a.cod_collection_id,
+            b.batch_number, b.fee_expense_id, cc.remitted_amount
+     FROM speedaf_remittance_allocations a
+     JOIN speedaf_remittance_batches b ON b.id = a.batch_id
+     JOIN cod_collections cc ON cc.id = a.cod_collection_id
+     WHERE a.order_id = $1 AND a.active
+     FOR UPDATE OF a, b, cc`,
+    [order.id]
+  )
+  for (const allocation of allocations.rows) {
+    const internalReference = `${allocation.batch_number}:${order.order_number}`
+    const evidence = await client.query(
+      `SELECT (SELECT COUNT(*)::int FROM cod_remittances WHERE order_id = $1 AND reference = $2) AS cod_count,
+              (SELECT COUNT(*)::int FROM order_payments WHERE order_id = $1 AND reference = $2) AS payment_count`,
+      [order.id, internalReference]
+    )
+    if (Number(evidence.rows[0].cod_count) === 1 && Number(evidence.rows[0].payment_count) === 1) {
+      await client.query('DELETE FROM cod_remittances WHERE order_id = $1 AND reference = $2', [order.id, internalReference])
+      await client.query('DELETE FROM order_payments WHERE order_id = $1 AND reference = $2', [order.id, internalReference])
+    }
+    const remainingRemitted = Math.max(0, Number(allocation.remitted_amount) - Number(allocation.gross_amount))
+    await client.query(
+      `UPDATE cod_collections
+       SET remitted_amount = $1,
+           status = CASE WHEN $1::numeric > 0 THEN 'partially_remitted' ELSE 'delivered_awaiting_remittance' END,
+           remitted_at = NULL, closed_at = NULL, closed_by = NULL
+       WHERE id = $2`,
+      [remainingRemitted, allocation.cod_collection_id]
+    )
+    const paymentTotal = Number((await client.query('SELECT COALESCE(SUM(amount), 0) AS total FROM order_payments WHERE order_id = $1', [order.id])).rows[0].total)
+    const paymentStatus = paymentTotal <= 0 ? 'pending' : paymentTotal + 0.005 < Number(order.total_amount) ? 'partially_paid' : 'paid'
+    await client.query(
+      `UPDATE orders
+       SET paid_amount = $1, payment_status = $2, status = 'delivered',
+           commission_completion_by = NULL, commission_completion_at = NULL,
+           commission_verified_by = NULL, commission_verified_at = NULL, commission_verification_reason = NULL,
+           updated_at = NOW()
+       WHERE id = $3`,
+      [paymentTotal, paymentStatus, order.id]
+    )
+    await client.query("UPDATE deliveries SET delivery_status = 'delivered' WHERE order_id = $1", [order.id])
+    const earnings = await client.query(
+      `SELECT id, order_item_id, eligible_quantity
+       FROM commission_transactions
+       WHERE order_id = $1 AND transaction_type = 'earned' AND transaction_status <> 'reversed'
+       ORDER BY created_at FOR UPDATE`,
+      [order.id]
+    )
+    for (const earning of earnings.rows) {
+      await reverseCommission(
+        earning.id, order.id, earning.order_item_id, Number(earning.eligible_quantity),
+        `Admin order edit reversed Speedaf remittance for ${order.order_number}`,
+        req.user?.userId || null, client, 'order_edit', order.id
+      )
+    }
+    await client.query('UPDATE speedaf_remittance_allocations SET active = FALSE WHERE id = $1', [allocation.allocation_id])
+    const otherActive = await client.query(
+      'SELECT COUNT(*)::int AS c FROM speedaf_remittance_allocations WHERE batch_id = $1 AND active',
+      [allocation.batch_id]
+    )
+    if (otherActive.rows[0].c === 0 && allocation.fee_expense_id) {
+      await client.query("UPDATE expenses SET status = 'rejected', approved_by = $2, approved_at = NOW() WHERE id = $1", [allocation.fee_expense_id, req.user?.userId || null])
+      await client.query(
+        "UPDATE speedaf_remittance_batches SET status = 'reverted', reverted_by = $2, reverted_at = NOW(), revert_reason = 'Reversed by admin order edit', updated_at = NOW() WHERE id = $1",
+        [allocation.batch_id, req.user?.userId || null]
+      )
+    }
+    await logAudit({
+      req, client, action: 'speedaf_payment_reverted_for_order', entityType: 'order', entityId: order.id,
+      newValues: { reason: 'Admin order edit' },
+      metadata: { batch_id: allocation.batch_id, batch_number: allocation.batch_number }
+    })
+  }
+
+  // Direct per-order COD remittances (recorded without a batch allocation) are
+  // reversed here so the order and its COD can be fully rebuilt.
+  const directRemittances = await client.query('SELECT id, reference FROM cod_remittances WHERE order_id = $1', [order.id])
+  for (const rem of directRemittances.rows) {
+    await client.query('DELETE FROM cod_remittances WHERE id = $1', [rem.id])
+    await client.query('DELETE FROM order_payments WHERE order_id = $1 AND reference = $2', [order.id, rem.reference])
+  }
+  if (directRemittances.rows.length > 0) {
+    const paymentTotal = Number((await client.query('SELECT COALESCE(SUM(amount), 0) AS total FROM order_payments WHERE order_id = $1', [order.id])).rows[0].total)
+    const paymentStatus = paymentTotal <= 0 ? 'pending' : paymentTotal + 0.005 < Number(order.total_amount) ? 'partially_paid' : 'paid'
+    await client.query(
+      `UPDATE orders
+       SET paid_amount = $1, payment_status = $2, status = 'delivered',
+           commission_completion_by = NULL, commission_completion_at = NULL,
+           commission_verified_by = NULL, commission_verified_at = NULL, commission_verification_reason = NULL,
+           updated_at = NOW()
+       WHERE id = $3`,
+      [paymentTotal, paymentStatus, order.id]
+    )
+    await client.query("UPDATE deliveries SET delivery_status = 'delivered' WHERE order_id = $1", [order.id])
+    await client.query(
+      `UPDATE cod_collections SET remitted_amount = 0, status = 'delivered_awaiting_remittance', remitted_at = NULL, closed_at = NULL, closed_by = NULL WHERE order_id = $1`,
+      [order.id]
+    )
+    const earnings = await client.query(
+      `SELECT id, order_item_id, eligible_quantity FROM commission_transactions WHERE order_id = $1 AND transaction_type = 'earned' AND transaction_status <> 'reversed' ORDER BY created_at FOR UPDATE`,
+      [order.id]
+    )
+    for (const earning of earnings.rows) {
+      await reverseCommission(
+        earning.id, order.id, earning.order_item_id, Number(earning.eligible_quantity),
+        `Admin order edit reversed Speedaf remittance for ${order.order_number}`,
+        req.user?.userId || null, client, 'order_edit', order.id
+      )
+    }
+    await logAudit({
+      req, client, action: 'speedaf_payment_reverted_for_order', entityType: 'order', entityId: order.id,
+      newValues: { reason: 'Admin order edit' },
+      metadata: { order_number: order.order_number, direct_remittances: directRemittances.rows.length }
+    })
+  }
+
+  // 2. Settled financials that must be reversed through their own workflows
+  //    before an order can be rebuilt.
   const paidPayables = await client.query(
-    'SELECT COUNT(*)::int AS count FROM supplier_payables WHERE order_id = $1 AND paid_amount > 0',
+    `SELECT COUNT(*)::int AS c FROM supplier_payments sp JOIN supplier_payables p ON p.id = sp.payable_id WHERE p.order_id = $1`,
     [order.id]
   )
-  if (paidPayables.rows[0].count > 0) {
-    throw Object.assign(new Error('This order has supplier payments. Reverse those payments before editing the order.'), { statusCode: 409 })
+  if (paidPayables.rows[0].c > 0) {
+    throw Object.assign(new Error('This order has paid supplier payments. Reverse those payments before editing the order.'), { statusCode: 409 })
   }
-
-  const remittedCod = await client.query(
-    'SELECT COUNT(*)::int AS count FROM cod_collections WHERE order_id = $1 AND remitted_amount > 0',
+  const paidRefunds = await client.query(
+    "SELECT COUNT(*)::int AS c FROM order_refunds WHERE order_id = $1 AND status = 'paid'",
     [order.id]
   )
-  if (remittedCod.rows[0].count > 0) {
-    throw Object.assign(new Error('This order has Speedaf remittance records. It cannot be edited directly.'), { statusCode: 409 })
+  if (paidRefunds.rows[0].c > 0) {
+    throw Object.assign(new Error('This order has paid refunds. Handle those refunds before editing the order.'), { statusCode: 409 })
   }
 
-  const nonSaleCredits = await client.query(
-    "SELECT COUNT(*)::int AS count FROM customer_credits WHERE order_id = $1 AND type <> 'sale'",
-    [order.id]
-  )
-  if (nonSaleCredits.rows[0].count > 0) {
-    throw Object.assign(new Error('This order has customer payment or adjustment records. It cannot be edited directly.'), { statusCode: 409 })
+  // 3. Customer credits and payments are reversed and the balance recalculated.
+  const customerRow = await client.query('SELECT customer_id FROM orders WHERE id = $1', [order.id])
+  const customerId = customerRow.rows[0]?.customer_id
+  await client.query('DELETE FROM customer_credits WHERE order_id = $1', [order.id])
+  await client.query('DELETE FROM order_payments WHERE order_id = $1', [order.id])
+  if (customerId) {
+    await client.query(
+      'UPDATE customers SET balance = GREATEST(0, COALESCE((SELECT SUM(amount) FROM customer_credits WHERE customer_id = $1), 0)) WHERE id = $1',
+      [customerId]
+    )
   }
 
-  const refunds = await client.query('SELECT COUNT(*)::int AS count FROM order_refunds WHERE order_id = $1', [order.id])
-  if (refunds.rows[0].count > 0) {
-    throw Object.assign(new Error('This order already has refund records. It cannot be edited directly.'), { statusCode: 409 })
-  }
+  // 4. Pending refunds are cleared (paid refunds are blocked above).
+  await client.query("DELETE FROM order_refunds WHERE order_id = $1 AND status = 'pending'", [order.id])
 
   const previousItems = await client.query('SELECT * FROM order_items WHERE order_id = $1 FOR UPDATE', [order.id])
   for (const item of previousItems.rows) {
@@ -201,6 +325,10 @@ async function reverseOpenOrderRecords(client: any, req: any, order: any) {
 
   await client.query('DELETE FROM order_payments WHERE order_id = $1', [order.id])
   await client.query('DELETE FROM cod_collections WHERE order_id = $1', [order.id])
+  // Child rows that reference order_items must be removed before the items
+  // themselves (commissions/returns may already be reversed above).
+  await client.query('DELETE FROM commission_transactions WHERE order_item_id IN (SELECT id FROM order_items WHERE order_id = $1)', [order.id])
+  await client.query('DELETE FROM order_item_returns WHERE order_item_id IN (SELECT id FROM order_items WHERE order_id = $1)', [order.id])
   await client.query('DELETE FROM deliveries WHERE order_id = $1', [order.id])
   await client.query('DELETE FROM order_items WHERE order_id = $1', [order.id])
 
@@ -680,9 +808,10 @@ router.put('/:id', async (req, res) => {
       }
 
       const editableStage = normalizedWorkflowStatus(order.status)
-      if (!['pending', 'confirmed'].includes(editableStage)) {
+      const isManagement = ['admin', 'owner'].includes(req.user?.role || '')
+      if (!['pending', 'confirmed'].includes(editableStage) && !isManagement) {
         throw Object.assign(
-          new Error('Only pending or confirmed orders can be edited directly. Use status changes, returns, refunds, or adjustments for dispatched and completed orders.'),
+          new Error('Only pending or confirmed orders can be edited directly. Management can edit any stage; otherwise use status changes, returns, refunds, or adjustments.'),
           { statusCode: 409 }
         )
       }

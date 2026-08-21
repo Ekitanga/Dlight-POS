@@ -379,7 +379,8 @@ function ProductSearchSelect({ value, onChange, resultsId, selectedProduct }: Pr
 }
 
 export function Orders() {
-  const { hasPermission } = useAuthStore()
+  const { user, hasPermission } = useAuthStore()
+  const isAdminOrOwner = user?.role === 'admin' || user?.role === 'owner'
   const [searchParams] = useSearchParams()
   const [search, setSearch] = useState('')
   const requestedStage = searchParams.get('workflow_stage') || 'all'
@@ -723,7 +724,10 @@ export function Orders() {
     return firstRoutineAction?.value || ''
   }
 
-  const canEditOrderDetails = (order: Order) => ['pending', 'confirmed'].includes(simplifiedStatus(order.status, order))
+  const canEditOrderDetails = (order: Order) => {
+    const isManagement = user?.role === 'admin' || user?.role === 'owner'
+    return isManagement || ['pending', 'confirmed'].includes(simplifiedStatus(order.status, order))
+  }
   const canUpdateOrderStatus = () => hasPermission('orders.status')
 
   const itemRemainingToReturn = (item: OrderDetailItem) => Math.max(0, Number(item.quantity || 0) - Number(item.returned_quantity || 0))
@@ -1196,7 +1200,7 @@ export function Orders() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                {selectedOrderDetail && hasPermission('orders.edit') && canEditOrderDetails(selectedOrderDetail.order) && (
+                {selectedOrderDetail && (isAdminOrOwner || hasPermission('orders.edit')) && canEditOrderDetails(selectedOrderDetail.order) && (
                   <button
                     type="button"
                     onClick={() => openOrderEdit(selectedOrderDetail)}

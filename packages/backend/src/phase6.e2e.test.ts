@@ -501,6 +501,38 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await assertGlobalIntegrity()
   })
 
+  await t.test('5ab. admin rebuilds a collected Speedaf COD order into a prepaid courier order', async () => {
+    const order = await createOrder({
+      ...customer('Prepaid Fix'), delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-FIX', courier_payment_type: 'cod',
+      customer_delivery_fee: 200, actual_courier_fee: 150, payment_method: 'mpesa',
+      items: [internalItem(stockProduct.id, 1, 1000)]
+    }, attendant.accessToken)
+    await advance(order.id, ['confirmed', 'in_transit', 'delivered'])
+    await request('POST', `/deliveries/orders/${order.id}/cod`, admin.accessToken, {
+      amount: 1000, reference: 'SPD-P6-FIX-REM', payment_method: 'bank_transfer'
+    }, 201)
+    const before = await row('SELECT status, payment_status, paid_amount FROM orders WHERE id=$1', [order.id])
+    assert.equal(before.status, 'collected_paid')
+    assert.equal(await count('SELECT COUNT(*) FROM cod_collections WHERE order_id=$1 AND status=$2', [order.id, 'remitted']), 1)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned' AND transaction_status<>'reversed'", [order.id]), 1)
+
+    const fixed = await request('PUT', `/orders/${order.id}`, admin.accessToken, {
+      ...customer('Prepaid Fix'), delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-FIX', courier_payment_type: 'prepaid',
+      customer_delivery_fee: 200, actual_courier_fee: 150, payment_method: 'mpesa',
+      items: [internalItem(stockProduct.id, 1, 1000)]
+    })
+    assert.equal(fixed.id, order.id)
+    assert.equal(fixed.delivery_type, 'courier')
+    assert.equal(fixed.courier_payment_type, 'prepaid')
+    assert.equal(await count('SELECT COUNT(*) FROM cod_collections WHERE order_id=$1', [order.id]), 0)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned' AND transaction_status<>'reversed'", [order.id]), 0)
+    assert.equal(await count('SELECT COUNT(*) FROM cod_remittances WHERE order_id=$1', [order.id]), 0)
+    await waitForAudit('order_updated', order.id)
+    await assertGlobalIntegrity()
+  })
+
   await t.test('5a. Speedaf tracking moves a collected parcel to pending payment only', async () => {
     assert.equal(isSpeedafDeliveredCollectedEvent('Parcel delivered Collectedand Received'), true)
     assert.equal(isSpeedafDeliveredCollectedEvent('Parcel delivered - Collected and Received'), true)
@@ -1033,13 +1065,15 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await waitForAudit('order_updated', attendantOrder.id)
 
     await advance(attendantOrder.id, ['confirmed', 'delivered'])
-    await request('PUT', `/orders/${attendantOrder.id}`, admin.accessToken, {
+    const adminLateEdit = await request('PUT', `/orders/${attendantOrder.id}`, admin.accessToken, {
       ...customer('Admin Late Edit'),
       delivery_type: 'walk_in',
       payment_method: 'cash',
       sale_date: isoDate(),
       items: [internalItem(stockProduct.id, 1, 100)]
-    }, 409)
+    })
+    assert.equal(adminLateEdit.id, attendantOrder.id)
+    assert.equal(Number(adminLateEdit.total_amount), 100)
     await request('GET', '/reports/profit', attendant.accessToken, undefined, 403)
     await request('PUT', '/settings', attendant.accessToken, { company_name: 'Forbidden' }, 403)
     await request('POST', `/suppliers/${supplier.id}/settlements`, attendant.accessToken, {
