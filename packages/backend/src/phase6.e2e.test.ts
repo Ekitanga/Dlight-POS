@@ -20,6 +20,7 @@ const db = new Pool({ connectionString: testUrl.toString() })
 const root = path.resolve(process.cwd(), '../..')
 for (const file of [
   'database/schema.sql',
+  'database/trial_balance_migration.sql',
   'database/production_stabilization_phase1.sql',
   'database/permissions_migration.sql',
   'database/production_stabilization_permissions.sql',
@@ -38,7 +39,11 @@ for (const file of [
   'database/commission_initial_activation_fix_migration.sql',
   'database/speedaf_immediate_reconciliation_migration.sql'
 ]) {
-  await db.query(await fs.readFile(path.join(root, file), 'utf8'))
+  const sql = await fs.readFile(path.join(root, file), 'utf8')
+  // schema.sql uses psql's relative include for production/fresh installs.
+  // The pg driver does not understand psql meta-commands, and the included
+  // migration is executed explicitly above in this test bootstrap.
+  await db.query(file === 'database/schema.sql' ? sql.replace(/^\\ir .*$/gm, '') : sql)
 }
 
 const password = 'Phase6-Test-Password!'
@@ -2029,6 +2034,88 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
          AND effective_to IS NULL`
     )
     assert.ok(deliberateDisabled.count > 0)
+  })
+
+  await t.test('20. accounting cutover and trial balance stay balanced after a sale', async () => {
+    const before = await request('GET', '/reports/trial-balance/status', admin.accessToken)
+    assert.equal(before.enabled, false)
+    assert.ok(Number(before.suggestedBalances.inventory) > 0)
+
+    const today = isoDate()
+    const activated = await request('POST', '/reports/trial-balance/activate', admin.accessToken, {
+      cutover_date: today,
+      cash: 1000,
+      mpesa: 500,
+      bank: 250
+    }, 201)
+    assert.equal(activated.enabled, true)
+    assert.equal(activated.cutoverDate, today)
+    await request('POST', '/reports/trial-balance/activate', admin.accessToken, {
+      cutover_date: today,
+      cash: 1000,
+      mpesa: 500,
+      bank: 250
+    }, 409)
+
+    const order = await createOrder({
+      ...customer('Trial Balance'),
+      delivery_type: 'walk_in',
+      payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 175)]
+    })
+    await advance(order.id, ['confirmed', 'delivered'])
+
+    const report = await request(
+      'GET',
+      `/reports/trial-balance?date_from=${today}&date_to=${today}`,
+      admin.accessToken
+    )
+    assert.equal(report.enabled, true)
+    assert.equal(report.totals.isBalanced, true)
+    assert.equal(Number(report.totals.difference), 0)
+    assert.equal(Number(report.totals.periodDebit), Number(report.totals.periodCredit))
+    assert.ok(report.rows.some((entry: any) => entry.code === '1000'))
+    assert.ok(report.rows.some((entry: any) => entry.code === '4000'))
+    assert.ok(report.rows.some((entry: any) => entry.code === '5000'))
+    assert.ok(report.rows.some((entry: any) => entry.code === '1200'))
+
+    await request('PUT', `/orders/${order.id}/status`, admin.accessToken, {
+      status: 'returned',
+      notes: 'Trial-balance full return'
+    })
+    const refund = await row(`SELECT id FROM order_refunds WHERE order_id=$1 AND status='pending'`, [order.id])
+    await request('POST', `/orders/refunds/${refund.id}/pay`, admin.accessToken, {
+      payment_method: 'cash',
+      reference: 'TB-RETURN-REFUND'
+    })
+    for (const event of ['refund_due', 'converted_to_sale_reversal', 'paid']) {
+      assert.equal(await count(
+        `SELECT COUNT(*) FROM journal_entries WHERE source_type='order_refund' AND source_id=$1 AND source_event=$2`,
+        [refund.id, event]
+      ), 1)
+    }
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM journal_entries WHERE source_type='order' AND source_id=$1 AND source_event='sale_reversed'`,
+      [order.id]
+    ), 1)
+
+    const afterReturn = await request(
+      'GET',
+      `/reports/trial-balance?date_from=${today}&date_to=${today}`,
+      admin.accessToken
+    )
+    assert.equal(afterReturn.totals.isBalanced, true)
+    assert.equal(Number(afterReturn.totals.difference), 0)
+
+    const unbalanced = await count(`
+      SELECT COUNT(*) FROM (
+        SELECT je.id
+        FROM journal_entries je JOIN journal_lines jl ON jl.journal_entry_id=je.id
+        GROUP BY je.id
+        HAVING ABS(SUM(jl.debit)-SUM(jl.credit)) >= 0.005
+      ) entries
+    `)
+    assert.equal(unbalanced, 0)
   })
 })
 

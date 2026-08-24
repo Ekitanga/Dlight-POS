@@ -7,6 +7,8 @@ BEGIN;
 TRUNCATE TABLE
     approvals,
     audit_logs,
+    journal_lines,
+    journal_entries,
     brands,
     categories,
     cod_collections,
@@ -38,6 +40,14 @@ TRUNCATE TABLE
     supplier_settlements,
     suppliers
 RESTART IDENTITY CASCADE;
+
+UPDATE accounting_settings
+SET enabled = FALSE,
+    cutover_date = NULL,
+    activated_by = NULL,
+    activated_at = NULL,
+    updated_at = NOW()
+WHERE singleton_key = TRUE;
 
 DELETE FROM users
 WHERE LOWER(email) = 'uat.attendant@dlight.test'

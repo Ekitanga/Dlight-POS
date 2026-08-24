@@ -28,6 +28,30 @@ interface Overview {
   pendingActions: Row
 }
 
+interface AccountingStatus {
+  enabled: boolean
+  cutoverDate: string | null
+  activatedAt: string | null
+  suggestedBalances: Record<string, number>
+}
+
+interface TrialBalanceData {
+  enabled: boolean
+  cutoverDate: string | null
+  period: { dateFrom: string; dateTo: string }
+  rows: Row[]
+  totals: {
+    openingDebit: number
+    openingCredit: number
+    periodDebit: number
+    periodCredit: number
+    closingDebit: number
+    closingCredit: number
+    difference: number
+    isBalanced: boolean
+  }
+}
+
 const departments = [
   { id: 'overview', label: 'Business Overview', icon: TrendingUp },
   { id: 'sales', label: 'Sales & Profit', icon: Banknote },
@@ -52,7 +76,7 @@ const departmentReports: Record<string, Array<[string, string]>> = {
     ['cod-ageing', 'COD Ageing']
   ],
   customers: [['customer-credit', 'Customer Credit']],
-  finance: [['expenses', 'Approved Expenses'], ['reconciliation', 'Daily Reconciliation'], ['refunds', 'Pending Refunds']],
+  finance: [['trial-balance', 'Trial Balance'], ['expenses', 'Approved Expenses'], ['reconciliation', 'Daily Reconciliation'], ['refunds', 'Pending Refunds']],
   audit: [['audit', 'Activity Log']]
 }
 
@@ -92,13 +116,25 @@ const reportLabelOverrides: Record<string, Record<string, string>> = {
     reorder_gap: 'Add This Many',
     days_of_stock_remaining: 'Days Left',
     recommendation: 'Action'
+  },
+  'trial-balance': {
+    code: 'Code',
+    account: 'Account',
+    account_type: 'Type',
+    opening_debit: 'Opening Debit',
+    opening_credit: 'Opening Credit',
+    period_debit: 'Period Debit',
+    period_credit: 'Period Credit',
+    closing_debit: 'Closing Debit',
+    closing_credit: 'Closing Credit'
   }
 }
 const reportLabel = (report: string, key: string) => reportLabelOverrides[report]?.[key] ?? label(key)
 const reportHelp: Record<string, string> = {
   inventory: 'Current Stock shows what is physically available, reserved, damaged, returned, and the estimated stock value.',
   'category-demand': 'Demand By Category shows which product categories sold most in the selected period.',
-  'product-demand': 'Restock Advice uses sales in the selected period to estimate stock needs. Needed For 14/30 Days is the stock level required to cover that many days. Add This Many is the extra quantity needed after comparing that estimate with Stock Now.'
+  'product-demand': 'Restock Advice uses sales in the selected period to estimate stock needs. Needed For 14/30 Days is the stock level required to cover that many days. Add This Many is the extra quantity needed after comparing that estimate with Stock Now.',
+  'trial-balance': 'Opening columns contain all posted activity before the From date. Period columns contain activity inside the selected range. Closing columns are the account balances at the To date.'
 }
 const clientCourierReports = ['speedaf-orders', 'courier-cod-ledger']
 const technicalKey = (key: string) => key === 'id' || key === 'tracking_url' || key.endsWith('_id') || ['created_by', 'approved_by', 'closed_by'].includes(key)
@@ -106,7 +142,7 @@ const dateKey = (key: string) => /(^date$|date$|_at$|last_purchase|last_delivery
 const moneyKey = (key: string) => [
   'amount', 'sales', 'cost', 'profit', 'expense', 'paid', 'payable', 'earnings',
   'cash', 'mpesa', 'variance', 'balance', 'revenue', 'value', 'price', 'fee',
-  'credit', 'subtotal', 'total', 'refund'
+  'credit', 'debit', 'subtotal', 'total', 'refund'
 ].some(term => key.includes(term)) && !/(method|status|date|count|number|margin)/.test(key)
 const phoneKey = (key: string) => /(^phone$|phone|mobile|tel|fax)/.test(key)
 const countKey = (key: string) => /(^quantity$|quantity|orders|deliveries|units|days|level|count|available_stock|suggested_stock|reorder_gap)/.test(key)
@@ -183,7 +219,7 @@ function BarList({ title, rows, nameKey, valueKey, format = money }: {
 }
 
 export function Reports() {
-  const { hasPermission } = useAuthStore()
+  const { hasPermission, user } = useAuthStore()
   const queryClient = useQueryClient()
   const [searchParams] = useSearchParams()
   const requestedDepartment = searchParams.get('department') || 'overview'
@@ -202,6 +238,10 @@ export function Reports() {
   const [selectedRefund, setSelectedRefund] = useState<Row | null>(null)
   const [refundMethod, setRefundMethod] = useState('cash')
   const [refundReference, setRefundReference] = useState('')
+  const [showZeroAccounts, setShowZeroAccounts] = useState(false)
+  const [openingCash, setOpeningCash] = useState('')
+  const [openingMpesa, setOpeningMpesa] = useState('')
+  const [openingBank, setOpeningBank] = useState('')
   const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo })
   const reconciliationDate = dateFrom === dateTo ? dateFrom : dateTo
 
@@ -226,7 +266,17 @@ export function Reports() {
       }
       return (await axios.get(`/api/reports/${report}?${params}`)).data
     },
-    enabled: department !== 'overview' && report !== 'reconciliation'
+    enabled: department !== 'overview' && !['reconciliation', 'trial-balance'].includes(report)
+  })
+  const { data: accounting, isLoading: accountingLoading } = useQuery<AccountingStatus>({
+    queryKey: ['accounting-status'],
+    queryFn: async () => (await axios.get('/api/reports/trial-balance/status')).data,
+    enabled: report === 'trial-balance'
+  })
+  const { data: trialBalance, isLoading: trialBalanceLoading } = useQuery<TrialBalanceData>({
+    queryKey: ['trial-balance', dateFrom, dateTo, showZeroAccounts],
+    queryFn: async () => (await axios.get(`/api/reports/trial-balance?${params}&show_zero=${showZeroAccounts}`)).data,
+    enabled: report === 'trial-balance' && accounting?.enabled === true
   })
   const { data: reconciliations = [] } = useQuery<Row[]>({
     queryKey: ['reconciliations', dateFrom, dateTo],
@@ -259,6 +309,20 @@ export function Reports() {
       queryClient.invalidateQueries({ queryKey: ['report-detail', 'refunds'] })
     }
   })
+  const activateAccounting = useMutation({
+    mutationFn: async () => (await axios.post('/api/reports/trial-balance/activate', {
+      cutover_date: todayDate(),
+      cash: Number(openingCash || 0),
+      mpesa: Number(openingMpesa || 0),
+      bank: Number(openingBank || 0)
+    })).data,
+    onSuccess: () => {
+      setMessage('Accounting activated. The opening journal has been posted and locked.')
+      queryClient.invalidateQueries({ queryKey: ['accounting-status'] })
+      queryClient.invalidateQueries({ queryKey: ['trial-balance'] })
+    },
+    onError: (error: any) => setMessage(error.response?.data?.error?.message || 'Unable to activate accounting')
+  })
 
   const selectDepartment = (next: string) => {
     setDepartment(next)
@@ -266,7 +330,9 @@ export function Reports() {
     if (firstReport) setReport(firstReport)
     setPage(1)
   }
-  const rawRows = report === 'reconciliation'
+  const rawRows = report === 'trial-balance'
+    ? trialBalance?.rows || []
+    : report === 'reconciliation'
     ? reconciliations
     : Array.isArray(detailData) ? detailData : detailData ? [detailData] : []
   const visibleRows = rawRows.slice((page - 1) * pageSize, page * pageSize)
@@ -284,7 +350,18 @@ export function Reports() {
     URL.revokeObjectURL(url)
   }
   const exportExcel = () => {
-    const businessRows = rawRows.map(row => Object.fromEntries(Object.entries(row).filter(([key]) => !technicalKey(key))))
+    const rowsForExport = report === 'trial-balance' && trialBalance
+      ? [...rawRows, {
+          code: '', account: 'TOTAL', account_type: '',
+          opening_debit: trialBalance.totals.openingDebit,
+          opening_credit: trialBalance.totals.openingCredit,
+          period_debit: trialBalance.totals.periodDebit,
+          period_credit: trialBalance.totals.periodCredit,
+          closing_debit: trialBalance.totals.closingDebit,
+          closing_credit: trialBalance.totals.closingCredit
+        }]
+      : rawRows
+    const businessRows = rowsForExport.map(row => Object.fromEntries(Object.entries(row).filter(([key]) => !technicalKey(key))))
     const table = `<table><thead><tr>${headers.map(header => `<th>${reportLabel(report, header)}</th>`).join('')}</tr></thead><tbody>${businessRows.map(row => `<tr>${headers.map(header => `<td>${formatCell(header, row[header])}</td>`).join('')}</tr>`).join('')}</tbody></table>`
     const url = URL.createObjectURL(new Blob([table], { type: 'application/vnd.ms-excel' }))
     const anchor = document.createElement('a')
@@ -366,6 +443,49 @@ export function Reports() {
         </div>
       </div>
 
+      {report === 'trial-balance' && (accountingLoading ? (
+        <div className="h-48 animate-pulse rounded-lg bg-muted" />
+      ) : accounting?.enabled === false ? (
+        <section className="space-y-5 rounded-lg border bg-card p-5">
+          <div>
+            <h2 className="text-lg font-semibold">Activate accounting ledger</h2>
+            <p className="mt-1 max-w-4xl text-sm leading-6 text-muted-foreground">The operational balances below will be captured in a locked opening journal dated today. Enter the physically verified liquid balances before activation. This is a one-time accounting cutover.</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {Object.entries(accounting.suggestedBalances).map(([key, value]) => <div key={key} className="rounded-lg border p-3"><div className="text-xs uppercase text-muted-foreground">{label(key)}</div><strong className="mt-1 block">{money(value)}</strong></div>)}
+          </div>
+          {['admin', 'owner'].includes(String(user?.role)) ? <>
+            <div className="grid gap-3 sm:grid-cols-3">
+              <label className="text-sm font-medium">Verified cash on hand<input type="number" min="0" step="0.01" value={openingCash} onChange={event => setOpeningCash(event.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2" /></label>
+              <label className="text-sm font-medium">Verified M-Pesa balance<input type="number" min="0" step="0.01" value={openingMpesa} onChange={event => setOpeningMpesa(event.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2" /></label>
+              <label className="text-sm font-medium">Verified bank balance<input type="number" min="0" step="0.01" value={openingBank} onChange={event => setOpeningBank(event.target.value)} className="mt-1 w-full rounded-lg border px-3 py-2" /></label>
+            </div>
+            <button type="button" disabled={activateAccounting.isPending}
+              onClick={() => window.confirm('Activate accounting using these verified balances? The opening journal cannot be edited afterward.') && activateAccounting.mutate()}
+              className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50">
+              {activateAccounting.isPending ? 'Activating...' : `Post opening balances for ${formatDate(todayDate())}`}
+            </button>
+          </> : <p className="rounded-lg bg-muted px-4 py-3 text-sm">An administrator or owner must verify the liquid balances and activate accounting.</p>}
+          {message && <p className="text-sm">{message}</p>}
+        </section>
+      ) : trialBalance ? (
+        <section className="space-y-4">
+          <div className={`flex flex-col gap-3 rounded-lg border p-4 sm:flex-row sm:items-center sm:justify-between ${trialBalance.totals.isBalanced ? 'border-primary/30 bg-primary/5' : 'border-destructive/40 bg-destructive/5'}`}>
+            <div className="flex items-center gap-3">
+              {trialBalance.totals.isBalanced ? <CheckCircle2 className="h-6 w-6 text-primary" /> : <AlertCircle className="h-6 w-6 text-destructive" />}
+              <div><strong>{trialBalance.totals.isBalanced ? 'Trial balance is balanced' : 'Trial balance is out of balance'}</strong><p className="text-sm text-muted-foreground">Cutover: {formatDate(trialBalance.cutoverDate)} · Difference: {money(Math.abs(trialBalance.totals.difference))}</p></div>
+            </div>
+            <label className="inline-flex items-center gap-2 text-sm"><input type="checkbox" checked={showZeroAccounts} onChange={event => setShowZeroAccounts(event.target.checked)} />Show zero-balance accounts</label>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <MetricCard title="Period Debits" value={money(trialBalance.totals.periodDebit)} icon={<Landmark className="h-5 w-5" />} />
+            <MetricCard title="Period Credits" value={money(trialBalance.totals.periodCredit)} icon={<Landmark className="h-5 w-5" />} />
+            <MetricCard title="Closing Debits" value={money(trialBalance.totals.closingDebit)} icon={<WalletCards className="h-5 w-5" />} />
+            <MetricCard title="Closing Credits" value={money(trialBalance.totals.closingCredit)} icon={<WalletCards className="h-5 w-5" />} />
+          </div>
+        </section>
+      ) : null)}
+
       {report === 'reconciliation' && hasPermission('reports.reconcile') && <section className="grid gap-3 border-y py-5 sm:grid-cols-3">
         <label className="text-sm">Actual cash counted<input type="number" value={actualCash} onChange={event => setActualCash(event.target.value)} placeholder="Enter cash counted" className="mt-1 w-full rounded-lg border px-3 py-2" /></label>
         <label className="text-sm">Actual M-Pesa balance<input type="number" value={actualMpesa} onChange={event => setActualMpesa(event.target.value)} placeholder="Enter M-Pesa total" className="mt-1 w-full rounded-lg border px-3 py-2" /></label>
@@ -376,13 +496,13 @@ export function Reports() {
 
       {reportHelp[report] && <p className="rounded-lg border border-primary/20 bg-primary/5 px-4 py-3 text-sm leading-6 text-muted-foreground">{reportHelp[report]}</p>}
 
-      {report === 'category-demand' && rawRows.length > 0 ? (
+      {report === 'trial-balance' && accounting?.enabled === false ? null : report === 'category-demand' && rawRows.length > 0 ? (
         <CategoryDemandCharts data={rawRows as any} />
       ) : report === 'product-demand' && rawRows.length > 0 ? (
         <ProductDemandCharts data={rawRows as any} />
       ) : (
         <div className="overflow-x-auto rounded-lg border">
-          {detailLoading ? <div className="p-10 text-center text-muted-foreground">Loading analysis...</div> :
+          {(report === 'trial-balance' ? trialBalanceLoading : detailLoading) ? <div className="p-10 text-center text-muted-foreground">Loading analysis...</div> :
             rawRows.length === 0 ? <div className="p-10 text-center text-muted-foreground">No records for this selection</div> :
             <table className="table-fixed text-sm" style={{ width: `${Math.max(tableWidth, 900)}px`, minWidth: '100%' }}>
               <colgroup>{headers.map(header => <col key={header} style={{ width: `${columnWidth(header)}px` }} />)}{['reconciliation', 'refunds'].includes(report) && <col style={{ width: '130px' }} />}</colgroup>
@@ -412,6 +532,14 @@ export function Reports() {
               })}
                 {report === 'reconciliation' && <td className="px-3 py-2">{row.status === 'pending' && hasPermission('reports.reconcile') ? <button onClick={() => close.mutate(String(row.id))} className="inline-flex items-center gap-1 rounded-lg border px-2 py-1"><LockKeyhole className="h-4 w-4" />Close</button> : String(row.status)}</td>}
                 {report === 'refunds' && <td className="px-3 py-2"><button onClick={() => setSelectedRefund(row)} className="inline-flex items-center gap-1 rounded-lg border px-2 py-1">Record Refund<ChevronRight className="h-4 w-4" /></button></td>}</tr>)}</tbody>
+              {report === 'trial-balance' && trialBalance && <tfoot className="border-t-2 bg-muted font-semibold"><tr>{headers.map(header => <td key={header} className="px-3 py-3">{
+                header === 'account' ? 'TOTAL' : header === 'opening_debit' ? money(trialBalance.totals.openingDebit)
+                  : header === 'opening_credit' ? money(trialBalance.totals.openingCredit)
+                  : header === 'period_debit' ? money(trialBalance.totals.periodDebit)
+                  : header === 'period_credit' ? money(trialBalance.totals.periodCredit)
+                  : header === 'closing_debit' ? money(trialBalance.totals.closingDebit)
+                  : header === 'closing_credit' ? money(trialBalance.totals.closingCredit) : ''
+              }</td>)}</tr></tfoot>}
             </table>}
           {rawRows.length > 0 && <Pagination meta={pagination} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1) }} />}
         </div>

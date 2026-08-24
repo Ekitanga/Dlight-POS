@@ -1,6 +1,13 @@
 import { Router } from 'express'
 import { query, transaction } from '../db/index.js'
 import { recognizedExpensesSql } from '../lib/expenseRecognition.js'
+import { requireAdmin } from '../middleware/auth.js'
+import {
+  accountingStatus,
+  activateAccounting,
+  materializeRecurringExpenses,
+  trialBalance
+} from '../services/accounting.js'
 
 const router = Router()
 
@@ -22,7 +29,7 @@ function sendRows(req: any, res: any, rows: any[]) {
     const isMoneyColumn = (key: string) => [
       'amount', 'sales', 'cost', 'profit', 'expense', 'paid', 'payable', 'earnings',
       'cash', 'mpesa', 'variance', 'balance', 'revenue', 'value', 'price', 'fee',
-      'credit', 'subtotal', 'total', 'refund'
+      'credit', 'debit', 'subtotal', 'total', 'refund'
     ].some(term => key.includes(term)) && !/(method|status|date|count|number|margin)/.test(key)
     const exportValue = (key: string, value: any) => {
       if (value === null || value === undefined || value === '') return ''
@@ -53,6 +60,94 @@ function shopDeliveryCostSql(alias: string): string {
     AND ${alias}.delivery_fee_payment_method IN ('paid_to_courier', 'pay_on_delivery')
     THEN 0 ELSE ${alias}.delivery_cost END)`
 }
+
+router.get('/trial-balance/status', async (_req, res) => {
+  try {
+    res.json(await accountingStatus({ query }))
+  } catch (error) {
+    console.error('Accounting status error:', error)
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
+router.post('/trial-balance/activate', requireAdmin, async (req, res) => {
+  try {
+    const today = nairobiBusinessDate()
+    const cutoverDate = String(req.body.cutover_date || today)
+    if (cutoverDate !== today) {
+      return res.status(400).json({ error: { message: 'The opening snapshot must use today as its cutover date' } })
+    }
+    const liquid = {
+      cash: Number(req.body.cash || 0),
+      mpesa: Number(req.body.mpesa || 0),
+      bank: Number(req.body.bank || 0)
+    }
+    if (Object.values(liquid).some(value => !Number.isFinite(value) || value < 0)) {
+      return res.status(400).json({ error: { message: 'Opening cash, M-Pesa, and bank balances must be valid non-negative amounts' } })
+    }
+    const result = await transaction(async client => {
+      const activated = await activateAccounting(client, cutoverDate, liquid, req.user!.userId)
+      await client.query(
+        `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values)
+         VALUES ($1, 'accounting_activated', 'accounting', $2, $3)`,
+        [req.user!.userId, '00000000-0000-0000-0000-000000000001', JSON.stringify({ cutover_date: cutoverDate, ...liquid })]
+      )
+      return activated
+    })
+    res.status(201).json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    console.error('Accounting activation error:', error)
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.get('/trial-balance', async (req, res) => {
+  try {
+    const today = nairobiBusinessDate()
+    const dateFrom = String(req.query.date_from || today)
+    const dateTo = String(req.query.date_to || today)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)
+      || dateFrom > dateTo || dateTo > today) {
+      return res.status(400).json({ error: { message: 'Select a valid trial-balance date range' } })
+    }
+    const result = await transaction(async client => {
+      const status = await accountingStatus(client)
+      if (!status.enabled) {
+        return {
+          enabled: false,
+          cutoverDate: null,
+          period: { dateFrom, dateTo },
+          rows: [],
+          totals: {
+            openingDebit: 0, openingCredit: 0, periodDebit: 0, periodCredit: 0,
+            closingDebit: 0, closingCredit: 0, difference: 0, isBalanced: true
+          }
+        }
+      }
+      await materializeRecurringExpenses(client, dateTo, req.user!.userId)
+      return { enabled: true, cutoverDate: status.cutoverDate,
+        ...(await trialBalance(client, dateFrom, dateTo, req.query.show_zero === 'true')) }
+    })
+    if (req.query.format === 'csv') {
+      const rows = [...result.rows]
+      rows.push({
+        code: '', account: 'TOTAL', account_type: '',
+        opening_debit: result.totals.openingDebit,
+        opening_credit: result.totals.openingCredit,
+        period_debit: result.totals.periodDebit,
+        period_credit: result.totals.periodCredit,
+        closing_debit: result.totals.closingDebit,
+        closing_credit: result.totals.closingCredit
+      })
+      return sendRows(req, res, rows)
+    }
+    res.json(result)
+  } catch (error) {
+    console.error('Trial balance report error:', error)
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
 
 router.get('/overview', async (req, res) => {
   try {

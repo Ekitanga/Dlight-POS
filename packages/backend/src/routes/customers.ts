@@ -111,8 +111,10 @@ router.post('/:id/payments', async (req, res) => {
       }
 
       await client.query(
-        'INSERT INTO customer_credits (customer_id, order_id, amount, type, created_by) VALUES ($1, $2, $3, $4, $5)',
-        [id, order_id || null, -appliedAmount, 'payment', req.user?.userId]
+        `INSERT INTO customer_credits
+          (customer_id, order_id, amount, type, payment_method, reference, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [id, order_id || null, -appliedAmount, 'payment', payment_method || 'cash', reference || null, req.user?.userId]
       )
 
       await client.query(

@@ -14,6 +14,8 @@ const defaultExpenseCategories = ['Rent', 'Salaries', 'Electricity', 'Internet',
 
 const cleanupTables = [
   'approvals',
+  'journal_lines',
+  'journal_entries',
   'orders',
   'order_items',
   'order_payments',
@@ -47,6 +49,8 @@ const cleanupTables = [
 
 const testTransactionTables = [
   'approvals',
+  'journal_lines',
+  'journal_entries',
   'orders',
   'order_items',
   'order_payments',
@@ -369,6 +373,8 @@ router.post('/cleanup/run', async (req, res) => {
 
         await client.query(`TRUNCATE TABLE
           approvals,
+          journal_lines,
+          journal_entries,
           cod_remittances,
           cod_collections,
           customer_credits,
@@ -391,12 +397,17 @@ router.post('/cleanup/run', async (req, res) => {
           audit_logs
         RESTART IDENTITY CASCADE`)
 
+        await client.query(`UPDATE accounting_settings SET enabled=FALSE, cutover_date=NULL,
+          activated_by=NULL, activated_at=NULL, updated_at=NOW() WHERE singleton_key=TRUE`)
+
         await client.query('UPDATE customers SET balance = 0, updated_at = NOW()')
         await client.query('UPDATE suppliers SET balance = 0, updated_at = NOW()')
         await client.query('UPDATE riders SET balance = 0, updated_at = NOW()')
       } else {
         await client.query(`TRUNCATE TABLE
           approvals,
+          journal_lines,
+          journal_entries,
           brands,
           categories,
           cod_remittances,
@@ -427,6 +438,8 @@ router.post('/cleanup/run', async (req, res) => {
           suppliers,
           audit_logs
         RESTART IDENTITY CASCADE`)
+        await client.query(`UPDATE accounting_settings SET enabled=FALSE, cutover_date=NULL,
+          activated_by=NULL, activated_at=NULL, updated_at=NOW() WHERE singleton_key=TRUE`)
       }
 
       await logAudit({

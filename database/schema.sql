@@ -674,3 +674,7 @@ CREATE TABLE notifications (
 );
 
 CREATE INDEX idx_notifications_user_created ON notifications(user_id, created_at DESC);
+
+-- Keep the accounting ledger and trial-balance schema in its independently
+-- deployable migration while including it in fresh database installations.
+\ir trial_balance_migration.sql

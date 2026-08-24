@@ -251,6 +251,18 @@ After the application is healthy:
 4. Compare the preview with completed and paid orders before applying it with a recorded reason.
 5. Confirm Admin and Owner accounts have no commission transactions.
 
+### Trial-balance release dated 24 August 2026
+
+This release adds the double-entry accounting ledger and Trial Balance report to an existing production database. Use the release-specific script; do not run the fresh-database migration chain.
+
+```bash
+cd /opt/dlight-pos
+git pull --ff-only
+bash deploy/contabo/apply-trial-balance-release-20260824.sh
+```
+
+The script stops the application, creates and verifies a restorable PostgreSQL backup, applies and verifies the accounting migration, rebuilds the application, and requires a successful health check. Accounting remains inactive after deployment. An Admin or Owner must open **Reports > Finance > Trial Balance**, physically verify Cash, M-Pesa, and Bank, and post the one-time opening journal before live journals begin.
+
 ## Emergency Commands
 
 View logs:
