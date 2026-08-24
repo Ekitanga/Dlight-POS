@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useDeferredValue, useEffect, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { Check, ChevronDown, Plus, Search, Eye, Edit, Package, X, ExternalLink } from 'lucide-react'
+import { Check, ChevronDown, Plus, Search, Eye, Edit, Package, X, ExternalLink, RotateCcw, ShieldAlert } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { PaginatedResponse, Pagination } from '../../components/Pagination'
@@ -67,6 +67,18 @@ interface OrderDetailItem {
 interface OrderDetail {
   order: Order
   items: OrderDetailItem[]
+}
+
+interface StatusCorrectionPreview {
+  current_status: string
+  allowed_targets: string[]
+  blockers: string[]
+  effects: string[]
+  completion_payment: {
+    count: number
+    amount: number
+    reversible: boolean
+  }
 }
 
 interface Product {
@@ -396,6 +408,10 @@ export function Orders() {
   const [completionPaymentMethod, setCompletionPaymentMethod] = useState('cash')
   const [statusNotes, setStatusNotes] = useState('')
   const [statusError, setStatusError] = useState('')
+  const [correctionTarget, setCorrectionTarget] = useState('')
+  const [correctionReason, setCorrectionReason] = useState('')
+  const [correctionError, setCorrectionError] = useState('')
+  const [reverseCompletionPayment, setReverseCompletionPayment] = useState(false)
   const [returnItemId, setReturnItemId] = useState('')
   const [returnQuantity, setReturnQuantity] = useState('')
   const [returnSource, setReturnSource] = useState<'internal' | 'supplier'>('internal')
@@ -441,6 +457,19 @@ export function Orders() {
     enabled: Boolean(selectedOrderId),
     queryFn: async () => (await axios.get(`/api/orders/${selectedOrderId}`)).data
   })
+
+  const { data: correctionPreview, isLoading: isLoadingCorrectionPreview } = useQuery<StatusCorrectionPreview>({
+    queryKey: ['order-status-correction', selectedOrderId],
+    enabled: Boolean(selectedOrderId && isAdminOrOwner),
+    queryFn: async () => (await axios.get(`/api/orders/${selectedOrderId}/status-correction`)).data
+  })
+
+  useEffect(() => {
+    setCorrectionTarget(correctionPreview?.allowed_targets[0] || '')
+    setCorrectionReason('')
+    setCorrectionError('')
+    setReverseCompletionPayment(Boolean(correctionPreview?.completion_payment.reversible))
+  }, [correctionPreview, selectedOrderId])
 
   const { register, handleSubmit, reset, watch, setValue, getValues, formState: { errors } } = useForm<OrderFormData>({
     defaultValues: {
@@ -619,6 +648,38 @@ export function Orders() {
     },
     onError: (error: any) => {
       setStatusError(error.response?.data?.error?.message || 'Failed to update order status')
+    }
+  })
+
+  const correctOrderStatus = useMutation({
+    mutationFn: async () => {
+      if (!selectedOrderId || !correctionTarget) throw new Error('Select an earlier status')
+      if (correctionReason.trim().length < 10) throw new Error('Give a correction reason of at least 10 characters')
+      setCorrectionError('')
+      return (await axios.post(`/api/orders/${selectedOrderId}/status-correction`, {
+        target_status: correctionTarget,
+        reason: correctionReason.trim(),
+        reverse_completion_payment: reverseCompletionPayment
+      })).data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['order-detail', selectedOrderId] })
+      queryClient.invalidateQueries({ queryKey: ['order-status-correction', selectedOrderId] })
+      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+      queryClient.invalidateQueries({ queryKey: ['receipts'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory'] })
+      queryClient.invalidateQueries({ queryKey: ['suppliers'] })
+      queryClient.invalidateQueries({ queryKey: ['riders'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
+      queryClient.invalidateQueries({ queryKey: ['reports'] })
+      queryClient.invalidateQueries({ queryKey: ['trial-balance'] })
+      void invalidateCommissionData(queryClient)
+      setCorrectionReason('')
+      setCorrectionError('')
+    },
+    onError: (error: any) => {
+      setCorrectionError(error.response?.data?.error?.message || error.message || 'Failed to correct order status')
     }
   })
 
@@ -1335,6 +1396,106 @@ export function Orders() {
                   </p>
                   {statusError && workflowStage(selectedOrderDetail.order) !== 'pending_payment' && <div className="mt-3 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{statusError}</div>}
                 </div>}
+
+                {isAdminOrOwner && (
+                  <section className="rounded-lg border border-amber-300 bg-amber-50/60 p-4 dark:border-amber-800 dark:bg-amber-950/20">
+                    <div className="flex items-start gap-3">
+                      <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-amber-700 dark:text-amber-300" />
+                      <div className="min-w-0 flex-1">
+                        <h3 className="font-semibold">Admin status correction</h3>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          Move an erroneously advanced order back to an active stage. Every correction requires a reason and is written to the audit log.
+                        </p>
+
+                        {isLoadingCorrectionPreview ? (
+                          <p className="mt-3 text-sm text-muted-foreground">Checking dependent records...</p>
+                        ) : correctionPreview ? (
+                          <div className="mt-4 space-y-4">
+                            {correctionPreview.blockers.length > 0 && (
+                              <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                                <p className="font-medium">Correction is currently blocked</p>
+                                <ul className="mt-1 list-disc space-y-1 pl-5">
+                                  {correctionPreview.blockers.map(blocker => <li key={blocker}>{blocker}</li>)}
+                                </ul>
+                              </div>
+                            )}
+
+                            {correctionPreview.allowed_targets.length > 0 ? (
+                              <>
+                              <div className="grid grid-cols-1 gap-3 lg:grid-cols-[220px_1fr_auto] lg:items-end">
+                                <div>
+                                  <label className="mb-1 block text-sm font-medium">Move Back To</label>
+                                  <select
+                                    value={correctionTarget}
+                                    onChange={event => setCorrectionTarget(event.target.value)}
+                                    className="w-full rounded-lg border bg-background px-3 py-2"
+                                  >
+                                    {correctionPreview.allowed_targets.map(target => (
+                                      <option key={target} value={target}>{statusLabel(target, selectedOrderDetail.order)}</option>
+                                    ))}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="mb-1 block text-sm font-medium">Required Correction Reason</label>
+                                  <input
+                                    value={correctionReason}
+                                    onChange={event => setCorrectionReason(event.target.value)}
+                                    maxLength={1000}
+                                    className="w-full rounded-lg border bg-background px-3 py-2"
+                                    placeholder="Explain what was entered incorrectly and why"
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const targetLabel = statusLabel(correctionTarget, selectedOrderDetail.order)
+                                    const paymentMessage = reverseCompletionPayment && correctionPreview.completion_payment.reversible
+                                      ? `The completion-generated payment of ${formatMoney(correctionPreview.completion_payment.amount)} will also be reversed.`
+                                      : 'Recorded payments will be retained.'
+                                    if (!window.confirm(`Move this order back to ${targetLabel}? ${paymentMessage} Completion-only records will be reversed.`)) return
+                                    correctOrderStatus.mutate()
+                                  }}
+                                  disabled={correctOrderStatus.isPending || correctionPreview.blockers.length > 0 || !correctionTarget || correctionReason.trim().length < 10}
+                                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-amber-700 px-4 py-2 text-white disabled:opacity-50 dark:bg-amber-600"
+                                >
+                                  <RotateCcw className="h-4 w-4" />
+                                  {correctOrderStatus.isPending ? 'Correcting...' : 'Correct Status'}
+                                </button>
+                              </div>
+                              {correctionPreview.completion_payment.reversible && (
+                                <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-amber-300 bg-background/80 px-3 py-2 text-sm dark:border-amber-800">
+                                  <input
+                                    type="checkbox"
+                                    checked={reverseCompletionPayment}
+                                    onChange={event => setReverseCompletionPayment(event.target.checked)}
+                                    className="mt-0.5 h-4 w-4 rounded border-amber-500"
+                                  />
+                                  <span>
+                                    <strong>Reverse the completion-generated payment of {formatMoney(correctionPreview.completion_payment.amount)}.</strong>
+                                    <span className="mt-0.5 block text-xs text-muted-foreground">Use this when payment was recorded only because the order was marked delivered by mistake. Uncheck it if the money was genuinely received; it will remain as a customer deposit.</span>
+                                  </span>
+                                </label>
+                              )}
+                              </>
+                            ) : correctionPreview.blockers.length === 0 ? (
+                              <p className="text-sm text-muted-foreground">This order has no earlier active workflow stage.</p>
+                            ) : null}
+
+                            <div className="rounded-lg border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+                              <p className="font-medium text-foreground">What this correction will do</p>
+                              <ul className="mt-1 list-disc space-y-1 pl-5">
+                                {correctionPreview.effects.map(effect => <li key={effect}>{effect}</li>)}
+                              </ul>
+                            </div>
+                            {correctionError && <div className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{correctionError}</div>}
+                          </div>
+                        ) : (
+                          <p className="mt-3 text-sm text-destructive">Unable to assess this order for correction.</p>
+                        )}
+                      </div>
+                    </div>
+                  </section>
+                )}
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div>

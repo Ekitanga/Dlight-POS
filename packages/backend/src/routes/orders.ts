@@ -5,6 +5,7 @@ import { auditMiddleware } from '../middleware/audit.js'
 import { paginatedResponse, paginationFromQuery } from '../utils/pagination.js'
 import { logAudit } from '../utils/audit.js'
 import { emitNotification } from '../utils/notifications.js'
+import { requireAdmin } from '../middleware/auth.js'
 import {
   commissionPeriodForTimestamp,
   evaluateAndEarnOrderItem,
@@ -96,6 +97,114 @@ function codStatusForOrder(status: string): string | null {
   }
 
   return statusMap[status] || null
+}
+
+function backwardStatusTargets(order: any): string[] {
+  const current = normalizedWorkflowStatus(order.status)
+  if (['returned', 'cancelled', 'collected_paid', 'pending'].includes(current)) return []
+
+  const workflow = order.delivery_type === 'walk_in'
+    ? ['pending', 'confirmed', 'delivered']
+    : ['pending', 'confirmed', 'in_transit', 'delivered']
+  const currentIndex = workflow.indexOf(current)
+  if (currentIndex <= 0) return []
+  return workflow.slice(0, currentIndex).reverse()
+}
+
+async function backwardCorrectionBlockers(client: any, order: any): Promise<string[]> {
+  const blockers: string[] = []
+  const current = normalizedWorkflowStatus(order.status)
+
+  if (current === 'collected_paid') {
+    blockers.push('Reverse the COD remittance from Deliveries before correcting this order status.')
+  }
+  if (['returned', 'cancelled'].includes(current)) {
+    blockers.push('Returned and cancelled orders must be recovered through their dedicated return or cancellation workflow.')
+  }
+
+  const codResult = await client.query(
+    `SELECT COALESCE(remitted_amount, 0) AS remitted_amount, status
+     FROM cod_collections WHERE order_id = $1 FOR UPDATE`,
+    [order.id]
+  )
+  const cod = codResult.rows[0]
+  if (cod && (toNumber(cod.remitted_amount) > 0 || ['partially_remitted', 'remitted', 'closed'].includes(cod.status))) {
+    blockers.push('This order has a recorded COD remittance. Reverse that remittance from Deliveries first.')
+  }
+
+  const activeAllocation = await client.query(
+    'SELECT COUNT(*)::int AS count FROM speedaf_remittance_allocations WHERE order_id = $1 AND active',
+    [order.id]
+  )
+  if (Number(activeAllocation.rows[0]?.count || 0) > 0) {
+    blockers.push('This order belongs to an active Speedaf remittance batch. Revert the remittance first.')
+  }
+
+  if (isFinalCompletedStatus(order, order.status)) {
+    const paidRiderEarnings = await client.query(
+      "SELECT COUNT(*)::int AS count FROM rider_earnings WHERE order_id = $1 AND status = 'paid'",
+      [order.id]
+    )
+    if (Number(paidRiderEarnings.rows[0]?.count || 0) > 0) {
+      blockers.push('The rider earning for this order has already been paid. Reverse the rider settlement first.')
+    }
+
+    const paidRefunds = await client.query(
+      "SELECT COUNT(*)::int AS count FROM order_refunds WHERE order_id = $1 AND status = 'paid'",
+      [order.id]
+    )
+    if (Number(paidRefunds.rows[0]?.count || 0) > 0) {
+      blockers.push('This order has a paid refund and cannot be moved backward without a reviewed refund recovery.')
+    }
+
+    const closedCommission = await client.query(
+      `SELECT COUNT(*)::int AS count
+       FROM commission_transactions ct
+       JOIN commission_period_closures pc
+         ON pc.period_start = ct.commission_month AND pc.status = 'closed'
+       WHERE ct.order_id = $1
+         AND ct.transaction_type = 'earned'
+         AND ct.transaction_status <> 'reversed'`,
+      [order.id]
+    )
+    if (Number(closedCommission.rows[0]?.count || 0) > 0) {
+      blockers.push('The commission period containing this sale is closed. Reopen or formally correct that period first.')
+    }
+  }
+
+  return [...new Set(blockers)]
+}
+
+async function completionGeneratedPayment(client: any, orderId: string) {
+  const result = await client.query(
+    `SELECT COUNT(*)::int AS count, COALESCE(SUM(amount), 0) AS amount
+     FROM order_payments
+     WHERE order_id = $1 AND reference = 'Collected on rider delivery'`,
+    [orderId]
+  )
+  return {
+    count: Number(result.rows[0]?.count || 0),
+    amount: toNumber(result.rows[0]?.amount),
+    reversible: Number(result.rows[0]?.count || 0) > 0
+  }
+}
+
+function backwardCorrectionEffects(order: any, completionPayment?: { amount: number; reversible: boolean }): string[] {
+  const effects = [
+    completionPayment?.reversible
+      ? `The completion-generated payment of KSh ${completionPayment.amount.toLocaleString()} can be reversed; all other customer payments remain intact.`
+      : 'Existing customer payments are retained and remain fully auditable.',
+    'Reserved/sold stock and supplier liabilities are unchanged because the order is still active.',
+    'Delivery and COD tracking are moved to the selected earlier stage.'
+  ]
+  if (isFinalCompletedStatus(order, order.status)) {
+    effects.push('Completion timestamps are cleared and payable rider earnings are reversed.')
+    effects.push('Earned commission is offset with an auditable commission reversal.')
+  }
+  if (['delivered', 'collected_paid'].includes(normalizedWorkflowStatus(order.status))) {
+    effects.push('When accounting is active, the recognized sale is reversed into its pre-completion balances.')
+  }
+  return effects
 }
 
 async function recalculateSupplierBalance(client: any, supplierId: string) {
@@ -1547,6 +1656,280 @@ router.post('/', auditMiddleware('order', 'order_created'), async (req, res) => 
   }
 })
 
+router.get('/:id/status-correction', requireAdmin, async (req, res) => {
+  try {
+    const preview = await transaction(async (client) => {
+      const orderResult = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [req.params.id])
+      const order = orderResult.rows[0]
+      if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 })
+
+      const completionPayment = await completionGeneratedPayment(client, order.id)
+
+      return {
+        current_status: normalizedWorkflowStatus(order.status),
+        allowed_targets: backwardStatusTargets(order),
+        blockers: await backwardCorrectionBlockers(client, order),
+        effects: backwardCorrectionEffects(order, completionPayment),
+        completion_payment: completionPayment
+      }
+    })
+    res.json(preview)
+  } catch (err) {
+    const statusCode = (err as any).statusCode || 500
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (err as Error).message } })
+  }
+})
+
+router.post('/:id/status-correction', requireAdmin, async (req, res) => {
+  const targetStatus = normalizedWorkflowStatus(String(req.body?.target_status || ''))
+  const reason = String(req.body?.reason || '').trim()
+  const reverseCompletionPayment = req.body?.reverse_completion_payment === true
+
+  if (!orderStatuses.includes(targetStatus)) {
+    return res.status(400).json({ error: { message: 'Select a valid earlier order status' } })
+  }
+  if (reason.length < 10) {
+    return res.status(400).json({ error: { message: 'Give a correction reason of at least 10 characters' } })
+  }
+  if (reason.length > 1000) {
+    return res.status(400).json({ error: { message: 'Correction reason must be 1,000 characters or fewer' } })
+  }
+
+  try {
+    const corrected = await transaction(async (client) => {
+      const orderResult = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [req.params.id])
+      const order = orderResult.rows[0]
+      if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 })
+
+      const allowedTargets = backwardStatusTargets(order)
+      if (!allowedTargets.includes(targetStatus)) {
+        throw Object.assign(
+          new Error('The selected status is not an earlier active stage for this order. Returned, cancelled, and remitted COD orders require their dedicated recovery workflow.'),
+          { statusCode: 409 }
+        )
+      }
+
+      const blockers = await backwardCorrectionBlockers(client, order)
+      if (blockers.length > 0) {
+        throw Object.assign(new Error(blockers.join(' ')), { statusCode: 409 })
+      }
+
+      const leavingCompleted = isFinalCompletedStatus(order, order.status) && !isFinalCompletedStatus(order, targetStatus)
+      const leavingRecognizedSale = ['delivered', 'collected_paid'].includes(normalizedWorkflowStatus(order.status)) &&
+        !['delivered', 'collected_paid'].includes(targetStatus)
+      let reversedRiderEarnings = 0
+      let reversedCommissions = 0
+      let reversedCompletionPayment = 0
+      let paymentTotalAfter = toNumber(order.paid_amount)
+      let paymentStatusAfter = order.payment_status
+
+      if (reverseCompletionPayment) {
+        const completionPayments = await client.query(
+          `SELECT id, amount, created_by
+           FROM order_payments
+           WHERE order_id = $1 AND reference = 'Collected on rider delivery'
+           ORDER BY created_at
+           FOR UPDATE`,
+          [order.id]
+        )
+        if (completionPayments.rows.length > 0) {
+          const paymentIds = completionPayments.rows.map((payment: any) => String(payment.id))
+          reversedCompletionPayment = completionPayments.rows.reduce(
+            (sum: number, payment: any) => sum + toNumber(payment.amount),
+            0
+          )
+          const linkedReferences = paymentIds.map((paymentId: string) => `order_payment:${paymentId}`)
+          const linkedCredits = await client.query(
+            `DELETE FROM customer_credits
+             WHERE order_id = $1 AND type = 'payment' AND reference = ANY($2::text[])
+             RETURNING id`,
+            [order.id, linkedReferences]
+          )
+
+          if (linkedCredits.rows.length === 0 && order.customer_id) {
+            const creditSale = await client.query(
+              "SELECT id FROM customer_credits WHERE order_id = $1 AND customer_id = $2 AND type = 'sale' LIMIT 1",
+              [order.id, order.customer_id]
+            )
+            if (creditSale.rows[0]) {
+              const legacyCredits = await client.query(
+                `SELECT id FROM customer_credits
+                 WHERE order_id = $1 AND customer_id = $2 AND type = 'payment'
+                   AND reference IS NULL AND ABS(amount + $3::numeric) < 0.005
+                 FOR UPDATE`,
+                [order.id, order.customer_id, reversedCompletionPayment]
+              )
+              if (legacyCredits.rows.length > 1) {
+                throw Object.assign(
+                  new Error('The completion payment has ambiguous legacy customer-credit entries. Review the customer ledger before reversing it.'),
+                  { statusCode: 409 }
+                )
+              }
+              if (legacyCredits.rows[0]) {
+                await client.query('DELETE FROM customer_credits WHERE id = $1', [legacyCredits.rows[0].id])
+              }
+            }
+          }
+
+          await client.query('DELETE FROM order_payments WHERE id = ANY($1::uuid[])', [paymentIds])
+          paymentTotalAfter = toNumber((await client.query(
+            'SELECT COALESCE(SUM(amount), 0) AS total FROM order_payments WHERE order_id = $1',
+            [order.id]
+          )).rows[0]?.total)
+          paymentStatusAfter = paymentTotalAfter <= 0
+            ? 'pending'
+            : paymentTotalAfter + 0.005 < toNumber(order.total_amount)
+              ? 'partially_paid'
+              : 'paid'
+          if (order.customer_id) await recalculateCustomerBalance(client, order.customer_id)
+        }
+      }
+
+      if (leavingCompleted) {
+        const riderEarnings = await client.query(
+          `UPDATE rider_earnings
+           SET status = 'reversed',
+               notes = CONCAT_WS(' | ', NULLIF(notes, ''), $2::text)
+           WHERE order_id = $1 AND status = 'payable'
+           RETURNING rider_id`,
+          [order.id, `Admin status correction: ${reason}`]
+        )
+        reversedRiderEarnings = riderEarnings.rows.length
+        const riderIds = Array.from(new Set<string>(riderEarnings.rows.map((row: any): string => String(row.rider_id))))
+        for (const riderId of riderIds) await recalculateRiderBalance(client, riderId)
+
+        const activeCommissions = await client.query(
+          `SELECT earned.id, earned.order_item_id,
+                  GREATEST(earned.eligible_quantity - COALESCE((
+                    SELECT SUM(reversal.eligible_quantity)
+                    FROM commission_transactions reversal
+                    WHERE reversal.original_transaction_id = earned.id
+                      AND reversal.transaction_type = 'reversal'
+                  ), 0), 0)::int AS remaining_quantity
+           FROM commission_transactions earned
+           WHERE earned.order_id = $1
+             AND earned.transaction_type = 'earned'
+             AND earned.transaction_status <> 'reversed'
+           ORDER BY earned.created_at
+           FOR UPDATE`,
+          [order.id]
+        )
+        for (const commission of activeCommissions.rows) {
+          const reversal = await reverseCommission(
+            commission.id,
+            order.id,
+            commission.order_item_id,
+            Number(commission.remaining_quantity),
+            `Admin status correction: ${reason}`,
+            req.user?.userId || null,
+            client,
+            'order_status_correction',
+            order.id
+          )
+          if (reversal) reversedCommissions += 1
+        }
+      }
+
+      const deliveryStatus = deliveryStatusForOrder(targetStatus, order.delivery_type)
+      if (deliveryStatus) {
+        await client.query(
+          `UPDATE deliveries
+           SET delivery_status = $1,
+               delivered_at = CASE WHEN $2::boolean THEN delivered_at ELSE NULL END,
+               notes = CONCAT_WS(' | ', NULLIF(notes, ''), $3::text)
+           WHERE order_id = $4`,
+          [deliveryStatus, ['delivered', 'collected_paid'].includes(deliveryStatus), `Admin status correction: ${reason}`, order.id]
+        )
+      }
+
+      const codStatus = codStatusForOrder(targetStatus)
+      if (codStatus) {
+        await client.query(
+          `UPDATE cod_collections
+           SET status = $1,
+               delivered_at = CASE WHEN $2::boolean THEN delivered_at ELSE NULL END,
+               notes = CONCAT_WS(' | ', NULLIF(notes, ''), $3::text)
+           WHERE order_id = $4`,
+          [codStatus, codStatus === 'delivered_awaiting_remittance', `Admin status correction: ${reason}`, order.id]
+        )
+      }
+
+      if (req.user?.userId) {
+        await client.query("SELECT set_config('dlight.current_user_id', $1, true)", [req.user.userId])
+      }
+      const result = await client.query(
+        `UPDATE orders
+         SET status = $1::order_status,
+             confirmed_by = CASE WHEN $1::text = 'pending' THEN NULL ELSE confirmed_by END,
+             paid_amount = $4,
+             payment_status = $5::payment_status,
+             commission_completion_by = CASE WHEN $3 THEN NULL ELSE commission_completion_by END,
+             commission_completion_at = CASE WHEN $3 THEN NULL ELSE commission_completion_at END,
+             commission_verified_by = CASE WHEN $3 THEN NULL ELSE commission_verified_by END,
+             commission_verified_at = CASE WHEN $3 THEN NULL ELSE commission_verified_at END,
+             commission_verification_reason = CASE WHEN $3 THEN NULL ELSE commission_verification_reason END,
+             updated_at = NOW()
+         WHERE id = $2
+         RETURNING *`,
+        [targetStatus, order.id, leavingCompleted, paymentTotalAfter, paymentStatusAfter]
+      )
+
+      const effects = {
+        payments_retained: paymentTotalAfter,
+        completion_payment_reversed: reversedCompletionPayment,
+        inventory_unchanged: true,
+        supplier_liabilities_unchanged: true,
+        rider_earnings_reversed: reversedRiderEarnings,
+        commissions_reversed: reversedCommissions,
+        delivery_status: deliveryStatus,
+        cod_status: codStatus,
+        accounting_sale_reversal_requested: leavingRecognizedSale
+      }
+      await logAudit({
+        req,
+        client,
+        action: 'order_status_corrected_backward',
+        entityType: 'order',
+        entityId: order.id,
+        oldValues: { status: order.status, payment_status: order.payment_status, paid_amount: order.paid_amount },
+        newValues: { status: targetStatus, payment_status: result.rows[0].payment_status, paid_amount: result.rows[0].paid_amount, reason },
+        metadata: { order_number: order.order_number, correction_type: 'admin_backward_status', effects }
+      })
+
+      return { order: result.rows[0], correction: { from_status: order.status, to_status: targetStatus, reason, effects } }
+    })
+
+    void emitNotification({
+      title: `Admin corrected ${corrected.order.order_number}`,
+      message: `${corrected.order.order_number} moved from ${corrected.correction.from_status} back to ${corrected.correction.to_status}. Reason: ${reason}`,
+      type: 'order_status',
+      entityType: 'order',
+      entityId: corrected.order.id
+    }).catch(() => {})
+
+    res.json(corrected)
+  } catch (err) {
+    console.error('Order status correction error:', err)
+    const statusCode = (err as any).statusCode || 500
+    if (statusCode >= 400 && statusCode < 500) {
+      try {
+        await logAudit({
+          req,
+          userId: req.user?.userId || null,
+          action: 'order_status_correction_rejected',
+          entityType: 'order',
+          entityId: req.params.id || null,
+          newValues: { requested_status: targetStatus, reason },
+          metadata: { status_code: statusCode, outcome: 'rejected' }
+        })
+      } catch (auditError) {
+        console.error('Unable to record rejected order status correction:', auditError)
+      }
+    }
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (err as Error).message } })
+  }
+})
+
 router.put('/:id/status', async (req, res) => {
   try {
     const { id } = req.params
@@ -1593,8 +1976,8 @@ router.put('/:id/status', async (req, res) => {
         }
         const outstandingAmount = Math.max(0, toNumber(order.total_amount) - toNumber(order.paid_amount))
         if (outstandingAmount > 0) {
-          await client.query(
-            'INSERT INTO order_payments (order_id, amount, payment_method, reference, created_by) VALUES ($1, $2, $3, $4, $5)',
+          const completionPayment = await client.query(
+            'INSERT INTO order_payments (order_id, amount, payment_method, reference, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING id',
             [id, outstandingAmount, paymentMethod, 'Collected on rider delivery', req.user?.userId]
           )
           await client.query(
@@ -1608,8 +1991,8 @@ router.put('/:id/status', async (req, res) => {
             )
             if (creditSale.rows[0]) {
               await client.query(
-                "INSERT INTO customer_credits (customer_id, order_id, amount, type, created_by) VALUES ($1, $2, $3, 'payment', $4)",
-                [order.customer_id, id, -outstandingAmount, req.user?.userId]
+                "INSERT INTO customer_credits (customer_id, order_id, amount, type, payment_method, reference, created_by) VALUES ($1, $2, $3, 'payment', $4, $5, $6)",
+                [order.customer_id, id, -outstandingAmount, paymentMethod, `order_payment:${completionPayment.rows[0].id}`, req.user?.userId]
               )
               await client.query(
                 'UPDATE customers SET balance = GREATEST(balance - $1, 0), updated_at = NOW() WHERE id = $2',

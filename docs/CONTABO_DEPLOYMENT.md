@@ -263,6 +263,16 @@ bash deploy/contabo/apply-trial-balance-release-20260824.sh
 
 The script stops the application, creates and verifies a restorable PostgreSQL backup, applies and verifies the accounting migration, rebuilds the application, and requires a successful health check. Accounting remains inactive after deployment. An Admin or Owner must open **Reports > Finance > Trial Balance**, physically verify Cash, M-Pesa, and Bank, and post the one-time opening journal before live journals begin.
 
+### Admin order-status correction release (24 August 2026)
+
+After pulling the release commit on an existing production server, run:
+
+```bash
+bash deploy/contabo/apply-order-status-correction-release-20260824.sh
+```
+
+The script stops the application, creates and verifies a PostgreSQL backup, installs the correction-aware accounting function, rebuilds the application, restarts it, and requires a successful health check. The admin correction UI is then available in an order's details. Do not apply the SQL file manually on production.
+
 ## Emergency Commands
 
 View logs:

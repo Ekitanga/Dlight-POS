@@ -21,6 +21,7 @@ const root = path.resolve(process.cwd(), '../..')
 for (const file of [
   'database/schema.sql',
   'database/trial_balance_migration.sql',
+  'database/admin_order_status_correction_migration.sql',
   'database/production_stabilization_phase1.sql',
   'database/permissions_migration.sql',
   'database/production_stabilization_permissions.sql',
@@ -453,6 +454,76 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await assertGlobalIntegrity()
   })
 
+  await t.test('4a. only management can move an active order backward with dependent reversals', async () => {
+    const stockBefore = Number((await row('SELECT quantity FROM inventory WHERE product_id=$1', [stockProduct.id])).quantity)
+    const riderBalanceBefore = Number((await row('SELECT balance FROM riders WHERE id=$1', [rider.id])).balance)
+    const order = await createOrder({
+      ...customer('Backward Correction'), delivery_type: 'rider', rider_id: rider.id,
+      customer_delivery_fee: 100, actual_rider_fee: 120, payment_method: 'pay_on_delivery',
+      items: [internalItem(stockProduct.id, 2, 100)]
+    }, attendant.accessToken)
+    await advance(order.id, ['confirmed', 'in_transit', 'delivered'], { completion_payment_method: 'mpesa' })
+
+    assert.equal(await count("SELECT COUNT(*) FROM rider_earnings WHERE order_id=$1 AND status='payable'", [order.id]), 1)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned' AND transaction_status<>'reversed'", [order.id]), 1)
+    assert.equal(Number((await row('SELECT balance FROM riders WHERE id=$1', [rider.id])).balance), riderBalanceBefore + 120)
+
+    await request('GET', `/orders/${order.id}/status-correction`, attendant.accessToken, undefined, 403)
+    const preview = await request('GET', `/orders/${order.id}/status-correction`, admin.accessToken)
+    assert.deepEqual(preview.allowed_targets, ['in_transit', 'confirmed', 'pending'])
+    assert.deepEqual(preview.blockers, [])
+    assert.equal(preview.completion_payment.reversible, true)
+    assert.equal(Number(preview.completion_payment.amount), 300)
+    assert.ok(preview.effects.some((effect: string) => effect.includes('completion-generated payment')))
+    await request('POST', `/orders/${order.id}/status-correction`, admin.accessToken, {
+      target_status: 'in_transit', reason: 'short'
+    }, 400)
+
+    const corrected = await request('POST', `/orders/${order.id}/status-correction`, admin.accessToken, {
+      target_status: 'in_transit',
+      reason: 'Sales agent marked the rider order delivered before physical delivery',
+      reverse_completion_payment: true
+    })
+    assert.equal(corrected.order.status, 'in_transit')
+    assert.equal(corrected.order.payment_status, 'pending')
+    assert.equal(Number(corrected.order.paid_amount), 0)
+    assert.equal((await row('SELECT delivery_status FROM deliveries WHERE order_id=$1', [order.id])).delivery_status, 'in_transit')
+    assert.equal((await row('SELECT delivered_at FROM deliveries WHERE order_id=$1', [order.id])).delivered_at, null)
+    assert.equal(await count("SELECT COUNT(*) FROM rider_earnings WHERE order_id=$1 AND status='reversed'", [order.id]), 1)
+    assert.equal(Number((await row('SELECT balance FROM riders WHERE id=$1', [rider.id])).balance), riderBalanceBefore)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='reversal'", [order.id]), 1)
+    assert.equal(Number((await row('SELECT quantity FROM inventory WHERE product_id=$1', [stockProduct.id])).quantity), stockBefore - 2)
+    assert.equal(await count('SELECT COUNT(*) FROM order_payments WHERE order_id=$1', [order.id]), 0)
+    await waitForAudit('order_status_corrected_backward', order.id)
+
+    await advance(order.id, ['delivered'], { completion_payment_method: 'cash' })
+    assert.equal(await count("SELECT COUNT(*) FROM rider_earnings WHERE order_id=$1 AND status='payable'", [order.id]), 1)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned' AND transaction_status<>'reversed'", [order.id]), 1)
+    assert.equal(await count('SELECT COUNT(*) FROM order_payments WHERE order_id=$1', [order.id]), 1)
+    assert.equal(Number((await row('SELECT quantity FROM inventory WHERE product_id=$1', [stockProduct.id])).quantity), stockBefore - 2)
+
+    const activeRiderEarning = await row("SELECT id FROM rider_earnings WHERE order_id=$1 AND status='payable'", [order.id])
+    await db.query("UPDATE rider_earnings SET status='paid' WHERE id=$1", [activeRiderEarning.id])
+    const paidEarningPreview = await request('GET', `/orders/${order.id}/status-correction`, admin.accessToken)
+    assert.ok(paidEarningPreview.blockers.some((blocker: string) => blocker.includes('rider earning')))
+    await request('POST', `/orders/${order.id}/status-correction`, admin.accessToken, {
+      target_status: 'in_transit',
+      reason: 'Paid rider earning must block an unsafe backward status correction'
+    }, 409)
+    await db.query("UPDATE rider_earnings SET status='payable' WHERE id=$1", [activeRiderEarning.id])
+
+    // Leave shared rider balances at their pre-scenario baseline for the
+    // settlement scenario below while also proving a repeated correction is
+    // deterministic.
+    await request('POST', `/orders/${order.id}/status-correction`, admin.accessToken, {
+      target_status: 'in_transit',
+      reason: 'Test cleanup repeats the reviewed backward correction deterministically',
+      reverse_completion_payment: true
+    })
+    assert.equal(Number((await row('SELECT balance FROM riders WHERE id=$1', [rider.id])).balance), riderBalanceBefore)
+    await assertGlobalIntegrity()
+  })
+
   await t.test('5. Speedaf COD lifecycle and remittance', async () => {
     const order = await createOrder({
       ...customer('COD'), delivery_type: 'courier', courier_id: courier.id,
@@ -502,6 +573,13 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     ), 1)
     assert.equal(await count('SELECT COUNT(*) FROM cod_remittances WHERE order_id=$1', [order.id]), 2)
     assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id]), 1)
+    const remittedPreview = await request('GET', `/orders/${order.id}/status-correction`, admin.accessToken)
+    assert.deepEqual(remittedPreview.allowed_targets, [])
+    assert.ok(remittedPreview.blockers.some((blocker: string) => blocker.includes('COD remittance')))
+    await request('POST', `/orders/${order.id}/status-correction`, admin.accessToken, {
+      target_status: 'in_transit',
+      reason: 'A remitted Speedaf order must use the remittance reversal workflow'
+    }, 409)
     await waitForAudit('cod_remittance_recorded', order.id)
     await assertGlobalIntegrity()
   })
@@ -2078,6 +2156,38 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.ok(report.rows.some((entry: any) => entry.code === '4000'))
     assert.ok(report.rows.some((entry: any) => entry.code === '5000'))
     assert.ok(report.rows.some((entry: any) => entry.code === '1200'))
+
+    const correctionOrder = await createOrder({
+      ...customer('Trial Balance Correction'),
+      delivery_type: 'walk_in',
+      payment_method: 'mpesa',
+      items: [internalItem(stockProduct.id, 1, 225)]
+    })
+    await advance(correctionOrder.id, ['confirmed', 'delivered'])
+    await request('POST', `/orders/${correctionOrder.id}/status-correction`, admin.accessToken, {
+      target_status: 'confirmed',
+      reason: 'Admin test correction for an order completed before customer collection'
+    })
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM journal_entries WHERE source_type='order' AND source_id=$1 AND source_event='sale_reversed'`,
+      [correctionOrder.id]
+    ), 1)
+    assert.equal(await count('SELECT COUNT(*) FROM order_payments WHERE order_id=$1', [correctionOrder.id]), 1)
+    await advance(correctionOrder.id, ['delivered'])
+    for (const event of ['sale_recognized', 'sale_reversed', 'sale_recognized_2']) {
+      assert.equal(await count(
+        `SELECT COUNT(*) FROM journal_entries WHERE source_type='order' AND source_id=$1 AND source_event=$2`,
+        [correctionOrder.id, event]
+      ), 1)
+    }
+
+    const afterCorrectionCycle = await request(
+      'GET',
+      `/reports/trial-balance?date_from=${today}&date_to=${today}`,
+      admin.accessToken
+    )
+    assert.equal(afterCorrectionCycle.totals.isBalanced, true)
+    assert.equal(Number(afterCorrectionCycle.totals.difference), 0)
 
     await request('PUT', `/orders/${order.id}/status`, admin.accessToken, {
       status: 'returned',
