@@ -121,7 +121,7 @@ compose up -d app
 echo "Waiting for application health check..."
 healthy=false
 for _ in $(seq 1 30); do
-  if compose exec -T app curl -sf http://localhost:4000/health >/dev/null 2>&1; then
+  if compose exec -T app node -e "fetch('http://127.0.0.1:4000/health').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))" >/dev/null 2>&1; then
     healthy=true
     break
   fi
