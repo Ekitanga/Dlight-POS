@@ -471,6 +471,7 @@ export function Dashboard() {
   const canOwnCommissionSummary = hasPermission('commission.own_view') || hasPermission('commission.own_monthly')
   const hasOwnCommissionAccess = canOwnCommissionSummary || hasPermission('commission.own_daily') || hasPermission('commission.own_history') || hasPermission('commission.own_transactions') || hasPermission('commission.own_potential')
   const canManagementCommission = hasPermission('commission.view')
+  const canCloseCommission = hasPermission('commission.close')
   const isAdministrativeRole = ['admin', 'owner'].includes(String(user?.role || '').toLowerCase())
   const showOwnCommission = hasOwnCommissionAccess && !isAdministrativeRole
 
@@ -498,6 +499,13 @@ export function Dashboard() {
     queryKey: ['commission-status'],
     queryFn: async () => (await axios.get('/api/commissions/status')).data,
     enabled: hasOwnCommissionAccess || canManagementCommission
+  })
+
+  const previousCommissionPeriod = presetDateRange('lastmonth').dateFrom.slice(0, 7)
+  const { data: previousCommissionReadiness } = useQuery({
+    queryKey: ['commission-period-readiness', previousCommissionPeriod],
+    queryFn: async () => (await axios.get(`/api/commissions/periods/readiness?period=${previousCommissionPeriod}`)).data,
+    enabled: canCloseCommission && isAdministrativeRole
   })
 
   const { data: managementCommission } = useQuery<ManagementCommissionSummary>({
@@ -809,7 +817,7 @@ export function Dashboard() {
           <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
               <h2 className="text-lg font-semibold">Commission overview</h2>
-              {canManagementCommission && <p className="text-sm text-muted-foreground">Company commission approvals and payments</p>}
+              {canManagementCommission && <p className="text-sm text-muted-foreground">Company commission approvals and recorded settlements</p>}
             </div>
             {canManagementCommission && (
               <DateRangeFilter
@@ -821,16 +829,17 @@ export function Dashboard() {
               />
             )}
           </div>
+          {previousCommissionReadiness && previousCommissionReadiness.periodStatus !== 'closed' && <button type="button" onClick={() => navigate('/commissions')} className={`w-full rounded-lg border p-4 text-left ${previousCommissionReadiness.isReadyToClose ? 'border-emerald-300 bg-emerald-50/60' : 'border-amber-300 bg-amber-50/60'}`}><strong>{new Date(`${previousCommissionReadiness.periodStart}T12:00:00`).toLocaleDateString('en-KE', { month: 'long', year: 'numeric' })} commission is still {previousCommissionReadiness.periodStatus}.</strong><span className="mt-1 block text-sm text-muted-foreground">{formatMoney(previousCommissionReadiness.totalUnpaid || 0)} will move forward, {formatMoney(previousCommissionReadiness.totalRecovery || 0)} is recovery, and {previousCommissionReadiness.pendingCount || 0} item(s) await approval. Open Commission centre to review.</span></button>}
           {commissionStatus && <div className={`rounded-lg border px-3 py-2 text-sm ${commissionStatus.status === 'active' ? 'border-emerald-200 bg-emerald-50/50' : 'border-amber-200 bg-amber-50/50'}`}><strong>Commission is {commissionStatus.status === 'active' ? 'active' : 'paused'}.</strong> {commissionStatus.status === 'active' ? 'Earnings are added after payment, completion and Speedaf remittance where applicable.' : 'New earnings are paused. History and payments remain available.'}</div>}
           {showOwnCommission && canOwnCommissionSummary && commissionSummary && (
             <>
-              <h3 className="text-sm font-semibold">My commission — current month</h3>
+              <h3 className="text-sm font-semibold">My commission — {new Date(`${today.slice(0, 7)}-01T12:00:00`).toLocaleDateString('en-KE', { month: 'long', year: 'numeric' })}</h3>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <StatsCard title="Recorded" value={formatMoney(commissionSummary.grossEarned)} icon={<Wallet className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_recorded', 'My recorded commission sales')} />
                 <StatsCard title="Reversals" value={formatMoney(commissionSummary.reversals)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_reversals', 'My commission reversals')} />
                 <StatsCard title="Balance" value={formatMoney(commissionSummary.netCommission)} icon={<TrendingUp className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_balance', 'My commission balance breakdown')} />
                 <StatsCard title="Approved" value={formatMoney(commissionSummary.approvedPayable ?? commissionSummary.payableAmount ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_approved', 'My approved commission')} />
-                <StatsCard title="Paid" value={formatMoney(commissionSummary.paidAmount || 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_paid', 'My paid commission')} />
+                <StatsCard title="Settled" value={formatMoney(commissionSummary.paidAmount || 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_paid', 'My settled commission')} />
                 <StatsCard title={commissionSummary.recoveryDue > 0 ? 'Recovery' : 'Outstanding'} value={formatMoney(commissionSummary.recoveryDue > 0 ? commissionSummary.recoveryDue : Math.max(0, Number(commissionSummary.outstandingAmount || 0)))} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown(commissionSummary.recoveryDue > 0 ? 'my_commission_recovery' : 'my_commission_outstanding', commissionSummary.recoveryDue > 0 ? 'My commission recovery' : 'My outstanding commission')} />
               </div>
             </>
@@ -847,8 +856,8 @@ export function Dashboard() {
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <StatsCard title="Recorded" subtitle="Commission earned in this period" value={formatMoney(managementCommission.totalEarned)} icon={<Wallet className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_recorded', 'Company recorded commission sales')} />
                 <StatsCard title="Pending approval" subtitle="Recorded and awaiting approval" value={formatMoney(Math.max(0, managementCommission.pendingAmount || 0))} icon={<History className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_pending', 'Commission pending approval')} />
-                <StatsCard title="Approved for payment" subtitle="Approved but not yet paid" value={formatMoney(managementCommission.approvedPayable ?? managementCommission.approvedUnpaid ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_approved', 'Commission approved for payment')} />
-                <StatsCard title="Paid" subtitle="Payments allocated to this period" value={formatMoney(managementCommission.totalPayments || 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_paid', 'Company paid commission')} />
+                <StatsCard title="Approved for settlement" subtitle="Approved but not yet settled" value={formatMoney(managementCommission.approvedPayable ?? managementCommission.approvedUnpaid ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_approved', 'Commission approved for settlement')} />
+                <StatsCard title="Settled" subtitle="Salary or other settlements recorded for this period" value={formatMoney(managementCommission.totalPayments || 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_paid', 'Company settled commission')} />
                 <StatsCard title="Outstanding" subtitle="Pending and approved amounts still unpaid" value={formatMoney(Math.max(0, managementCommission.outstandingAmount || 0))} icon={<TrendingUp className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_outstanding', 'Company outstanding commission')} />
                 <StatsCard title="Reversals" subtitle={managementCommission.recoveryDue > 0 ? `${formatMoney(managementCommission.recoveryDue)} recovery due` : 'Commission removed after a return or adjustment'} value={formatMoney(managementCommission.totalReversals)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_reversals', 'Company commission reversals')} />
                 <StatsCard title="Sales agents" subtitle="Agents with commission activity" value={managementCommission.salespersonCount.toLocaleString()} icon={<Users className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_salespeople', 'Company commission by salesperson')} />

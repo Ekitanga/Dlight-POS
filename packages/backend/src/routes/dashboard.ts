@@ -666,7 +666,7 @@ router.get('/drilldown', async (req, res) => {
          JOIN users u ON u.id = ct.salesperson_id
          LEFT JOIN LATERAL (
            SELECT COALESCE(SUM(cp.paid_amount), 0) AS paid_amount
-           FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id
+           FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided'
          ) payments ON TRUE
          WHERE ${conditions.join(' AND ')}
          GROUP BY u.id, u.full_name, u.email
@@ -729,7 +729,7 @@ router.get('/drilldown', async (req, res) => {
          SELECT COALESCE(SUM(cp.paid_amount), 0) AS paid_amount,
                 MAX(cp.paid_at) AS last_paid_at,
                 string_agg(CONCAT(COALESCE(cp.payment_method::text, 'payment'), ': ', COALESCE(NULLIF(cp.reference, ''), 'no reference')), '; ' ORDER BY cp.paid_at DESC) AS payment_references
-         FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id
+         FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided'
        ) payments ON TRUE
        LEFT JOIN LATERAL (
          SELECT COALESCE(SUM(reversal.amount), 0) AS reversed_amount

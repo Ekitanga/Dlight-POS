@@ -17,12 +17,17 @@ import {
   getManagementCommissionSummary,
   getManagementCommissionBySalesperson,
   approveCommission,
+  approveCommissionBulk,
+  revokeCommissionApproval,
   payCommission,
   payCommissionBulk,
+  voidCommissionSettlement,
   manualAdjustment,
   evaluateOrdersForDateRange,
   closeCommissionPeriod,
-  getCommissionPeriodClosures
+  getCommissionPeriodClosures,
+  getCommissionPeriodReadiness,
+  reopenCommissionPeriod
 } from '../services/commission.js'
 
 const router = Router()
@@ -375,6 +380,19 @@ router.post('/transactions/:id/approve', requirePermission('commission', 'approv
   }
 })
 
+router.post('/bulk-approve', requirePermission('commission', 'approve'), async (req, res) => {
+  try {
+    const transactionIds = Array.isArray(req.body.transaction_ids)
+      ? req.body.transaction_ids.filter((id: any) => typeof id === 'string')
+      : []
+    const result = await approveCommissionBulk(transactionIds, req.user?.userId || null)
+    res.json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || ((error as any).code === '55000' ? 409 : 500)
+    res.status(status).json({ error: { message: status === 500 ? 'Unable to approve the selected commission transactions' : (error as Error).message } })
+  }
+})
+
 router.post('/transactions/:id/pay', requirePermission('commission', 'pay'), async (req, res) => {
   try {
     const result = await payCommission(req.params.id, req.user?.userId || null, {
@@ -382,7 +400,8 @@ router.post('/transactions/:id/pay', requirePermission('commission', 'pay'), asy
       paymentMethod: req.body.payment_method,
       reference: req.body.reference || null,
       notes: req.body.notes || null,
-      idempotencyKey: req.body.idempotency_key || req.get('Idempotency-Key') || null
+      idempotencyKey: req.body.idempotency_key || req.get('Idempotency-Key') || null,
+      settledAt: req.body.settled_at || null
     })
     if (!result) return res.status(404).json({ error: { message: 'Transaction not found or not approved' } })
     res.json(result)
@@ -403,12 +422,41 @@ router.post('/bulk-pay', requirePermission('commission', 'pay'), async (req, res
       paymentMethod: req.body.payment_method,
       reference: req.body.reference || null,
       notes: req.body.notes || null,
-      idempotencyKey: req.body.idempotency_key || req.get('Idempotency-Key') || null
+      idempotencyKey: req.body.idempotency_key || req.get('Idempotency-Key') || null,
+      settledAt: req.body.settled_at || null
     })
     res.json(result)
   } catch (error) {
     const status = (error as any).statusCode || ((error as any).code === '23505' || (error as any).code === '55000' ? 409 : 500)
     res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
+  }
+})
+
+router.post('/transactions/:id/revoke-approval', requirePermission('commission', 'approve'), async (req, res) => {
+  try {
+    if (!['admin', 'owner'].includes(req.user?.role || '')) {
+      return res.status(403).json({ error: { message: 'Only an administrator or owner can revoke commission approval' } })
+    }
+    const result = await revokeCommissionApproval(req.params.id, req.body.reason, req.user?.userId || null)
+    if (!result) return res.status(404).json({ error: { message: 'Approved transaction not found or not eligible for revocation' } })
+    res.json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || ((error as any).code === '55000' ? 409 : 500)
+    res.status(status).json({ error: { message: status === 500 ? 'Unable to revoke commission approval' : (error as Error).message } })
+  }
+})
+
+router.post('/payments/:id/void', requirePermission('commission', 'pay'), async (req, res) => {
+  try {
+    if (!['admin', 'owner'].includes(req.user?.role || '')) {
+      return res.status(403).json({ error: { message: 'Only an administrator or owner can void a commission settlement' } })
+    }
+    const result = await voidCommissionSettlement(req.params.id, req.body.reason, req.user?.userId || null)
+    if (!result) return res.status(404).json({ error: { message: 'Active commission settlement not found' } })
+    res.json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || ((error as any).code === '55000' ? 409 : 500)
+    res.status(status).json({ error: { message: status === 500 ? 'Unable to void commission settlement' : (error as Error).message } })
   }
 })
 
@@ -423,8 +471,9 @@ router.post('/adjust', requirePermission('commission', 'adjust'), async (req, re
     }
     const result = await manualAdjustment(salesperson_id, amount, adjustment_type, reason, order_id || null, order_item_id || null, period, req.user?.userId || null)
     res.status(201).json(result)
-  } catch {
-    res.status(500).json({ error: { message: 'Database error' } })
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
   }
 })
 
@@ -436,6 +485,16 @@ router.get('/periods', requirePermission('commission', 'close'), async (req, res
     res.json({ closures })
   } catch {
     res.status(500).json({ error: { message: 'Unable to load commission closure history' } })
+  }
+})
+
+router.get('/periods/readiness', requirePermission('commission', 'close'), async (req, res) => {
+  try {
+    const readiness = await getCommissionPeriodReadiness(String(req.query.period || ''))
+    res.json(readiness)
+  } catch (error) {
+    const status = (error as any).statusCode || 500
+    res.status(status).json({ error: { message: status === 500 ? 'Unable to prepare the commission close preview' : (error as Error).message } })
   }
 })
 
@@ -452,6 +511,20 @@ router.post('/periods/close', requirePermission('commission', 'close'), async (r
         pending_transactions: (error as any).pendingTransactions || undefined
       }
     })
+  }
+})
+
+router.post('/periods/reopen', requirePermission('commission', 'close'), async (req, res) => {
+  try {
+    if (!['admin', 'owner'].includes(req.user?.role || '')) {
+      return res.status(403).json({ error: { message: 'Only an administrator or owner can undo a commission period close' } })
+    }
+    const result = await reopenCommissionPeriod(String(req.body.period || ''), req.body.reason, req.user?.userId || null)
+    if (!result) return res.status(404).json({ error: { message: 'Closed commission period not found' } })
+    res.json(result)
+  } catch (error) {
+    const status = (error as any).statusCode || ((error as any).code === '55000' ? 409 : 500)
+    res.status(status).json({ error: { message: status === 500 ? 'Unable to undo the commission period close' : (error as Error).message } })
   }
 })
 

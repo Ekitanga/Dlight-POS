@@ -1076,7 +1076,8 @@ export async function getSalespersonCommissionSummary(
        COALESCE(SUM(CASE WHEN transaction_type = 'carry_forward' AND carry_forward_direction = 'credit' THEN amount ELSE 0 END), 0) AS carry_forward_credits,
        COALESCE(SUM(CASE WHEN transaction_type = 'carry_forward' AND carry_forward_direction = 'deduction' THEN amount ELSE 0 END), 0) AS carry_forward_deductions,
        COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp
-                 WHERE cp.salesperson_id = $1 AND cp.period_start >= $2 AND cp.period_start < $3), 0) AS payments,
+                 WHERE cp.salesperson_id = $1 AND cp.status <> 'voided'
+                   AND cp.period_start >= $2 AND cp.period_start < $3), 0) AS payments,
        COALESCE(SUM(CASE
          WHEN transaction_status IN ('approved','paid','reversed') AND transaction_type IN ('earned','manual_add') THEN amount
          WHEN transaction_status IN ('approved','paid','reversed') AND transaction_type = 'carry_forward' AND carry_forward_direction = 'credit' THEN amount
@@ -1185,12 +1186,12 @@ export async function getSalespersonCommissionTransactions(
             ct.product_id, COALESCE(p.name, 'Commission adjustment') AS product_name, ct.eligible_quantity,
             ct.rate_per_item, ct.amount, ct.transaction_type, ct.carry_forward_direction, ct.transaction_status, ct.qualification_date,
             ct.qualified_at, ct.commission_month, ct.reason, u.full_name AS approved_by_name, ct.approved_at, ct.created_at,
-            COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id), 0) AS paid_amount,
-            (SELECT MAX(cp.paid_at) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id) AS last_paid_at,
+             COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided'), 0) AS paid_amount,
+             (SELECT MAX(cp.paid_at) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided') AS last_paid_at,
             (SELECT string_agg(
               CONCAT(COALESCE(cp.payment_method::text, 'payment'), ': ', COALESCE(NULLIF(cp.reference, ''), 'no reference'), ' — ', cp.paid_amount),
               '; ' ORDER BY cp.paid_at DESC, cp.created_at DESC
-             ) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id) AS payment_references,
+             ) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided') AS payment_references,
             COALESCE((SELECT SUM(reversal.amount) FROM commission_transactions reversal
                       WHERE reversal.original_transaction_id = ct.id AND reversal.transaction_type = 'reversal'), 0) AS reversed_amount
      FROM commission_transactions ct
@@ -1299,10 +1300,10 @@ export async function getSalespersonMonthlyCommissionHistory(salespersonId: stri
          WHEN ct.transaction_status IN ('approved','paid') AND ct.transaction_type = 'carry_forward' AND ct.carry_forward_direction = 'deduction' THEN ct.amount
          ELSE 0 END), 0) AS approved_deductions,
        COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp
-                 WHERE cp.salesperson_id = $1
+                 WHERE cp.salesperson_id = $1 AND cp.status <> 'voided'
                    AND date_trunc('month', cp.period_start)::date = date_trunc('month', ct.commission_month)::date), 0) AS paid_amount,
        (SELECT MAX(cp.paid_at) FROM commission_payments cp
-        WHERE cp.salesperson_id = $1
+         WHERE cp.salesperson_id = $1 AND cp.status <> 'voided'
           AND date_trunc('month', cp.period_start)::date = date_trunc('month', ct.commission_month)::date) AS last_paid_at
      FROM commission_transactions ct
      WHERE ct.salesperson_id = $1
@@ -1365,6 +1366,75 @@ export async function getManagementCommissionTransactions(
   }
   const where = conditions.join(' AND ')
   const count = await query(`SELECT COUNT(*)::int AS total FROM commission_transactions ct WHERE ${where}`, params)
+  const bulkSelectionResult = await query(
+    `WITH candidates AS (
+       SELECT ct.id, ct.salesperson_id, ct.commission_month, ct.amount,
+              ct.transaction_status, ct.transaction_type, ct.carry_forward_direction,
+              ct.qualified_at, ct.created_at,
+              COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp
+                        WHERE cp.commission_transaction_id=ct.id AND cp.status <> 'voided'), 0) AS paid_amount,
+              COALESCE((SELECT SUM(reversal.amount) FROM commission_transactions reversal
+                        WHERE reversal.original_transaction_id=ct.id AND reversal.transaction_type='reversal'), 0) AS reversed_amount
+       FROM commission_transactions ct
+       WHERE ${where}
+     ), candidate_groups AS (
+       SELECT salesperson_id, commission_month,
+              SUM(GREATEST(amount-paid_amount-reversed_amount, 0)) AS selected_balance
+       FROM candidates
+       WHERE transaction_status IN ('approved','paid')
+         AND (transaction_type IN ('earned','manual_add')
+           OR (transaction_type='carry_forward' AND carry_forward_direction='credit'))
+         AND amount-paid_amount-reversed_amount > 0.004
+       GROUP BY salesperson_id, commission_month
+     ), period_ledger AS (
+       SELECT ct.salesperson_id, ct.commission_month,
+              COALESCE(SUM(CASE
+                WHEN ct.transaction_type IN ('earned','manual_add') AND ct.transaction_status IN ('approved','paid','reversed') THEN ct.amount
+                WHEN ct.transaction_type='carry_forward' AND ct.carry_forward_direction='credit' AND ct.transaction_status IN ('approved','paid','reversed') THEN ct.amount
+                ELSE 0 END),0) AS credits,
+              COALESCE(SUM(CASE
+                WHEN ct.transaction_type='reversal' THEN ct.amount
+                WHEN ct.transaction_type='manual_deduct' AND ct.transaction_status IN ('approved','paid') THEN ct.amount
+                WHEN ct.transaction_type='carry_forward' AND ct.carry_forward_direction='deduction' AND ct.transaction_status IN ('approved','paid') THEN ct.amount
+                ELSE 0 END),0) AS deductions
+       FROM commission_transactions ct
+       JOIN candidate_groups selected
+         ON selected.salesperson_id=ct.salesperson_id AND selected.commission_month=ct.commission_month
+       GROUP BY ct.salesperson_id, ct.commission_month
+     ), period_payments AS (
+       SELECT selected.salesperson_id, selected.commission_month,
+              COALESCE(SUM(cp.paid_amount) FILTER (WHERE
+                date_trunc('month', cp.period_start)::date=selected.commission_month
+                OR date_trunc('month', paid_ct.commission_month)::date=selected.commission_month),0) AS paid
+       FROM candidate_groups selected
+       LEFT JOIN commission_payments cp ON cp.salesperson_id=selected.salesperson_id AND cp.status <> 'voided'
+       LEFT JOIN commission_transactions paid_ct ON paid_ct.id=cp.commission_transaction_id
+       GROUP BY selected.salesperson_id, selected.commission_month
+     ), payable_groups AS (
+       SELECT selected.salesperson_id, selected.commission_month,
+              LEAST(selected.selected_balance,
+                    GREATEST(ledger.credits-ledger.deductions-COALESCE(payments.paid,0),0)) AS settleable_amount
+       FROM candidate_groups selected
+       JOIN period_ledger ledger USING (salesperson_id, commission_month)
+       LEFT JOIN period_payments payments USING (salesperson_id, commission_month)
+     )
+     SELECT
+       COALESCE(array_agg(id ORDER BY qualified_at DESC, created_at DESC)
+         FILTER (WHERE transaction_status='pending'), '{}'::uuid[]) AS pending_ids,
+       COALESCE(SUM(amount) FILTER (WHERE transaction_status='pending'), 0) AS pending_amount,
+       COALESCE(array_agg(id ORDER BY qualified_at DESC, created_at DESC)
+         FILTER (WHERE transaction_status IN ('approved','paid')
+           AND (transaction_type IN ('earned','manual_add')
+             OR (transaction_type='carry_forward' AND carry_forward_direction='credit'))
+           AND amount-paid_amount-reversed_amount > 0.004
+           AND EXISTS (SELECT 1 FROM payable_groups payable
+                       WHERE payable.salesperson_id=candidates.salesperson_id
+                         AND payable.commission_month=candidates.commission_month
+                         AND payable.settleable_amount > 0.004)), '{}'::uuid[]) AS settleable_ids,
+       COALESCE((SELECT SUM(settleable_amount) FROM payable_groups), 0) AS settleable_amount
+     FROM candidates`,
+    params
+  )
   params.push(pageSize, (page - 1) * pageSize)
   const result = await query(
     `SELECT ct.id, ct.salesperson_id, sp.full_name AS salesperson_name,
@@ -1373,12 +1443,22 @@ export async function getManagementCommissionTransactions(
             ct.eligible_quantity, ct.rate_per_item, ct.amount, ct.transaction_type, ct.carry_forward_direction,
             ct.transaction_status, ct.qualification_date, ct.qualified_at, ct.commission_month,
             ct.reason, approver.full_name AS approved_by_name, ct.approved_at,
-            COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id), 0) AS paid_amount,
-            (SELECT MAX(cp.paid_at) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id) AS last_paid_at,
+             COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided'), 0) AS paid_amount,
+             (SELECT MAX(cp.paid_at) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided') AS last_paid_at,
             (SELECT string_agg(
               CONCAT(COALESCE(cp.payment_method::text, 'payment'), ': ', COALESCE(NULLIF(cp.reference, ''), 'no reference'), ' — ', cp.paid_amount),
               '; ' ORDER BY cp.paid_at DESC, cp.created_at DESC
-             ) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id) AS payment_references,
+              ) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided') AS payment_references,
+             COALESCE((SELECT json_agg(json_build_object(
+               'id', cp.id,
+               'amount', cp.paid_amount,
+               'method', cp.payment_method::text,
+               'reference', cp.reference,
+               'settledAt', cp.paid_at,
+               'status', cp.status
+             ) ORDER BY cp.paid_at DESC, cp.created_at DESC)
+             FROM commission_payments cp
+             WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided'), '[]'::json) AS settlement_records,
             COALESCE((SELECT SUM(reversal.amount) FROM commission_transactions reversal
                       WHERE reversal.original_transaction_id = ct.id AND reversal.transaction_type = 'reversal'), 0) AS reversed_amount
      FROM commission_transactions ct
@@ -1392,7 +1472,17 @@ export async function getManagementCommissionTransactions(
     params
   )
   const total = Number(count.rows[0]?.total || 0)
-  return { data: result.rows, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+  const bulk = bulkSelectionResult.rows[0]
+  return {
+    data: result.rows,
+    pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) },
+    bulkSelection: {
+      pendingIds: bulk.pending_ids || [],
+      pendingAmount: toNumber(bulk.pending_amount),
+      settleableIds: bulk.settleable_ids || [],
+      settleableAmount: toNumber(bulk.settleable_amount)
+    }
+  }
 }
 
 export async function getManagementCommissionSummary(dateFrom: string, dateTo: string) {
@@ -1407,9 +1497,9 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
        COALESCE((SELECT SUM(cp.paid_amount)
                  FROM commission_payments cp
                  LEFT JOIN commission_transactions paid_ct ON paid_ct.id = cp.commission_transaction_id
-                 WHERE (cp.commission_transaction_id IS NOT NULL
-                          AND paid_ct.qualification_date >= $1 AND paid_ct.qualification_date <= $2)
-                    OR (cp.commission_transaction_id IS NULL
+                  WHERE cp.status <> 'voided' AND ((cp.commission_transaction_id IS NOT NULL
+                           AND paid_ct.qualification_date >= $1 AND paid_ct.qualification_date <= $2)
+                     OR (cp.commission_transaction_id IS NULL
                           AND cp.period_start >= $1::date AND cp.period_start <= $2::date)), 0) AS total_payments,
        COALESCE(SUM(CASE
          WHEN ct.transaction_status IN ('approved','paid','reversed')
@@ -1478,7 +1568,7 @@ export async function getManagementCommissionBySalesperson(dateFrom: string, dat
        COALESCE((SELECT SUM(cp.paid_amount)
                  FROM commission_payments cp
                  LEFT JOIN commission_transactions paid_ct ON paid_ct.id = cp.commission_transaction_id
-                 WHERE cp.salesperson_id = u.id
+                  WHERE cp.salesperson_id = u.id AND cp.status <> 'voided'
                    AND ((cp.commission_transaction_id IS NOT NULL
                          AND paid_ct.qualification_date >= $1 AND paid_ct.qualification_date <= $2)
                      OR (cp.commission_transaction_id IS NULL
@@ -1514,8 +1604,7 @@ export async function getManagementCommissionBySalesperson(dateFrom: string, dat
   })
 }
 
-export async function approveCommission(transactionId: string, userId: string | null) {
-  return transaction(async client => {
+async function approveCommissionWithClient(client: DbExecutor, transactionId: string, userId: string | null) {
     const existing = await client.query(
       `SELECT id, salesperson_id, commission_month
        FROM commission_transactions
@@ -1552,36 +1641,86 @@ export async function approveCommission(transactionId: string, userId: string | 
       newValues: { transaction_status: 'approved' }
     })
     return result.rows[0] || null
+}
+
+export async function approveCommission(transactionId: string, userId: string | null) {
+  return transaction(client => approveCommissionWithClient(client, transactionId, userId))
+}
+
+export async function approveCommissionBulk(transactionIds: string[], userId: string | null) {
+  const uniqueIds = [...new Set(transactionIds)].sort()
+  if (uniqueIds.length === 0) {
+    throw Object.assign(new Error('Select at least one pending commission transaction to approve'), { statusCode: 400 })
+  }
+  // Approvals are one management decision, so commit every selected row or
+  // roll the complete batch back when any row is no longer pending/eligible.
+  return transaction(async client => {
+    const results = []
+    for (const transactionId of uniqueIds) {
+      const result = await approveCommissionWithClient(client, transactionId, userId)
+      if (!result) {
+        throw Object.assign(new Error(`Transaction ${transactionId} was not found, is no longer pending, or cannot be self-approved`), { statusCode: 409 })
+      }
+      results.push(result)
+    }
+    return { approvedCount: results.length, transactions: results }
   })
 }
 
 export interface CommissionPaymentInput {
   amount?: number
-  paymentMethod: 'cash' | 'mpesa' | 'bank_transfer'
+  paymentMethod: 'cash' | 'mpesa' | 'bank_transfer' | 'payroll'
   reference?: string | null
   notes?: string | null
   idempotencyKey?: string | null
+  settledAt?: string | null
 }
 
-export async function payCommission(transactionId: string, userId: string | null, input: CommissionPaymentInput) {
-  if (!['cash', 'mpesa', 'bank_transfer'].includes(input.paymentMethod)) {
-    throw Object.assign(new Error('Payment method must be cash, M-PESA, or bank transfer'), { statusCode: 400 })
+interface NormalizedCommissionPaymentInput extends CommissionPaymentInput {
+  reference: string | null
+  idempotencyKey: string
+  settledAt: string
+}
+
+function normalizeCommissionPaymentInput(input: CommissionPaymentInput, idempotencyKeyOverride?: string): NormalizedCommissionPaymentInput {
+  if (!['cash', 'mpesa', 'bank_transfer', 'payroll'].includes(input.paymentMethod)) {
+    throw Object.assign(new Error('Settlement method must be cash, M-PESA, bank transfer, or salary / payroll'), { statusCode: 400 })
   }
   const reference = String(input.reference || '').trim() || null
   const suppliedIdempotencyKey = String(input.idempotencyKey || '').trim() || null
-  if (['mpesa', 'bank_transfer'].includes(input.paymentMethod) && !reference) {
-    throw Object.assign(new Error('An M-PESA or bank payment reference is required'), { statusCode: 400 })
+  if (['mpesa', 'bank_transfer', 'payroll'].includes(input.paymentMethod) && !reference) {
+    throw Object.assign(new Error('A reference is required for M-PESA, bank, and salary / payroll settlements'), { statusCode: 400 })
   }
   if (input.paymentMethod === 'cash' && !suppliedIdempotencyKey) {
-    throw Object.assign(new Error('A cash payment confirmation key is required to prevent duplicate disbursement'), { statusCode: 400 })
+    throw Object.assign(new Error('A cash settlement confirmation key is required to prevent a duplicate record'), { statusCode: 400 })
   }
-  const idempotencyKey = input.paymentMethod === 'cash'
+  const idempotencyKey = idempotencyKeyOverride || (input.paymentMethod === 'cash'
     ? `cash:${suppliedIdempotencyKey}`
-    : `${input.paymentMethod}:${reference!.toUpperCase()}`
+    : `${input.paymentMethod}:${reference!.toUpperCase()}`)
   if (idempotencyKey.length > 128) {
-    throw Object.assign(new Error('Payment reference or confirmation key is too long'), { statusCode: 400 })
+    throw Object.assign(new Error('Settlement reference or confirmation key is too long'), { statusCode: 400 })
   }
-  return transaction(async client => {
+  const rawSettledAt = String(input.settledAt || '').trim()
+  let settledAt = normalizeNairobiTimestamp(new Date())
+  if (rawSettledAt) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(rawSettledAt)) {
+      throw Object.assign(new Error('Settlement date must use YYYY-MM-DD'), { statusCode: 400 })
+    }
+    if (rawSettledAt > nairobiDate(new Date())) {
+      throw Object.assign(new Error('Settlement date cannot be in the future'), { statusCode: 400 })
+    }
+    settledAt = `${rawSettledAt} 12:00:00.000`
+  }
+  return { ...input, reference, idempotencyKey, settledAt }
+}
+
+async function payCommissionWithClient(
+  client: DbExecutor,
+  transactionId: string,
+  userId: string | null,
+  input: NormalizedCommissionPaymentInput,
+  skipWhenNoCapacity = false
+) {
     const transactionResult = await client.query(
       `SELECT * FROM commission_transactions
        WHERE id = $1 AND transaction_status IN ('approved','paid')
@@ -1606,12 +1745,15 @@ export async function payCommission(transactionId: string, userId: string | null
     )
     const priorAttempt = await client.query(
       'SELECT * FROM commission_payments WHERE idempotency_key = $1 FOR UPDATE',
-      [idempotencyKey]
+      [input.idempotencyKey]
     )
     if (priorAttempt.rows.length > 0) {
       const payment = priorAttempt.rows[0]
       if (payment.commission_transaction_id !== transactionId) {
-        throw Object.assign(new Error('This payment reference or confirmation key was already used for another commission payment'), { statusCode: 409 })
+        throw Object.assign(new Error('This settlement reference or confirmation key was already used for another commission settlement'), { statusCode: 409 })
+      }
+      if (payment.status === 'voided') {
+        throw Object.assign(new Error('This settlement reference belongs to a voided record; use a new reference'), { statusCode: 409 })
       }
       return {
         transaction: commission,
@@ -1630,7 +1772,7 @@ export async function payCommission(transactionId: string, userId: string | null
       throw Object.assign(new Error(`Commission period ${commission.commission_month} is closed; pay its carry-forward entry in the next open period instead`), { statusCode: 409 })
     }
     const paidResult = await client.query(
-      'SELECT COALESCE(SUM(paid_amount), 0) AS paid FROM commission_payments WHERE commission_transaction_id = $1',
+      "SELECT COALESCE(SUM(paid_amount), 0) AS paid FROM commission_payments WHERE commission_transaction_id = $1 AND status <> 'voided'",
       [transactionId]
     )
     const alreadyPaid = toNumber(paidResult.rows[0]?.paid)
@@ -1664,8 +1806,9 @@ export async function payCommission(transactionId: string, userId: string | null
          COALESCE((SELECT SUM(cp.paid_amount)
            FROM commission_payments cp
            LEFT JOIN commission_transactions paid_ct ON paid_ct.id = cp.commission_transaction_id
-           WHERE cp.salesperson_id = $1
-             AND (date_trunc('month', cp.period_start)::date = $2::date
+            WHERE cp.salesperson_id = $1
+              AND cp.status <> 'voided'
+              AND (date_trunc('month', cp.period_start)::date = $2::date
                   OR date_trunc('month', paid_ct.commission_month)::date = $2::date)), 0) AS paid
        FROM commission_transactions
        WHERE salesperson_id = $1 AND commission_month = $2`,
@@ -1674,6 +1817,15 @@ export async function payCommission(transactionId: string, userId: string | null
     const period = periodResult.rows[0]
     const periodAvailable = Math.max(0, toNumber(period.approved_credits) - toNumber(period.deductions) - toNumber(period.paid))
     const remaining = Math.min(directRemaining, periodAvailable)
+    if (skipWhenNoCapacity && input.amount === undefined && remaining < 0.01) {
+      return {
+        transaction: commission,
+        payment: null,
+        remainingAmount: directRemaining,
+        periodPayableRemaining: periodAvailable,
+        skipped: true
+      }
+    }
     const rawRequestedAmount = input.amount === undefined ? remaining : Number(input.amount)
     const requestedAmount = amountToCents(rawRequestedAmount)
     if (!Number.isFinite(rawRequestedAmount) || Math.abs(rawRequestedAmount - requestedAmount) > 0.000001 || requestedAmount <= 0 || requestedAmount > remaining + 0.000001) {
@@ -1683,12 +1835,12 @@ export async function payCommission(transactionId: string, userId: string | null
     const paymentResult = await client.query(
       `INSERT INTO commission_payments
         (commission_transaction_id, salesperson_id, period_start, period_end, total_amount, paid_amount,
-         payment_method, reference, paid_by, paid_at, notes, idempotency_key, status, created_by, created_at)
+          payment_method, reference, paid_by, paid_at, notes, idempotency_key, status, created_by, created_at)
        VALUES ($1, $2, $3, ($3::date + INTERVAL '1 month - 1 day')::date, $4, $5,
-               $6, $7, $8, NOW(), $9, $10, $11, $8, NOW())
+               $6, $7, $8, $9::timestamp, $10, $11, $12, $8, NOW())
        RETURNING *`,
       [transactionId, commission.salesperson_id, commission.commission_month, directPayable, requestedAmount,
-       input.paymentMethod, reference, userId, input.notes || null, idempotencyKey,
+       input.paymentMethod, input.reference, userId, input.settledAt, input.notes || null, input.idempotencyKey,
        alreadyPaid + requestedAmount >= directPayable ? 'paid' : 'partial']
     )
     const fullyPaid = alreadyPaid + requestedAmount >= directPayable
@@ -1708,7 +1860,8 @@ export async function payCommission(transactionId: string, userId: string | null
         payment_id: paymentResult.rows[0].id,
         amount: requestedAmount,
         payment_method: input.paymentMethod,
-        reference,
+        reference: input.reference,
+        settled_at: input.settledAt,
         fully_paid: fullyPaid,
         reversal_offset: reversedAmount
       }
@@ -1719,41 +1872,137 @@ export async function payCommission(transactionId: string, userId: string | null
       remainingAmount: Math.max(0, directRemaining - requestedAmount),
       periodPayableRemaining: Math.max(0, periodAvailable - requestedAmount)
     }
-  })
+}
+
+export async function payCommission(transactionId: string, userId: string | null, input: CommissionPaymentInput) {
+  const normalized = normalizeCommissionPaymentInput(input)
+  return transaction(client => payCommissionWithClient(client, transactionId, userId, normalized))
 }
 
 export async function payCommissionBulk(transactionIds: string[], userId: string | null, input: CommissionPaymentInput) {
   if (!Array.isArray(transactionIds) || transactionIds.length === 0) {
     throw Object.assign(new Error('Select at least one commission transaction to pay'), { statusCode: 400 })
   }
-  if (!['cash', 'mpesa', 'bank_transfer'].includes(input.paymentMethod)) {
-    throw Object.assign(new Error('Payment method must be cash, M-PESA, or bank transfer'), { statusCode: 400 })
-  }
   const reference = String(input.reference || '').trim() || null
   const suppliedIdempotencyKey = String(input.idempotencyKey || '').trim() || null
-  if (['mpesa', 'bank_transfer'].includes(input.paymentMethod) && !reference) {
-    throw Object.assign(new Error('A bulk M-PESA or bank payment reference is required'), { statusCode: 400 })
-  }
-  if (input.paymentMethod === 'cash' && !suppliedIdempotencyKey) {
-    throw Object.assign(new Error('A cash bulk payment confirmation key is required'), { statusCode: 400 })
-  }
   const bulkIdempotencyKey = input.paymentMethod === 'cash'
     ? `cash:${suppliedIdempotencyKey}`
-    : `${input.paymentMethod}:${reference!.toUpperCase()}`
+    : `${input.paymentMethod}:${String(reference || '').toUpperCase()}`
 
-  const results = []
-  for (const transactionId of transactionIds) {
-    const result = await payCommission(transactionId, userId, {
-      ...input,
-      reference,
-      idempotencyKey: `${bulkIdempotencyKey}:${transactionId}`
-    })
-    if (!result) {
-      throw Object.assign(new Error(`Transaction ${transactionId} was not found or not payable`), { statusCode: 404 })
+  // One database transaction makes a salary batch all-or-nothing. A failure
+  // on any selected ledger row rolls back every settlement in the batch.
+  return transaction(async client => {
+    const results = []
+    for (const transactionId of transactionIds) {
+      const normalized = normalizeCommissionPaymentInput(
+        { ...input, reference, idempotencyKey: suppliedIdempotencyKey },
+        `${bulkIdempotencyKey}:${transactionId}`
+      )
+      const result = await payCommissionWithClient(client, transactionId, userId, normalized, true)
+      if (!result) {
+        throw Object.assign(new Error(`Transaction ${transactionId} was not found or not payable`), { statusCode: 404 })
+      }
+      results.push(result)
     }
-    results.push(result)
-  }
-  return { bulkReference: bulkIdempotencyKey, results }
+    return { bulkReference: bulkIdempotencyKey, results }
+  })
+}
+
+export async function revokeCommissionApproval(transactionId: string, reason: string, userId: string | null) {
+  const revokeReason = String(reason || '').trim()
+  if (!revokeReason) throw Object.assign(new Error('A reason is required to revoke approval'), { statusCode: 400 })
+  return transaction(async client => {
+    const existing = await client.query(
+      `SELECT * FROM commission_transactions
+       WHERE id = $1 AND transaction_type <> 'carry_forward'
+       FOR UPDATE`,
+      [transactionId]
+    )
+    const commission = existing.rows[0]
+    if (!commission) return null
+    await lockCommissionPeriod(client, commission.commission_month)
+    const closed = await client.query(
+      `SELECT id FROM commission_period_closures WHERE period_start=$1::date AND status='closed'`,
+      [commission.commission_month]
+    )
+    if (closed.rows.length > 0) throw Object.assign(new Error('A closed-period approval cannot be revoked; reopen the period or use a current correction'), { statusCode: 409 })
+    const settlements = await client.query(
+      `SELECT COUNT(*)::int AS count FROM commission_payments
+       WHERE commission_transaction_id=$1 AND status <> 'voided'`,
+      [transactionId]
+    )
+    if (Number(settlements.rows[0]?.count || 0) > 0) {
+      throw Object.assign(new Error('Void the recorded settlement before revoking this approval'), { statusCode: 409 })
+    }
+    if (commission.transaction_status !== 'approved') {
+      throw Object.assign(new Error('Only an approved, unsettled commission can have its approval revoked'), { statusCode: 409 })
+    }
+    const updated = await client.query(
+      `UPDATE commission_transactions
+       SET transaction_status='pending', approved_by=NULL, approved_at=NULL,
+           reason=CASE WHEN reason IS NULL OR reason='' THEN $2 ELSE reason || E'\n[Approval revoked] ' || $2 END
+       WHERE id=$1 RETURNING *`,
+      [transactionId, revokeReason]
+    )
+    await logAudit({
+      client, userId, action: 'commission_approval_revoked', entityType: 'commission_transaction', entityId: transactionId,
+      oldValues: { transaction_status: 'approved', approved_by: commission.approved_by, approved_at: commission.approved_at },
+      newValues: { transaction_status: 'pending', reason: revokeReason }
+    })
+    return updated.rows[0]
+  })
+}
+
+export async function voidCommissionSettlement(paymentId: string, reason: string, userId: string | null) {
+  const voidReason = String(reason || '').trim()
+  if (!voidReason) throw Object.assign(new Error('A reason is required to void a settlement'), { statusCode: 400 })
+  return transaction(async client => {
+    const existing = await client.query(
+      `SELECT cp.*, ct.commission_month, ct.amount AS transaction_amount, ct.transaction_status
+       FROM commission_payments cp
+       JOIN commission_transactions ct ON ct.id=cp.commission_transaction_id
+       WHERE cp.id=$1 AND cp.status <> 'voided'
+       FOR UPDATE OF cp, ct`,
+      [paymentId]
+    )
+    const payment = existing.rows[0]
+    if (!payment) return null
+    await lockCommissionPeriod(client, payment.commission_month)
+    const closed = await client.query(
+      `SELECT id FROM commission_period_closures WHERE period_start=$1::date AND status='closed'`,
+      [payment.commission_month]
+    )
+    if (closed.rows.length > 0) throw Object.assign(new Error('A settlement in a closed period cannot be voided until that period is safely reopened'), { statusCode: 409 })
+    await client.query(
+      `UPDATE commission_payments
+       SET status='voided', voided_by=$2, voided_at=NOW(), void_reason=$3
+       WHERE id=$1`,
+      [paymentId, userId, voidReason]
+    )
+    const activePaid = await client.query(
+      `SELECT COALESCE(SUM(paid_amount),0) AS paid FROM commission_payments
+       WHERE commission_transaction_id=$1 AND status <> 'voided'`,
+      [payment.commission_transaction_id]
+    )
+    const reversed = await client.query(
+      `SELECT COALESCE(SUM(amount),0) AS amount FROM commission_transactions
+       WHERE original_transaction_id=$1 AND transaction_type='reversal'`,
+      [payment.commission_transaction_id]
+    )
+    const payable = Math.max(0, toNumber(payment.transaction_amount) - toNumber(reversed.rows[0]?.amount))
+    const paid = toNumber(activePaid.rows[0]?.paid)
+    const transactionStatus = paid + 0.000001 >= payable ? 'paid' : 'approved'
+    const updated = await client.query(
+      `UPDATE commission_transactions SET transaction_status=$2 WHERE id=$1 RETURNING *`,
+      [payment.commission_transaction_id, transactionStatus]
+    )
+    await logAudit({
+      client, userId, action: 'commission_settlement_voided', entityType: 'commission_payment', entityId: paymentId,
+      oldValues: { status: payment.status, paid_amount: payment.paid_amount, reference: payment.reference },
+      newValues: { status: 'voided', reason: voidReason, commission_transaction_status: transactionStatus }
+    })
+    return { paymentId, transaction: updated.rows[0], activePaid: paid }
+  })
 }
 
 export async function manualAdjustment(
@@ -1899,14 +2148,37 @@ export interface CommissionPeriodClosure {
   id: string
   periodStart: string
   periodEnd: string
-  status: 'closing' | 'closed'
+  status: 'closing' | 'closed' | 'reopened'
   reason: string
   closedBy: string | null
   closedByName?: string | null
   closedAt: string | null
+  reopenedBy?: string | null
+  reopenedByName?: string | null
+  reopenedAt?: string | null
+  reopenReason?: string | null
   createdAt: string
   totalUnpaid: number
   totalRecovery: number
+  balances: CommissionPeriodClosureBalance[]
+}
+
+export interface CommissionPeriodReadiness {
+  periodStart: string
+  periodEnd: string
+  nextPeriodStart: string
+  periodStatus: 'open' | 'closing' | 'closed' | 'reopened'
+  completedMonth: boolean
+  isReadyToClose: boolean
+  priorUnclosedPeriod: string | null
+  pendingCount: number
+  pendingTransactions: any[]
+  totalApprovedCredits: number
+  totalApprovedDeductions: number
+  totalSettled: number
+  totalUnpaid: number
+  totalRecovery: number
+  blockers: string[]
   balances: CommissionPeriodClosureBalance[]
 }
 
@@ -1922,6 +2194,128 @@ function periodClosureBalanceFromRow(row: any): CommissionPeriodClosureBalance {
     closingBalance: amountToCents(row.closing_balance),
     sourceOffsetTransactionId: row.source_offset_transaction_id || null,
     carryForwardTransactionId: row.carry_forward_transaction_id || null
+  }
+}
+
+async function commissionPeriodBalanceRows(client: DbExecutor, periodStart: string) {
+  return client.query(
+    `WITH ledger AS (
+       SELECT ct.salesperson_id,
+              (array_agg(ct.programme_id ORDER BY ct.qualified_at DESC, ct.created_at DESC))[1] AS programme_id,
+              COALESCE(SUM(CASE
+                WHEN ct.transaction_type IN ('earned', 'manual_add')
+                  AND ct.transaction_status IN ('approved', 'paid', 'reversed') THEN ct.amount
+                WHEN ct.transaction_type = 'carry_forward' AND ct.carry_forward_direction = 'credit'
+                  AND ct.transaction_status IN ('approved', 'paid', 'reversed') THEN ct.amount
+                ELSE 0 END), 0) AS approved_credits,
+              COALESCE(SUM(CASE
+                WHEN ct.transaction_type = 'reversal' THEN ct.amount
+                WHEN ct.transaction_type = 'manual_deduct'
+                  AND ct.transaction_status IN ('approved', 'paid') THEN ct.amount
+                WHEN ct.transaction_type = 'carry_forward' AND ct.carry_forward_direction = 'deduction'
+                  AND ct.transaction_status IN ('approved', 'paid') THEN ct.amount
+                ELSE 0 END), 0) AS approved_deductions
+       FROM commission_transactions ct
+       WHERE ct.commission_month = $1::date
+       GROUP BY ct.salesperson_id
+     ), payments AS (
+       SELECT COALESCE(ct.salesperson_id, cp.salesperson_id) AS salesperson_id,
+              COALESCE(SUM(cp.paid_amount), 0) AS paid_amount
+       FROM commission_payments cp
+       LEFT JOIN commission_transactions ct ON ct.id = cp.commission_transaction_id
+       WHERE cp.status <> 'voided'
+         AND (date_trunc('month', cp.period_start)::date = $1::date
+           OR date_trunc('month', ct.commission_month)::date = $1::date)
+       GROUP BY COALESCE(ct.salesperson_id, cp.salesperson_id)
+     )
+     SELECT COALESCE(ledger.salesperson_id, payments.salesperson_id) AS salesperson_id,
+            salesperson.full_name AS salesperson_name,
+            COALESCE(ledger.programme_id,
+              (SELECT id FROM commission_programmes ORDER BY effective_from DESC, created_at DESC LIMIT 1)
+            ) AS programme_id,
+            COALESCE(ledger.approved_credits, 0) AS approved_credits,
+            COALESCE(ledger.approved_deductions, 0) AS approved_deductions,
+            COALESCE(payments.paid_amount, 0) AS paid_amount,
+            COALESCE(ledger.approved_credits, 0) - COALESCE(ledger.approved_deductions, 0) - COALESCE(payments.paid_amount, 0) AS closing_balance
+     FROM ledger
+     FULL OUTER JOIN payments ON payments.salesperson_id = ledger.salesperson_id
+     JOIN users salesperson ON salesperson.id = COALESCE(ledger.salesperson_id, payments.salesperson_id)
+     ORDER BY salesperson.full_name`,
+    [periodStart]
+  )
+}
+
+async function firstPriorUnclosedCommissionPeriod(client: DbExecutor, periodStart: string): Promise<string | null> {
+  const result = await client.query(
+    `WITH evidence_periods AS (
+       SELECT date_trunc('month', effective_from)::date AS period_start FROM commission_programmes
+       UNION ALL
+       SELECT date_trunc('month', commission_month)::date AS period_start FROM commission_transactions
+       UNION ALL
+       SELECT date_trunc('month', period_start)::date AS period_start FROM commission_payments
+     ), timeline_start AS (
+       SELECT MIN(period_start) AS period_start FROM evidence_periods WHERE period_start < $1::date
+     ), candidate_periods AS (
+       SELECT generated.period_start::date AS period_start
+       FROM timeline_start
+       CROSS JOIN LATERAL generate_series(
+         timeline_start.period_start, ($1::date - INTERVAL '1 month')::date, INTERVAL '1 month'
+       ) AS generated(period_start)
+     )
+     SELECT candidate.period_start
+     FROM candidate_periods candidate
+     LEFT JOIN commission_period_closures closure
+       ON closure.period_start = candidate.period_start AND closure.status = 'closed'
+     WHERE closure.id IS NULL
+     ORDER BY candidate.period_start ASC
+     LIMIT 1`,
+    [periodStart]
+  )
+  return result.rows[0] ? dateOnly(result.rows[0].period_start) : null
+}
+
+export async function getCommissionPeriodReadiness(period: string): Promise<CommissionPeriodReadiness> {
+  const { periodStart, periodEnd, nextPeriodStart } = normalizeCommissionPeriod(period)
+  const [closure, pending, balancesResult] = await Promise.all([
+    query(`SELECT status FROM commission_period_closures WHERE period_start=$1::date`, [periodStart]),
+    query(
+      `SELECT ct.id, ct.salesperson_id, salesperson.full_name AS salesperson_name,
+              ct.transaction_type, ct.amount, ct.reason
+       FROM commission_transactions ct
+       JOIN users salesperson ON salesperson.id=ct.salesperson_id
+       WHERE ct.commission_month=$1::date AND ct.transaction_status='pending'
+       ORDER BY salesperson.full_name, ct.created_at`,
+      [periodStart]
+    ),
+    commissionPeriodBalanceRows(defaultExecutor, periodStart)
+  ])
+  const priorUnclosedPeriod = await firstPriorUnclosedCommissionPeriod(defaultExecutor, periodStart)
+  const completedMonth = periodEnd < nairobiDate(new Date())
+  const periodStatus = (closure.rows[0]?.status || 'open') as CommissionPeriodReadiness['periodStatus']
+  const balances: CommissionPeriodClosureBalance[] = balancesResult.rows.map((row: any) => ({
+    ...periodClosureBalanceFromRow(row),
+    sourceOffsetTransactionId: null,
+    carryForwardTransactionId: null
+  }))
+  const blockers: string[] = []
+  if (!completedMonth) blockers.push('Only a fully completed Nairobi calendar month can be closed.')
+  if (periodStatus === 'closed') blockers.push('This period is already closed.')
+  if (periodStatus === 'closing') blockers.push('This period is already being closed.')
+  if (priorUnclosedPeriod) blockers.push(`Prior commission period ${priorUnclosedPeriod} must be closed first.`)
+  if (pending.rows.length > 0) blockers.push(`${pending.rows.length} pending commission ledger item(s) require approval or resolution.`)
+  return {
+    periodStart, periodEnd, nextPeriodStart, periodStatus, completedMonth,
+    isReadyToClose: blockers.length === 0,
+    priorUnclosedPeriod,
+    pendingCount: pending.rows.length,
+    pendingTransactions: pending.rows.slice(0, 25),
+    totalApprovedCredits: amountToCents(balances.reduce((sum, row) => sum + row.approvedCredits, 0)),
+    totalApprovedDeductions: amountToCents(balances.reduce((sum, row) => sum + row.approvedDeductions, 0)),
+    totalSettled: amountToCents(balances.reduce((sum, row) => sum + row.paidAmount, 0)),
+    totalUnpaid: amountToCents(balances.reduce((sum, row) => sum + Math.max(0, row.closingBalance), 0)),
+    totalRecovery: amountToCents(balances.reduce((sum, row) => sum + Math.max(0, -row.closingBalance), 0)),
+    blockers,
+    balances
   }
 }
 
@@ -1957,7 +2351,7 @@ export async function closeCommissionPeriod(
        WHERE period_start = $1::date FOR UPDATE`,
       [periodStart]
     )
-    if (existing.rows.length > 0) {
+    if (existing.rows.length > 0 && existing.rows[0].status !== 'reopened') {
       throw Object.assign(new Error(`Commission period ${periodStart} has already been ${existing.rows[0].status}`), { statusCode: 409 })
     }
     const nextPeriod = await client.query(
@@ -2024,13 +2418,20 @@ export async function closeCommissionPeriod(
       throw error
     }
 
-    const closureResult = await client.query(
-      `INSERT INTO commission_period_closures
-        (period_start, period_end, status, reason, closed_by, created_at)
-       VALUES ($1::date, $2::date, 'closing', $3, $4, NOW())
-       RETURNING *`,
-      [periodStart, periodEnd, closeReason, userId]
-    )
+    const closureResult = existing.rows[0]?.status === 'reopened'
+      ? await client.query(
+          `UPDATE commission_period_closures
+           SET status='closing', reason=$2, closed_by=$3, closed_at=NULL, created_at=NOW()
+           WHERE id=$1 RETURNING *`,
+          [existing.rows[0].id, closeReason, userId]
+        )
+      : await client.query(
+          `INSERT INTO commission_period_closures
+            (period_start, period_end, status, reason, closed_by, created_at)
+           VALUES ($1::date, $2::date, 'closing', $3, $4, NOW())
+           RETURNING *`,
+          [periodStart, periodEnd, closeReason, userId]
+        )
     const closure = closureResult.rows[0]
 
     const balancesResult = await client.query(
@@ -2060,8 +2461,9 @@ export async function closeCommissionPeriod(
                 COALESCE(SUM(cp.paid_amount), 0) AS paid_amount
          FROM commission_payments cp
          LEFT JOIN commission_transactions ct ON ct.id = cp.commission_transaction_id
-         WHERE date_trunc('month', cp.period_start)::date = $1::date
-            OR date_trunc('month', ct.commission_month)::date = $1::date
+         WHERE cp.status <> 'voided'
+           AND (date_trunc('month', cp.period_start)::date = $1::date
+             OR date_trunc('month', ct.commission_month)::date = $1::date)
          GROUP BY COALESCE(ct.salesperson_id, cp.salesperson_id)
        )
        SELECT COALESCE(ledger.salesperson_id, payments.salesperson_id) AS salesperson_id,
@@ -2207,17 +2609,124 @@ export async function closeCommissionPeriod(
   })
 }
 
+export async function reopenCommissionPeriod(period: string, reason: string, userId: string | null) {
+  const { periodStart, nextPeriodStart } = normalizeCommissionPeriod(period)
+  const reopenReason = String(reason || '').trim()
+  if (!reopenReason) throw Object.assign(new Error('A reason is required to undo a period close'), { statusCode: 400 })
+
+  return transaction(async client => {
+    await lockCommissionPeriod(client, periodStart)
+    await lockCommissionPeriod(client, nextPeriodStart)
+    await client.query('LOCK TABLE commission_transactions, commission_payments IN SHARE ROW EXCLUSIVE MODE')
+    const closureResult = await client.query(
+      `SELECT * FROM commission_period_closures
+       WHERE period_start=$1::date AND status='closed' FOR UPDATE`,
+      [periodStart]
+    )
+    const closure = closureResult.rows[0]
+    if (!closure) return null
+    const nextClosed = await client.query(
+      `SELECT id FROM commission_period_closures WHERE period_start=$1::date AND status='closed'`,
+      [nextPeriodStart]
+    )
+    if (nextClosed.rows.length > 0) {
+      throw Object.assign(new Error(`Cannot undo ${periodStart}: the following period ${nextPeriodStart} is already closed`), { statusCode: 409 })
+    }
+    const balancesResult = await client.query(
+      `SELECT balance.*, salesperson.full_name AS salesperson_name
+       FROM commission_period_closure_balances balance
+       JOIN users salesperson ON salesperson.id=balance.salesperson_id
+       WHERE balance.closure_id=$1 FOR UPDATE OF balance`,
+      [closure.id]
+    )
+    const carryPayments = await client.query(
+      `SELECT cp.id FROM commission_payments cp
+       JOIN commission_transactions ct ON ct.id=cp.commission_transaction_id
+       WHERE ct.reference_type='commission_period_closure' AND ct.reference_id=$1
+         AND cp.status <> 'voided'
+       LIMIT 1`,
+      [closure.id]
+    )
+    if (carryPayments.rows.length > 0) {
+      throw Object.assign(new Error('Cannot undo this close because a carried balance has already been settled. Void that settlement first.'), { statusCode: 409 })
+    }
+
+    // A period-level deduction can make another credit appear payable. Ensure
+    // removing a carried credit would not leave the following month overpaid.
+    const unsafeTarget = await client.query(
+      `WITH ledger AS (
+         SELECT ct.salesperson_id,
+                COALESCE(SUM(CASE
+                  WHEN ct.reference_id IS DISTINCT FROM $1
+                   AND ((ct.transaction_type IN ('earned','manual_add') AND ct.transaction_status IN ('approved','paid','reversed'))
+                     OR (ct.transaction_type='carry_forward' AND ct.carry_forward_direction='credit' AND ct.transaction_status IN ('approved','paid','reversed')))
+                  THEN ct.amount ELSE 0 END),0) AS credits,
+                COALESCE(SUM(CASE
+                  WHEN ct.reference_id IS DISTINCT FROM $1
+                   AND (ct.transaction_type='reversal'
+                     OR (ct.transaction_type='manual_deduct' AND ct.transaction_status IN ('approved','paid'))
+                     OR (ct.transaction_type='carry_forward' AND ct.carry_forward_direction='deduction' AND ct.transaction_status IN ('approved','paid')))
+                  THEN ct.amount ELSE 0 END),0) AS deductions
+         FROM commission_transactions ct
+         WHERE ct.commission_month=$2::date
+         GROUP BY ct.salesperson_id
+       ), payments AS (
+         SELECT cp.salesperson_id, COALESCE(SUM(cp.paid_amount),0) AS paid
+         FROM commission_payments cp
+         LEFT JOIN commission_transactions ct ON ct.id=cp.commission_transaction_id
+         WHERE cp.status <> 'voided'
+           AND (date_trunc('month', cp.period_start)::date=$2::date
+             OR date_trunc('month', ct.commission_month)::date=$2::date)
+         GROUP BY cp.salesperson_id
+       )
+       SELECT ledger.salesperson_id
+       FROM ledger LEFT JOIN payments USING (salesperson_id)
+       WHERE ledger.credits - ledger.deductions - COALESCE(payments.paid,0) < -0.004
+       LIMIT 1`,
+      [closure.id, nextPeriodStart]
+    )
+    if (unsafeTarget.rows.length > 0) {
+      throw Object.assign(new Error('Cannot undo this close because later settlements rely on its carried credit. Void the affected settlement first.'), { statusCode: 409 })
+    }
+
+    await client.query(`SELECT set_config('dlight.commission_reopen_closure', $1, TRUE)`, [closure.id])
+    await client.query(
+      `UPDATE commission_period_closures
+       SET status='reopened', reopened_by=$2, reopened_at=NOW(), reopen_reason=$3
+       WHERE id=$1`,
+      [closure.id, userId, reopenReason]
+    )
+    await client.query(
+      `DELETE FROM commission_transactions
+       WHERE transaction_type='carry_forward' AND reference_type='commission_period_closure' AND reference_id=$1`,
+      [closure.id]
+    )
+    await client.query(`DELETE FROM commission_period_closure_balances WHERE closure_id=$1`, [closure.id])
+    await logAudit({
+      client, userId, action: 'commission_period_reopened', entityType: 'commission_period_closure', entityId: closure.id,
+      oldValues: {
+        status: 'closed', period_start: periodStart, closed_at: closure.closed_at,
+        balances: balancesResult.rows.map((row: any) => ({ salesperson_id: row.salesperson_id, closing_balance: row.closing_balance }))
+      },
+      newValues: { status: 'reopened', reason: reopenReason }
+    })
+    return { id: closure.id, periodStart, status: 'reopened', reopenReason }
+  })
+}
+
 export async function getCommissionPeriodClosures(limit = 24): Promise<CommissionPeriodClosure[]> {
   const safeLimit = Math.min(120, Math.max(1, Number.isFinite(limit) ? Math.floor(limit) : 24))
   const result = await query(
     `SELECT pc.id, pc.period_start, pc.period_end, pc.status, pc.reason, pc.closed_by, pc.closed_at, pc.created_at,
-            closer.full_name AS closed_by_name,
+            pc.reopened_by, pc.reopened_at, pc.reopen_reason,
+            closer.full_name AS closed_by_name, reopener.full_name AS reopened_by_name,
             COALESCE(SUM(GREATEST(balance.closing_balance, 0)), 0) AS total_unpaid,
             COALESCE(SUM(GREATEST(-balance.closing_balance, 0)), 0) AS total_recovery
      FROM commission_period_closures pc
      LEFT JOIN users closer ON closer.id = pc.closed_by
+     LEFT JOIN users reopener ON reopener.id = pc.reopened_by
      LEFT JOIN commission_period_closure_balances balance ON balance.closure_id = pc.id
-     GROUP BY pc.id, closer.full_name
+     GROUP BY pc.id, closer.full_name, reopener.full_name
      ORDER BY pc.period_start DESC
      LIMIT $1`,
     [safeLimit]
@@ -2248,6 +2757,10 @@ export async function getCommissionPeriodClosures(limit = 24): Promise<Commissio
     closedBy: row.closed_by || null,
     closedByName: row.closed_by_name || null,
     closedAt: row.closed_at || null,
+    reopenedBy: row.reopened_by || null,
+    reopenedByName: row.reopened_by_name || null,
+    reopenedAt: row.reopened_at || null,
+    reopenReason: row.reopen_reason || null,
     createdAt: row.created_at,
     totalUnpaid: amountToCents(row.total_unpaid),
     totalRecovery: amountToCents(row.total_recovery),

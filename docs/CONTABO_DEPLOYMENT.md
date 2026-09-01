@@ -273,6 +273,16 @@ bash deploy/contabo/apply-order-status-correction-release-20260824.sh
 
 The script stops the application, creates and verifies a PostgreSQL backup, installs the correction-aware accounting function, rebuilds the application, restarts it, and requires a successful health check. The admin correction UI is then available in an order's details. Do not apply the SQL file manually on production.
 
+### Commission month-end usability release (26 August 2026)
+
+After pulling the release commit on an existing production server, run:
+
+```bash
+bash deploy/contabo/apply-commission-month-end-release-20260826.sh
+```
+
+The script creates and verifies a PostgreSQL backup, adds Salary / Payroll settlement records and guarded admin undo controls, rebuilds the application, and requires a successful health check. Month close remains a deliberate Admin or Owner action: review the readiness preview, record external salary settlements, then close the completed month. A close can only be undone while later settlement activity can still be removed safely.
+
 ## Emergency Commands
 
 View logs:

@@ -38,6 +38,7 @@ for (const file of [
   'database/commission_operational_hardening_migration.sql',
   'database/commission_business_policy_migration.sql',
   'database/commission_initial_activation_fix_migration.sql',
+  'database/commission_month_end_usability_migration.sql',
   'database/speedaf_immediate_reconciliation_migration.sql'
 ]) {
   const sql = await fs.readFile(path.join(root, file), 'utf8')
@@ -1825,6 +1826,166 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
       amount: 55, payment_method: 'cash', reference: 'P6-CARRY-NET-PAY', idempotency_key: 'P6-CARRY-NET-PAY'
     })
     assert.equal(Number(carriedPayment.payment.paid_amount), 55)
+  })
+
+  await t.test('16b. commission month-end controls support external payroll settlement and guarded admin undo', async () => {
+    const programme = await row('SELECT id FROM commission_programmes ORDER BY effective_from DESC LIMIT 1')
+
+    const februaryReadiness = await request(
+      'GET',
+      '/commissions/periods/readiness?period=2020-02',
+      admin.accessToken
+    )
+    assert.equal(februaryReadiness.periodStart, '2020-02-01')
+    assert.equal(februaryReadiness.isReadyToClose, true)
+    assert.equal(Number(februaryReadiness.totalApprovedCredits), 100)
+    assert.equal(Number(februaryReadiness.totalApprovedDeductions), 45)
+    assert.equal(Number(februaryReadiness.totalSettled), 55)
+    assert.equal(Number(februaryReadiness.totalUnpaid), 0)
+    assert.equal(Number(februaryReadiness.totalRecovery), 0)
+
+    const februaryClosure = await request('POST', '/commissions/periods/close', admin.accessToken, {
+      period: '2020-02', reason: 'Phase 6 zero-balance February close'
+    }, 201)
+    assert.equal(februaryClosure.status, 'closed')
+    await request('POST', '/commissions/periods/reopen', attendant.accessToken, {
+      period: '2020-02', reason: 'An attendant must not undo month close'
+    }, 403)
+    const reopened = await request('POST', '/commissions/periods/reopen', admin.accessToken, {
+      period: '2020-02', reason: 'Phase 6 admin verifies the close before payroll handoff'
+    })
+    assert.equal(reopened.id, februaryClosure.id)
+    assert.equal(reopened.status, 'reopened')
+    assert.equal((await row(
+      'SELECT status FROM commission_period_closures WHERE id=$1',
+      [februaryClosure.id]
+    )).status, 'reopened')
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM commission_period_closure_balances WHERE closure_id=$1`,
+      [februaryClosure.id]
+    ), 0)
+    await waitForAudit('commission_period_reopened', februaryClosure.id)
+
+    const reclosed = await request('POST', '/commissions/periods/close', admin.accessToken, {
+      period: '2020-02', reason: 'Phase 6 reviewed February reclose'
+    }, 201)
+    assert.equal(reclosed.id, februaryClosure.id)
+    assert.equal(reclosed.status, 'closed')
+    await request('POST', '/commissions/periods/reopen', admin.accessToken, {
+      period: '2020-01', reason: 'Must not undo a month beneath a later closed period'
+    }, 409)
+
+    const payrollTransaction = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, approved_by, approved_at, created_by)
+       VALUES ($1, $2, 80, 'manual_add', 'approved', '2020-03-31', '2020-03-31 12:00:00', '2020-03-01',
+               'External salary settlement test', $3, NOW(), $3)
+       RETURNING *`,
+      [programme.id, attendantUser.id, adminUser.id]
+    )
+    const payrollSettlement = await request(
+      'POST',
+      `/commissions/transactions/${payrollTransaction.id}/pay`,
+      admin.accessToken,
+      {
+        payment_method: 'payroll',
+        reference: 'SALARY-MAR-2020-P6',
+        settled_at: '2020-03-31',
+        idempotency_key: 'SALARY-MAR-2020-P6'
+      }
+    )
+    assert.equal(payrollSettlement.payment.payment_method, 'payroll')
+    assert.equal(Number(payrollSettlement.payment.paid_amount), 80)
+    const storedSettlement = await row(
+      `SELECT status, payment_method::text AS payment_method, paid_at::date::text AS settled_at
+       FROM commission_payments WHERE id=$1`,
+      [payrollSettlement.payment.id]
+    )
+    assert.equal(storedSettlement.payment_method, 'payroll')
+    assert.equal(storedSettlement.settled_at, '2020-03-31')
+
+    await request('POST', `/commissions/transactions/${payrollTransaction.id}/revoke-approval`, admin.accessToken, {
+      reason: 'Settlement must be voided first'
+    }, 409)
+    await request('POST', `/commissions/payments/${payrollSettlement.payment.id}/void`, attendant.accessToken, {
+      reason: 'An attendant must not void a salary settlement'
+    }, 403)
+    const voided = await request('POST', `/commissions/payments/${payrollSettlement.payment.id}/void`, admin.accessToken, {
+      reason: 'Salary sheet was entered against the wrong run'
+    })
+    assert.equal(voided.transaction.transaction_status, 'approved')
+    assert.equal((await row(
+      'SELECT status FROM commission_payments WHERE id=$1',
+      [payrollSettlement.payment.id]
+    )).status, 'voided')
+    const revoked = await request('POST', `/commissions/transactions/${payrollTransaction.id}/revoke-approval`, admin.accessToken, {
+      reason: 'Amount requires manager review'
+    })
+    assert.equal(revoked.transaction_status, 'pending')
+
+    const marchReadiness = await request(
+      'GET',
+      '/commissions/periods/readiness?period=2020-03',
+      admin.accessToken
+    )
+    assert.equal(marchReadiness.isReadyToClose, false)
+    assert.equal(marchReadiness.pendingCount, 1)
+    assert.equal(Number(marchReadiness.totalSettled), 0)
+
+    const bulkApprovalRows = await db.query(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, created_by)
+       VALUES
+         ($1, $2, 30, 'manual_add', 'pending', '2020-03-31', '2020-03-31 12:15:00', '2020-03-01', 'Bulk approval one', $3),
+         ($1, $2, 40, 'manual_add', 'pending', '2020-03-31', '2020-03-31 12:30:00', '2020-03-01', 'Bulk approval two', $3),
+         ($1, $2, 50, 'manual_add', 'pending', '2020-03-31', '2020-03-31 12:45:00', '2020-03-01', 'Bulk approval rollback', $3)
+       RETURNING id, amount`,
+      [programme.id, attendantUser.id, adminUser.id]
+    )
+    const bulkApproved = await request('POST', '/commissions/bulk-approve', admin.accessToken, {
+      transaction_ids: [bulkApprovalRows.rows[0].id, bulkApprovalRows.rows[1].id]
+    })
+    assert.equal(bulkApproved.approvedCount, 2)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM commission_transactions
+       WHERE id=ANY($1::uuid[]) AND transaction_status='approved'`,
+      [[bulkApprovalRows.rows[0].id, bulkApprovalRows.rows[1].id]]
+    ), 2)
+    await request('POST', '/commissions/bulk-approve', admin.accessToken, {
+      transaction_ids: [bulkApprovalRows.rows[2].id, '00000000-0000-0000-0000-000000000000']
+    }, 409)
+    assert.equal((await row(
+      'SELECT transaction_status FROM commission_transactions WHERE id=$1',
+      [bulkApprovalRows.rows[2].id]
+    )).transaction_status, 'pending')
+
+    const bulkCandidate = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, approved_by, approved_at, created_by)
+       VALUES ($1, $2, 25, 'manual_add', 'approved', '2020-03-31', '2020-03-31 13:00:00', '2020-03-01',
+               'Atomic salary batch test', $3, NOW(), $3)
+       RETURNING *`,
+      [programme.id, attendantUser.id, adminUser.id]
+    )
+    await request('POST', '/commissions/bulk-pay', admin.accessToken, {
+      transaction_ids: [bulkCandidate.id, '00000000-0000-0000-0000-000000000000'],
+      payment_method: 'payroll',
+      reference: 'SALARY-MAR-2020-ATOMIC-P6',
+      settled_at: '2020-03-31',
+      idempotency_key: 'SALARY-MAR-2020-ATOMIC-P6'
+    }, 404)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM commission_payments
+       WHERE commission_transaction_id=$1 AND status <> 'voided'`,
+      [bulkCandidate.id]
+    ), 0)
+    assert.equal((await row(
+      'SELECT transaction_status FROM commission_transactions WHERE id=$1',
+      [bulkCandidate.id]
+    )).transaction_status, 'approved')
   })
 
   await t.test('17. legacy category gaps still apply only deterministic return reversals', async () => {

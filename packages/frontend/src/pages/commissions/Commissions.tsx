@@ -74,8 +74,9 @@ export function Commissions() {
   const [managementTransactionPage, setManagementTransactionPage] = useState(1)
   const [managementTransactionStatus, setManagementTransactionStatus] = useState('')
   const [managementSalespersonId, setManagementSalespersonId] = useState('')
-  const [paymentEntry, setPaymentEntry] = useState({ transactionId: '', amount: '', payment_method: 'mpesa', reference: '', notes: '', idempotency_key: paymentConfirmationKey() })
-  const [bulkPaymentEntry, setBulkPaymentEntry] = useState({ amount: '', payment_method: 'mpesa', reference: '', notes: '', idempotency_key: paymentConfirmationKey() })
+  const [paymentEntry, setPaymentEntry] = useState({ transactionId: '', amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })
+  const [bulkPaymentEntry, setBulkPaymentEntry] = useState({ amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })
+  const [selectedApprovalIds, setSelectedApprovalIds] = useState<Set<string>>(new Set())
   const [selectedTransactionIds, setSelectedTransactionIds] = useState<Set<string>>(new Set())
   const [rateForm, setRateForm] = useState({
     scope_type: 'global',
@@ -85,7 +86,7 @@ export function Commissions() {
     effective_from: today,
     effective_to: '',
   })
-  const { hasPermission } = useAuthStore()
+  const { hasPermission, user } = useAuthStore()
   const queryClient = useQueryClient()
 
   const isManager = hasPermission('commission.manage')
@@ -96,6 +97,7 @@ export function Commissions() {
   const canAdjust = hasPermission('commission.adjust')
   const canReconcile = hasPermission('commission.reconcile')
   const canClose = hasPermission('commission.close')
+  const isAdministrativeRole = ['admin', 'owner'].includes(String(user?.role || '').toLowerCase())
   const canManagementLedger = hasPermission('commission.view') || canApprove || canPay || canAdjust
 
   const { data: programmeStatus } = useQuery({
@@ -170,6 +172,12 @@ export function Commissions() {
     enabled: canClose
   })
 
+  const { data: periodReadiness, isLoading: periodReadinessLoading } = useQuery({
+    queryKey: ['commission-period-readiness', periodCloseForm.period],
+    queryFn: async () => (await axios.get(`/api/commissions/periods/readiness?period=${periodCloseForm.period}`)).data,
+    enabled: canClose && Boolean(periodCloseForm.period)
+  })
+
   const { data: managementTransactions } = useQuery({
     queryKey: ['commission-management-transactions', managementFrom, managementTo, managementTransactionPage, managementTransactionStatus, managementSalespersonId],
     queryFn: async () => {
@@ -188,6 +196,15 @@ export function Commissions() {
     }
   })
 
+  const bulkApproveMutation = useMutation({
+    mutationFn: async (transactionIds: string[]) =>
+      (await axios.post('/api/commissions/bulk-approve', { transaction_ids: transactionIds })).data,
+    onSuccess: () => {
+      setSelectedApprovalIds(new Set())
+      void invalidateCommissionData(queryClient)
+    }
+  })
+
   const payMutation = useMutation({
     mutationFn: async ({ id, data }: { id: string; data: any }) => (await axios.post(`/api/commissions/transactions/${id}/pay`, data)).data,
     onSuccess: () => {
@@ -196,11 +213,11 @@ export function Commissions() {
   })
 
   const bulkPayMutation = useMutation({
-    mutationFn: async (data: { transaction_ids: string[]; payment_method: string; reference: string; notes: string; idempotency_key: string }) =>
+    mutationFn: async (data: { transaction_ids: string[]; payment_method: string; reference: string; notes: string; settled_at: string; idempotency_key: string }) =>
       (await axios.post('/api/commissions/bulk-pay', data)).data,
     onSuccess: () => {
       setSelectedTransactionIds(new Set())
-      setBulkPaymentEntry({ amount: '', payment_method: 'mpesa', reference: '', notes: '', idempotency_key: paymentConfirmationKey() })
+      setBulkPaymentEntry({ amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })
       void invalidateCommissionData(queryClient)
     }
   })
@@ -311,8 +328,31 @@ export function Commissions() {
       (await axios.post('/api/commissions/periods/close', data)).data,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['commission-period-closures'] })
+      queryClient.invalidateQueries({ queryKey: ['commission-period-readiness'] })
       void invalidateCommissionData(queryClient)
       setPeriodCloseForm(current => ({ ...current, reason: '' }))
+    }
+  })
+
+  const revokeApprovalMutation = useMutation({
+    mutationFn: async ({ id, reason }: { id: string; reason: string }) =>
+      (await axios.post(`/api/commissions/transactions/${id}/revoke-approval`, { reason })).data,
+    onSuccess: () => void invalidateCommissionData(queryClient)
+  })
+
+  const voidSettlementMutation = useMutation({
+    mutationFn: async ({ id, reason }: { id: string; reason: string }) =>
+      (await axios.post(`/api/commissions/payments/${id}/void`, { reason })).data,
+    onSuccess: () => void invalidateCommissionData(queryClient)
+  })
+
+  const reopenPeriodMutation = useMutation({
+    mutationFn: async ({ period, reason }: { period: string; reason: string }) =>
+      (await axios.post('/api/commissions/periods/reopen', { period, reason })).data,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['commission-period-closures'] })
+      queryClient.invalidateQueries({ queryKey: ['commission-period-readiness'] })
+      void invalidateCommissionData(queryClient)
     }
   })
 
@@ -345,6 +385,22 @@ export function Commissions() {
   const todayCommission = daily?.daily?.find((row: any) => String(row.date).slice(0, 10) === today) || {
     eligibleItems: 0, grossCommission: 0, reversals: 0, netCommission: 0
   }
+  const managementRows: any[] = managementTransactions?.data || []
+  const selectedApprovalRows = managementRows.filter(tx => selectedApprovalIds.has(tx.id))
+  const selectedSettlementRows = managementRows.filter(tx => selectedTransactionIds.has(tx.id))
+  const bulkPendingIds: string[] = managementTransactions?.bulkSelection?.pendingIds || []
+  const bulkSettleableIds: string[] = managementTransactions?.bulkSelection?.settleableIds || []
+  const allFilteredPendingSelected = bulkPendingIds.length > 0 && bulkPendingIds.every(id => selectedApprovalIds.has(id))
+  const allFilteredSettleableSelected = bulkSettleableIds.length > 0 && bulkSettleableIds.every(id => selectedTransactionIds.has(id))
+  const selectedApprovalTotal = allFilteredPendingSelected
+    ? Number(managementTransactions?.bulkSelection?.pendingAmount || 0)
+    : selectedApprovalRows.reduce((sum, tx) => sum + Number(tx.amount || 0), 0)
+  const selectedSettlementTotal = allFilteredSettleableSelected
+    ? Number(managementTransactions?.bulkSelection?.settleableAmount || 0)
+    : selectedSettlementRows.reduce(
+    (sum, tx) => sum + Math.max(0, Number(tx.amount || 0) - Number(tx.paid_amount || 0) - Number(tx.reversed_amount || 0)),
+    0
+  )
 
   return (
     <div className="space-y-6">
@@ -361,13 +417,20 @@ export function Commissions() {
               <p className="text-sm text-muted-foreground">
                 {programmeStatus.status === 'active'
                   ? 'Earnings require verified payment, completion and, where applicable, delivery or Speedaf remittance.'
-                  : 'New earnings are paused. Historical records, reversals, approvals and payments remain available.'}
+                  : 'New earnings are paused. Historical records, reversals, approvals and settlements remain available.'}
               </p>
             </div>
             {programmeStatus.currentRate && <div className="text-sm"><span className="text-muted-foreground">Global base rate:</span> <strong>{formatMoney(programmeStatus.currentRate.rate_per_item)} per item</strong></div>}
           </div>
           {programmeStatus.reason && <p className="mt-2 text-xs text-muted-foreground">Reason: {programmeStatus.reason}</p>}
         </div>
+      )}
+
+      {canClose && periodReadiness && periodCloseForm.period === previousNairobiMonth(today) && periodReadiness.periodStatus !== 'closed' && (
+        <button type="button" onClick={() => setTab('settings')} className={`w-full rounded-lg border p-4 text-left ${periodReadiness.isReadyToClose ? 'border-emerald-300 bg-emerald-50/60' : 'border-amber-300 bg-amber-50/60'}`}>
+          <span className="font-semibold">{formatCommissionMonth(periodReadiness.periodStart)} commission is still {periodReadiness.periodStatus}.</span>
+          <span className="mt-1 block text-sm text-muted-foreground">{formatMoney(periodReadiness.totalUnpaid || 0)} will move forward, {formatMoney(periodReadiness.totalRecovery || 0)} is recovery, and {periodReadiness.pendingCount || 0} item(s) are waiting for approval. Open period close review.</span>
+        </button>
       )}
 
       {visibleTabs.length > 1 && (
@@ -393,7 +456,7 @@ export function Commissions() {
          <div className="space-y-6">
            {(hasPermission('commission.own_view') || hasPermission('commission.own_monthly') || hasPermission('commission.own_daily') || hasPermission('commission.own_history')) && (
              <div className="space-y-4">
-               <h2 className="text-lg font-semibold">My commission — current month</h2>
+               <h2 className="text-lg font-semibold">My commission — {formatCommissionMonth(today)}</h2>
                 {hasPermission('commission.own_daily') && (
                   <div className="space-y-2"><h3 className="text-sm font-semibold">Today</h3><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><StatCard title="Items qualifying today" description="Items meeting commission rules today." value={String(todayCommission.eligibleItems || 0)} icon={<Target className="h-5 w-5" />} /><StatCard title="Commission recorded today" description="Commission added today before corrections." value={formatMoney(todayCommission.grossCommission)} icon={<Wallet className="h-5 w-5" />} /><StatCard title="Commission removed today" description="Amounts removed due to returns or corrections." value={formatMoney(todayCommission.reversals)} icon={<TrendingDown className="h-5 w-5" />} /><StatCard title="Today's recorded balance" description="Today's net commission after reversals." value={formatMoney(todayCommission.netCommission)} icon={<TrendingUp className="h-5 w-5" />} /></div></div>
                 )}
@@ -407,8 +470,8 @@ export function Commissions() {
                       <StatCard title="Reversals" description="Amounts removed due to returns or corrections." value={formatMoney(summary.reversals || 0)} icon={<TrendingDown className="h-5 w-5" />} />
                       <StatCard title="Management add" description="Extra commission added with a recorded reason." value={formatMoney(summary.manualAdditions || 0)} icon={<TrendingUp className="h-5 w-5" />} />
                       <StatCard title="Management deduct" description="Commission removed with a recorded reason." value={formatMoney(summary.manualDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} />
-                      <StatCard title="Carry-forward credit" description="Positive balance carried forward from a closed month." value={formatMoney(summary.carryForwardCredits || 0)} icon={<TrendingUp className="h-5 w-5" />} />
-                      <StatCard title="Carry-forward recovery" description="Balance carried forward that reduces payment." value={formatMoney(summary.carryForwardDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} />
+                      <StatCard title={`Brought forward from ${formatCommissionMonth(previousNairobiMonth(today))}`} description="Approved commission from the previous closed month." value={formatMoney(summary.carryForwardCredits || 0)} icon={<TrendingUp className="h-5 w-5" />} />
+                      <StatCard title={`Recovery from ${formatCommissionMonth(previousNairobiMonth(today))}`} description="Previous-month recovery that reduces settlement." value={formatMoney(summary.carryForwardDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} />
                       <StatCard title="Balance" description="Net balance after reversals and carry-forward. Not automatically payable." value={formatMoney(summary.netCommission || 0)} icon={<BarChart3 className="h-5 w-5" />} />
                     </div>
 
@@ -416,10 +479,10 @@ export function Commissions() {
                       <h3 className="text-sm font-semibold">Settlement status</h3>
                     </div>
                     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                      <StatCard title="Approved" description="Approved amount available to pay now." value={formatMoney(summary.approvedPayable ?? summary.payableAmount ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} />
-                      <StatCard title="Paid" description="Commission payments already allocated this month." value={formatMoney(summary.paidAmount || 0)} icon={<CreditCard className="h-5 w-5" />} />
-                      <StatCard title="Waiting" description="Recorded amount not yet approved for payment." value={formatMoney(Math.max(0, Number(summary.pendingAmount || 0)))} icon={<Clock className="h-5 w-5" />} />
-                      <StatCard title="Outstanding" description="Amount not yet paid." value={formatMoney(Math.max(0, Number(summary.outstandingAmount || 0)))} icon={<Target className="h-5 w-5" />} />
+                      <StatCard title="Approved" description="Approved amount available for settlement." value={formatMoney(summary.approvedPayable ?? summary.payableAmount ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} />
+                      <StatCard title="Settled" description="Commission settlements already recorded this month." value={formatMoney(summary.paidAmount || 0)} icon={<CreditCard className="h-5 w-5" />} />
+                      <StatCard title="Waiting" description="Recorded amount not yet approved for settlement." value={formatMoney(Math.max(0, Number(summary.pendingAmount || 0)))} icon={<Clock className="h-5 w-5" />} />
+                      <StatCard title="Outstanding" description="Amount not yet settled." value={formatMoney(Math.max(0, Number(summary.outstandingAmount || 0)))} icon={<Target className="h-5 w-5" />} />
                       <StatCard title="Recovery" description="Amount offset before a further payment can be made." value={formatMoney(summary.recoveryDue || 0)} icon={<TrendingDown className="h-5 w-5" />} />
                     </div>
                  </div>
@@ -468,7 +531,7 @@ export function Commissions() {
                  <div className="rounded-lg border bg-card overflow-hidden">
                    <div className="px-4 py-3 border-b">
                      <h3 className="font-semibold">Monthly history</h3>
-                     <p className="text-xs text-muted-foreground">Closed-period amounts carry forward. Last payment shows the latest recorded payment date.</p>
+                     <p className="text-xs text-muted-foreground">Closed-period amounts carry forward. Last settlement shows the latest date recorded in this system.</p>
                    </div>
                    <MobileTableScroll label="monthly commission">
                      <table className="w-full text-sm">
@@ -484,10 +547,10 @@ export function Commissions() {
                            <th className="text-right px-4 py-3">Carry-forward recovery</th>
                            <th className="text-right px-4 py-3">Net balance</th>
                            <th className="text-right px-4 py-3">Approved & payable</th>
-                           <th className="text-right px-4 py-3">Paid</th>
+                           <th className="text-right px-4 py-3">Settled</th>
                            <th className="text-right px-4 py-3">Awaiting approval</th>
                            <th className="text-right px-4 py-3">Outstanding / recovery</th>
-                           <th className="text-left px-4 py-3">Last payment</th>
+                           <th className="text-left px-4 py-3">Last settlement</th>
                            <th className="text-left px-4 py-3">Settlement</th>
                          </tr>
                        </thead>
@@ -590,7 +653,7 @@ export function Commissions() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-xs">
-                        {tx.last_paid_at ? <><div>{formatCommissionTimestamp(tx.last_paid_at)}</div><div className="mt-1 max-w-56 break-words text-muted-foreground">{tx.payment_references || 'Payment recorded'}</div></> : '-'}
+                        {tx.last_paid_at ? <><div>{formatCommissionTimestamp(tx.last_paid_at)}</div><div className="mt-1 max-w-56 break-words text-muted-foreground">{tx.payment_references || 'Settlement recorded'}</div></> : '-'}
                       </td>
                       <td className="px-4 py-3">{new Date(tx.qualification_date).toLocaleDateString()}</td>
                     </tr>
@@ -679,8 +742,8 @@ export function Commissions() {
                  <StatCard title="Management deduct" description="Commission removed with a recorded reason." value={formatMoney(managementSummary.totalManualDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} />
                  <StatCard title="Carry-forward credit" description="Positive balances brought forward from closed months." value={formatMoney(managementSummary.totalCarryForwardCredits || 0)} icon={<TrendingUp className="h-5 w-5" />} />
                  <StatCard title="Carry-forward recovery" description="Balances carried forward that reduce payment." value={formatMoney(managementSummary.totalCarryForwardDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} />
-                 <StatCard title="Approved" description="Approved amount available to pay now." value={formatMoney(managementSummary.approvedPayable ?? managementSummary.approvedUnpaid ?? 0)} icon={<CreditCard className="h-5 w-5" />} />
-                 <StatCard title="Paid" description="Commission payments allocated to the selected period." value={formatMoney(managementSummary.totalPayments || 0)} icon={<CheckCircle2 className="h-5 w-5" />} />
+                 <StatCard title="Approved" description="Approved amount available for settlement." value={formatMoney(managementSummary.approvedPayable ?? managementSummary.approvedUnpaid ?? 0)} icon={<CreditCard className="h-5 w-5" />} />
+                 <StatCard title="Settled" description="Commission settlements recorded for the selected period." value={formatMoney(managementSummary.totalPayments || 0)} icon={<CheckCircle2 className="h-5 w-5" />} />
                  <StatCard title="Recovery" description="Amount offset before a further payment can be made." value={formatMoney(managementSummary.recoveryDue || 0)} icon={<TrendingDown className="h-5 w-5" />} />
                  <StatCard title="Salespeople" description="Salespeople with commission activity in the selected period." value={String(managementSummary.salespersonCount || 0)} icon={<Users className="h-5 w-5" />} />
                </div>
@@ -701,7 +764,7 @@ export function Commissions() {
                       <th className="text-right px-4 py-3">Gross Earned</th>
                       <th className="text-right px-4 py-3">Reversals</th>
                       <th className="text-right px-4 py-3">Net</th>
-                      <th className="text-right px-4 py-3">Paid</th>
+                      <th className="text-right px-4 py-3">Settled</th>
                       <th className="text-right px-4 py-3">Payable / recovery</th>
                     </tr>
                   </thead>
@@ -723,13 +786,13 @@ export function Commissions() {
           )}
 
           <div className="rounded-lg border bg-card overflow-hidden">
-            <div className="px-4 py-3 border-b"><h3 className="font-semibold">Commission approval and payment ledger</h3><p className="text-xs text-muted-foreground">Approve verified earnings here. A payment cannot exceed the outstanding balance after approved deductions and reversals.</p></div>
+            <div className="px-4 py-3 border-b"><h3 className="font-semibold">Commission approval and settlement ledger</h3><p className="text-xs text-muted-foreground">Approve verified earnings, then record the external salary, cash, M-PESA or bank settlement. A settlement cannot exceed the balance after deductions and reversals.</p></div>
             <div className="flex flex-wrap gap-3 border-b bg-muted/20 p-3">
-              <select className="rounded border bg-background px-2 py-1 text-sm" value={managementTransactionStatus} onChange={event => { setManagementTransactionStatus(event.target.value); setManagementTransactionPage(1) }}><option value="">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="paid">Paid</option><option value="reversed">Reversed</option></select>
-              <select className="rounded border bg-background px-2 py-1 text-sm" value={managementSalespersonId} onChange={event => { setManagementSalespersonId(event.target.value); setManagementTransactionPage(1) }}><option value="">All salespeople</option>{salespeople.map((person: any) => <option key={person.id} value={person.id}>{person.full_name || person.name}</option>)}</select>
+              <select className="rounded border bg-background px-2 py-1 text-sm" value={managementTransactionStatus} onChange={event => { setManagementTransactionStatus(event.target.value); setManagementTransactionPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}><option value="">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="paid">Settled</option><option value="reversed">Reversed</option></select>
+              <select className="rounded border bg-background px-2 py-1 text-sm" value={managementSalespersonId} onChange={event => { setManagementSalespersonId(event.target.value); setManagementTransactionPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}><option value="">All salespeople</option>{salespeople.map((person: any) => <option key={person.id} value={person.id}>{person.full_name || person.name}</option>)}</select>
             </div>
             {paymentEntry.transactionId && canPay && selectedTransactionIds.size === 0 && (
-              <form className="grid gap-3 border-b bg-muted/30 p-4 md:grid-cols-5" onSubmit={async event => {
+              <form className="grid gap-3 border-b bg-muted/30 p-4 md:grid-cols-6" onSubmit={async event => {
                 event.preventDefault()
                 await payMutation.mutateAsync({
                   id: paymentEntry.transactionId,
@@ -738,58 +801,79 @@ export function Commissions() {
                     payment_method: paymentEntry.payment_method,
                     reference: paymentEntry.reference || null,
                     notes: paymentEntry.notes || null,
+                    settled_at: paymentEntry.settled_at,
                     idempotency_key: paymentEntry.idempotency_key
                   }
                 })
-                setPaymentEntry({ transactionId: '', amount: '', payment_method: 'mpesa', reference: '', notes: '', idempotency_key: paymentConfirmationKey() })
+                setPaymentEntry({ transactionId: '', amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })
               }}>
                 <input type="number" min="0.01" step="0.01" placeholder="Amount (leave blank for maximum)" className="rounded border px-2 py-2 text-sm" value={paymentEntry.amount} onChange={event => setPaymentEntry({ ...paymentEntry, amount: event.target.value })} />
-                <select className="rounded border px-2 py-2 text-sm" value={paymentEntry.payment_method} onChange={event => setPaymentEntry({ ...paymentEntry, payment_method: event.target.value })}><option value="mpesa">M-PESA</option><option value="cash">Cash</option><option value="bank_transfer">Bank transfer</option></select>
-                <input required={paymentEntry.payment_method !== 'cash'} className="rounded border px-2 py-2 text-sm" placeholder={paymentEntry.payment_method === 'cash' ? 'Cash receipt reference (optional)' : 'Required payment reference'} value={paymentEntry.reference} onChange={event => setPaymentEntry({ ...paymentEntry, reference: event.target.value })} />
+                <select className="rounded border px-2 py-2 text-sm" value={paymentEntry.payment_method} onChange={event => setPaymentEntry({ ...paymentEntry, payment_method: event.target.value })}><option value="payroll">Salary / Payroll</option><option value="mpesa">M-PESA</option><option value="cash">Cash</option><option value="bank_transfer">Bank transfer</option></select>
+                <input required={paymentEntry.payment_method !== 'cash'} className="rounded border px-2 py-2 text-sm" placeholder={paymentEntry.payment_method === 'payroll' ? 'Salary / payroll reference' : paymentEntry.payment_method === 'cash' ? 'Cash receipt reference (optional)' : 'Required settlement reference'} value={paymentEntry.reference} onChange={event => setPaymentEntry({ ...paymentEntry, reference: event.target.value })} />
+                <input required type="date" max={today} title="Settlement date" className="rounded border px-2 py-2 text-sm" value={paymentEntry.settled_at} onChange={event => setPaymentEntry({ ...paymentEntry, settled_at: event.target.value })} />
                 <input className="rounded border px-2 py-2 text-sm" placeholder="Notes" value={paymentEntry.notes} onChange={event => setPaymentEntry({ ...paymentEntry, notes: event.target.value })} />
-                <div className="flex gap-2"><button disabled={payMutation.isPending} className="rounded bg-emerald-700 px-3 py-2 text-xs text-white disabled:opacity-50">Record payment</button><button type="button" className="rounded border px-3 py-2 text-xs" onClick={() => setPaymentEntry({ transactionId: '', amount: '', payment_method: 'mpesa', reference: '', notes: '', idempotency_key: paymentConfirmationKey() })}>Cancel</button></div>
-                {payMutation.isError && <p className="text-sm text-red-600 md:col-span-5">{(payMutation.error as any)?.response?.data?.error?.message || 'Unable to record payment'}</p>}
+                <div className="flex gap-2"><button disabled={payMutation.isPending} className="rounded bg-emerald-700 px-3 py-2 text-xs text-white disabled:opacity-50">Record settlement</button><button type="button" className="rounded border px-3 py-2 text-xs" onClick={() => setPaymentEntry({ transactionId: '', amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })}>Cancel</button></div>
+                {payMutation.isError && <p className="text-sm text-red-600 md:col-span-6">{(payMutation.error as any)?.response?.data?.error?.message || 'Unable to record settlement'}</p>}
               </form>
             )}
             {managementTransactions?.data?.length ? (
               <MobileTableScroll label="management commission">
                 <table className="w-full text-sm">
-                  <thead className="bg-muted"><tr><th className="text-center px-4 py-3">Pay</th><th className="text-left px-4 py-3">Salesperson</th><th className="text-left px-4 py-3">Reference</th><th className="text-left px-4 py-3">Type</th><th className="text-right px-4 py-3">Amount</th><th className="text-right px-4 py-3">Paid / offset</th><th className="text-left px-4 py-3">Settlement record</th><th className="text-left px-4 py-3">Status</th><th className="text-right px-4 py-3">Action</th></tr></thead>
+                  <thead className="bg-muted"><tr><th className="text-center px-4 py-3">Select</th><th className="text-left px-4 py-3">Salesperson</th><th className="text-left px-4 py-3">Reference</th><th className="text-left px-4 py-3">Type</th><th className="text-right px-4 py-3">Amount</th><th className="text-right px-4 py-3">Settled / offset</th><th className="text-left px-4 py-3">Settlement record</th><th className="text-left px-4 py-3">Status</th><th className="text-right px-4 py-3">Action</th></tr></thead>
                   <tbody>{managementTransactions.data.map((tx: any) => {
                     const payable = canPay && ['approved', 'paid'].includes(tx.transaction_status) && (['earned', 'manual_add'].includes(tx.transaction_type) || (tx.transaction_type === 'carry_forward' && tx.carry_forward_direction === 'credit')) && Number(tx.amount) - Number(tx.paid_amount || 0) - Number(tx.reversed_amount || 0) > 0.004
-                    const checked = selectedTransactionIds.has(tx.id)
-                    return (<tr key={tx.id} className={`border-t ${payable ? '' : 'opacity-70'}`}>
-                      <td className="px-4 py-3 text-center">{payable && <input type="checkbox" checked={checked} onChange={event => { const next = new Set(selectedTransactionIds); if (event.target.checked) next.add(tx.id); else next.delete(tx.id); setSelectedTransactionIds(next) }} />}</td>
+                    const approvable = canApprove && tx.transaction_status === 'pending'
+                    const checked = selectedTransactionIds.has(tx.id) || selectedApprovalIds.has(tx.id)
+                    return (<tr key={tx.id} className={`border-t ${payable || approvable ? '' : 'opacity-70'}`}>
+                      <td className="px-4 py-3 text-center">{(approvable || payable) && <input aria-label={`Select ${approvable ? 'for approval' : 'for settlement'}`} type="checkbox" checked={checked} onChange={event => { if (approvable) { const next = new Set(selectedApprovalIds); if (event.target.checked) next.add(tx.id); else next.delete(tx.id); setSelectedApprovalIds(next); setSelectedTransactionIds(new Set()) } else { const next = new Set(selectedTransactionIds); if (event.target.checked) next.add(tx.id); else next.delete(tx.id); setSelectedTransactionIds(next); setSelectedApprovalIds(new Set()) } }} />}</td>
                       <td className="px-4 py-3">{tx.salesperson_name}</td>
                       <td className="px-4 py-3"><div>{tx.order_number}</div><div className="text-xs text-muted-foreground">{tx.product_name}</div></td>
                       <td className="px-4 py-3 capitalize">{String(tx.transaction_type).replace('_', ' ')}</td>
                       <td className="px-4 py-3 text-right font-medium">{formatMoney(tx.amount)}</td>
                       <td className="px-4 py-3 text-right">{formatMoney(tx.paid_amount)}{Number(tx.reversed_amount || 0) > 0 && <div className="text-xs text-red-600">Offset {formatMoney(tx.reversed_amount)}</div>}</td>
-                      <td className="px-4 py-3 text-xs">{tx.last_paid_at ? <><div>{formatCommissionTimestamp(tx.last_paid_at)}</div><div className="mt-1 max-w-56 break-words text-muted-foreground">{tx.payment_references || 'Payment recorded'}</div></> : '-'}</td>
+                      <td className="px-4 py-3 text-xs">{tx.last_paid_at ? <div className="space-y-2"><div>{formatCommissionTimestamp(tx.last_paid_at)}</div><div className="max-w-56 break-words text-muted-foreground">{tx.payment_references || 'Settlement recorded'}</div>{isAdministrativeRole && Array.isArray(tx.settlement_records) && tx.settlement_records.map((settlement: any) => <button key={settlement.id} type="button" className="block text-red-600 hover:underline" onClick={() => { const reason = prompt(`Reason for voiding ${formatMoney(settlement.amount)} ${String(settlement.method).replace('_', ' ')} settlement?`); if (reason?.trim()) voidSettlementMutation.mutate({ id: settlement.id, reason: reason.trim() }) }}>Void {formatMoney(settlement.amount)} settlement</button>)}</div> : '-'}</td>
                       <td className="px-4 py-3 capitalize">{tx.transaction_status}</td>
                       <td className="px-4 py-3 text-right">
                         {canApprove && tx.transaction_status === 'pending' && <button className="text-xs text-blue-600 hover:underline" onClick={() => approveMutation.mutate(tx.id)}>Approve</button>}
-                        {canPay && payable && <button className="text-xs text-emerald-600 hover:underline ml-2" onClick={() => setPaymentEntry({ transactionId: tx.id, amount: '', payment_method: 'mpesa', reference: '', notes: '', idempotency_key: paymentConfirmationKey() })}>Pay</button>}
+                        {isAdministrativeRole && tx.transaction_status === 'approved' && Number(tx.paid_amount || 0) <= 0 && tx.transaction_type !== 'carry_forward' && <button className="ml-2 text-xs text-amber-700 hover:underline" onClick={() => { const reason = prompt('Reason for revoking this approval?'); if (reason?.trim()) revokeApprovalMutation.mutate({ id: tx.id, reason: reason.trim() }) }}>Revoke approval</button>}
+                        {canPay && payable && <button className="text-xs text-emerald-600 hover:underline ml-2" onClick={() => setPaymentEntry({ transactionId: tx.id, amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })}>Settle</button>}
                       </td>
                     </tr>)
                   })}</tbody>
                 </table>
               </MobileTableScroll>
             ) : <div className="p-6 text-center text-muted-foreground">No commission transactions in this period</div>}
+            {(bulkPendingIds.length > 0 || bulkSettleableIds.length > 0) && (
+              <div className="border-t bg-muted/20 p-4">
+                <div className="mb-3"><strong className="text-sm">Finished reviewing?</strong><p className="text-xs text-muted-foreground">Select every matching entry in the filtered period, including entries on other pages.</p></div>
+                <div className="grid gap-3 md:grid-cols-2">
+                  {canApprove && bulkPendingIds.length > 0 && <button type="button" className={`rounded border p-3 text-left text-sm ${allFilteredPendingSelected ? 'border-blue-500 bg-blue-100' : 'border-blue-200 bg-blue-50'}`} onClick={() => { setSelectedApprovalIds(allFilteredPendingSelected ? new Set() : new Set(bulkPendingIds)); setSelectedTransactionIds(new Set()) }}><span className="flex items-center gap-2"><span aria-hidden="true" className={`inline-flex h-4 w-4 items-center justify-center rounded border ${allFilteredPendingSelected ? 'border-blue-700 bg-blue-700 text-white' : 'border-blue-400 bg-white'}`}>{allFilteredPendingSelected ? '✓' : ''}</span><strong>{allFilteredPendingSelected ? 'All pending selected' : `Select all ${bulkPendingIds.length} pending`}</strong></span><span className="mt-1 block pl-6 text-xs text-muted-foreground">Entire ledger amount: {formatMoney(managementTransactions.bulkSelection.pendingAmount || 0)}</span></button>}
+                  {canPay && bulkSettleableIds.length > 0 && <button type="button" className={`rounded border p-3 text-left text-sm ${allFilteredSettleableSelected ? 'border-emerald-500 bg-emerald-100' : 'border-emerald-200 bg-emerald-50'}`} onClick={() => { setSelectedTransactionIds(allFilteredSettleableSelected ? new Set() : new Set(bulkSettleableIds)); setSelectedApprovalIds(new Set()) }}><span className="flex items-center gap-2"><span aria-hidden="true" className={`inline-flex h-4 w-4 items-center justify-center rounded border ${allFilteredSettleableSelected ? 'border-emerald-700 bg-emerald-700 text-white' : 'border-emerald-400 bg-white'}`}>{allFilteredSettleableSelected ? '✓' : ''}</span><strong>{allFilteredSettleableSelected ? 'All ready to settle selected' : `Select all ${bulkSettleableIds.length} ready to settle`}</strong></span><span className="mt-1 block pl-6 text-xs text-muted-foreground">Entire net settlement after recovery/deductions: {formatMoney(managementTransactions.bulkSelection.settleableAmount || 0)}</span></button>}
+                </div>
+              </div>
+            )}
+            {selectedApprovalIds.size > 0 && canApprove && (
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t bg-blue-50/60 p-4">
+                <div><strong>Approve {selectedApprovalIds.size} selected transaction{selectedApprovalIds.size > 1 ? 's' : ''}</strong><p className="text-sm text-muted-foreground">Selected ledger amount: {formatMoney(selectedApprovalTotal)}</p></div>
+                <div className="flex gap-2"><button type="button" disabled={bulkApproveMutation.isPending} className="rounded bg-blue-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50" onClick={() => { if (confirm(`Approve ${selectedApprovalIds.size} commission transactions with a total ledger amount of ${formatMoney(selectedApprovalTotal)}?`)) bulkApproveMutation.mutate(Array.from(selectedApprovalIds)) }}>{bulkApproveMutation.isPending ? 'Approving...' : 'Approve selected'}</button><button type="button" className="rounded border bg-background px-3 py-2 text-sm" onClick={() => setSelectedApprovalIds(new Set())}>Clear</button></div>
+                {bulkApproveMutation.isError && <p className="w-full text-sm text-red-600">{(bulkApproveMutation.error as any)?.response?.data?.error?.message || 'Unable to approve the selected transactions'}</p>}
+              </div>
+            )}
             {selectedTransactionIds.size > 0 && canPay && (
-              <form className="grid gap-3 border-t bg-muted/30 p-4 md:grid-cols-5" onSubmit={async event => {
+              <form className="grid gap-3 border-t bg-muted/30 p-4 md:grid-cols-6" onSubmit={async event => {
                 event.preventDefault()
-                await bulkPayMutation.mutateAsync({ transaction_ids: Array.from(selectedTransactionIds), payment_method: bulkPaymentEntry.payment_method, reference: bulkPaymentEntry.reference || '', notes: bulkPaymentEntry.notes || '', idempotency_key: bulkPaymentEntry.idempotency_key })
+                await bulkPayMutation.mutateAsync({ transaction_ids: Array.from(selectedTransactionIds), payment_method: bulkPaymentEntry.payment_method, reference: bulkPaymentEntry.reference || '', notes: bulkPaymentEntry.notes || '', settled_at: bulkPaymentEntry.settled_at, idempotency_key: bulkPaymentEntry.idempotency_key })
               }}>
-                <div className="md:col-span-2 text-sm font-medium">Bulk pay {selectedTransactionIds.size} transaction{selectedTransactionIds.size > 1 ? 's' : ''}</div>
-                <select className="rounded border px-2 py-2 text-sm" value={bulkPaymentEntry.payment_method} onChange={event => setBulkPaymentEntry({ ...bulkPaymentEntry, payment_method: event.target.value })}><option value="mpesa">M-PESA</option><option value="cash">Cash</option><option value="bank_transfer">Bank transfer</option></select>
-                <input required={bulkPaymentEntry.payment_method !== 'cash'} className="rounded border px-2 py-2 text-sm" placeholder={bulkPaymentEntry.payment_method === 'cash' ? 'Cash receipt reference (optional)' : 'Required payment reference'} value={bulkPaymentEntry.reference} onChange={event => setBulkPaymentEntry({ ...bulkPaymentEntry, reference: event.target.value })} />
+                <div className="md:col-span-2 text-sm font-medium">Settle {selectedTransactionIds.size} selected transaction{selectedTransactionIds.size > 1 ? 's' : ''} together<span className="mt-1 block text-xs font-normal text-muted-foreground">Selected balance: {formatMoney(selectedSettlementTotal)}. Final total is validated against recovery and deductions.</span></div>
+                <select className="rounded border px-2 py-2 text-sm" value={bulkPaymentEntry.payment_method} onChange={event => setBulkPaymentEntry({ ...bulkPaymentEntry, payment_method: event.target.value })}><option value="payroll">Salary / Payroll</option><option value="mpesa">M-PESA</option><option value="cash">Cash</option><option value="bank_transfer">Bank transfer</option></select>
+                <input required={bulkPaymentEntry.payment_method !== 'cash'} className="rounded border px-2 py-2 text-sm" placeholder={bulkPaymentEntry.payment_method === 'payroll' ? 'Salary / payroll reference' : bulkPaymentEntry.payment_method === 'cash' ? 'Cash receipt reference (optional)' : 'Required settlement reference'} value={bulkPaymentEntry.reference} onChange={event => setBulkPaymentEntry({ ...bulkPaymentEntry, reference: event.target.value })} />
+                <input required type="date" max={today} title="Settlement date" className="rounded border px-2 py-2 text-sm" value={bulkPaymentEntry.settled_at} onChange={event => setBulkPaymentEntry({ ...bulkPaymentEntry, settled_at: event.target.value })} />
                 <input className="rounded border px-2 py-2 text-sm" placeholder="Notes" value={bulkPaymentEntry.notes} onChange={event => setBulkPaymentEntry({ ...bulkPaymentEntry, notes: event.target.value })} />
-                <div className="flex gap-2"><button disabled={bulkPayMutation.isPending} className="rounded bg-emerald-700 px-3 py-2 text-xs text-white disabled:opacity-50">Record bulk payment</button><button type="button" className="rounded border px-3 py-2 text-xs" onClick={() => setSelectedTransactionIds(new Set())}>Cancel</button></div>
-                {bulkPayMutation.isError && <p className="text-sm text-red-600 md:col-span-5">{(bulkPayMutation.error as any)?.response?.data?.error?.message || 'Unable to record bulk payment'}</p>}
+                <div className="flex gap-2"><button disabled={bulkPayMutation.isPending} className="rounded bg-emerald-700 px-3 py-2 text-xs text-white disabled:opacity-50">Record settlements</button><button type="button" className="rounded border px-3 py-2 text-xs" onClick={() => setSelectedTransactionIds(new Set())}>Cancel</button></div>
+                {bulkPayMutation.isError && <p className="text-sm text-red-600 md:col-span-6">{(bulkPayMutation.error as any)?.response?.data?.error?.message || 'Unable to record selected settlements'}</p>}
               </form>
             )}
-            {managementTransactions?.pagination?.totalPages > 1 && <div className="flex items-center justify-between border-t px-4 py-3 text-sm"><span>Page {managementTransactions.pagination.page} of {managementTransactions.pagination.totalPages}</span><div className="flex gap-2"><button disabled={managementTransactions.pagination.page <= 1} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => setManagementTransactionPage(page => Math.max(1, page - 1))}>Previous</button><button disabled={managementTransactions.pagination.page >= managementTransactions.pagination.totalPages} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => setManagementTransactionPage(page => page + 1)}>Next</button></div></div>}
+            {managementTransactions?.pagination?.totalPages > 1 && <div className="flex items-center justify-between border-t px-4 py-3 text-sm"><span>Page {managementTransactions.pagination.page} of {managementTransactions.pagination.totalPages}</span><div className="flex gap-2"><button disabled={managementTransactions.pagination.page <= 1} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => { setManagementTransactionPage(page => Math.max(1, page - 1)); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}>Previous</button><button disabled={managementTransactions.pagination.page >= managementTransactions.pagination.totalPages} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => { setManagementTransactionPage(page => page + 1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}>Next</button></div></div>}
           </div>
 
           {canAdjust && (
@@ -889,12 +973,20 @@ export function Commissions() {
               <p className="mt-1 text-sm text-muted-foreground">Close only a fully completed Nairobi calendar month after every pending item has been approved or resolved.</p>
             </div>
             <div className="mt-4 rounded border border-amber-300 bg-amber-100/70 p-3 text-sm text-amber-950">
-              <strong>There is no reopen action.</strong> Closing freezes the source month permanently. Unpaid credit and recovery balances are carried to the next open month, and later corrections are recorded as linked, auditable corrections rather than changing closed records.
+              Closing freezes the source month. Unpaid credit and recovery balances move to the following month. An administrator can undo the close only before a later period is closed or the carried balance is settled.
             </div>
+            {periodReadinessLoading ? <p className="mt-4 text-sm text-muted-foreground">Preparing close preview...</p> : periodReadiness && (
+              <div className={`mt-4 rounded border p-4 ${periodReadiness.isReadyToClose ? 'border-emerald-200 bg-emerald-50/60' : 'border-red-200 bg-red-50/60'}`}>
+                <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">{formatCommissionMonth(periodReadiness.periodStart)} close preview</h3><span className={`rounded-full px-2 py-1 text-xs font-medium ${periodReadiness.isReadyToClose ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>{periodReadiness.isReadyToClose ? 'Ready to close' : 'Review required'}</span></div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5 text-sm"><div><span className="block text-xs text-muted-foreground">Approved credit</span>{formatMoney(periodReadiness.totalApprovedCredits || 0)}</div><div><span className="block text-xs text-muted-foreground">Deductions</span>{formatMoney(periodReadiness.totalApprovedDeductions || 0)}</div><div><span className="block text-xs text-muted-foreground">Settled</span>{formatMoney(periodReadiness.totalSettled || 0)}</div><div><span className="block text-xs text-muted-foreground">Moving forward</span>{formatMoney(periodReadiness.totalUnpaid || 0)}</div><div><span className="block text-xs text-muted-foreground">Recovery moving forward</span>{formatMoney(periodReadiness.totalRecovery || 0)}</div></div>
+                {periodReadiness.blockers?.length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-red-800">{periodReadiness.blockers.map((blocker: string) => <li key={blocker}>{blocker}</li>)}</ul>}
+                {periodReadiness.balances?.length > 0 && <MobileTableScroll label="commission close preview" className="mt-4 rounded border bg-card"><table className="w-full text-xs"><thead className="bg-muted"><tr><th className="px-3 py-2 text-left">Attendant</th><th className="px-3 py-2 text-right">Approved</th><th className="px-3 py-2 text-right">Settled</th><th className="px-3 py-2 text-right">Result</th></tr></thead><tbody>{periodReadiness.balances.map((balance: any) => <tr key={balance.salespersonId} className="border-t"><td className="px-3 py-2">{balance.salespersonName}</td><td className="px-3 py-2 text-right">{formatMoney((balance.approvedCredits || 0) - (balance.approvedDeductions || 0))}</td><td className="px-3 py-2 text-right">{formatMoney(balance.paidAmount || 0)}</td><td className="px-3 py-2 text-right font-medium">{balance.closingBalance < 0 ? `Recovery ${formatMoney(Math.abs(balance.closingBalance))}` : `${formatMoney(balance.closingBalance || 0)} forward`}</td></tr>)}</tbody></table></MobileTableScroll>}
+              </div>
+            )}
             <form className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)_auto]" onSubmit={async event => {
               event.preventDefault()
               const periodLabel = formatCommissionMonth(periodCloseForm.period)
-              if (!confirm(`Close ${periodLabel}? This cannot be reopened.`)) return
+              if (!confirm(`Close ${periodLabel} with ${formatMoney(periodReadiness?.totalUnpaid || 0)} moving forward and ${formatMoney(periodReadiness?.totalRecovery || 0)} recovery?`)) return
               await closePeriodMutation.mutateAsync(periodCloseForm)
             }}>
               <label className="text-sm font-medium">
@@ -905,7 +997,7 @@ export function Commissions() {
                 Close reason
                 <input required className="mt-1 block w-full rounded border bg-background px-3 py-2 text-sm" placeholder="Why this period is ready to close" value={periodCloseForm.reason} onChange={event => setPeriodCloseForm({ ...periodCloseForm, reason: event.target.value })} />
               </label>
-              <div className="flex items-end"><button disabled={closePeriodMutation.isPending} className="w-full rounded bg-amber-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{closePeriodMutation.isPending ? 'Closing period...' : 'Close period'}</button></div>
+              <div className="flex items-end"><button disabled={closePeriodMutation.isPending || !periodReadiness?.isReadyToClose} className="w-full rounded bg-amber-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{closePeriodMutation.isPending ? 'Closing period...' : 'Close period'}</button></div>
             </form>
             {closePeriodMutation.isError && (
               <div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">
@@ -921,7 +1013,7 @@ export function Commissions() {
           <div className="rounded-lg border bg-card overflow-hidden">
             <div className="px-4 py-3 border-b">
               <h3 className="font-semibold">Commission period closure history</h3>
-              <p className="text-xs text-muted-foreground">Each entry is immutable and records the balance that was carried forward or retained as recovery.</p>
+              <p className="text-xs text-muted-foreground">Each close records the amount moved forward. A safe administrative undo remains visible here and in the audit log.</p>
             </div>
             {periodClosuresLoading ? (
               <div className="p-5 text-sm text-muted-foreground">Loading closure history...</div>
@@ -930,8 +1022,8 @@ export function Commissions() {
                 {periodClosures.closures.map((closure: any) => (
                   <details key={closure.id} className="group">
                     <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-muted/40">
-                      <div><span className="font-medium">{formatCommissionMonth(closure.periodStart || closure.period_start)}</span><span className="ml-2 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium capitalize text-emerald-800">{closure.status}</span></div>
-                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground"><span>Carried credit: {formatMoney(closure.totalUnpaid || 0)}</span><span>Recovery: {formatMoney(closure.totalRecovery || 0)}</span><span>Closed {formatCommissionTimestamp(closure.closedAt || closure.closed_at)}</span></div>
+                      <div><span className="font-medium">{formatCommissionMonth(closure.periodStart || closure.period_start)}</span><span className={`ml-2 rounded-full px-2 py-0.5 text-xs font-medium capitalize ${closure.status === 'closed' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{closure.status}</span></div>
+                      <div className="flex flex-wrap gap-3 text-xs text-muted-foreground"><span>Moved forward: {formatMoney(closure.totalUnpaid || 0)}</span><span>Recovery: {formatMoney(closure.totalRecovery || 0)}</span><span>{closure.status === 'reopened' ? `Reopened ${formatCommissionTimestamp(closure.reopenedAt)}` : `Closed ${formatCommissionTimestamp(closure.closedAt || closure.closed_at)}`}</span></div>
                     </summary>
                     <div className="border-t bg-muted/20 px-4 py-4 text-sm">
                       <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -941,14 +1033,16 @@ export function Commissions() {
                         <div><dt className="text-xs text-muted-foreground">Recovery carried</dt><dd className="font-medium">{formatMoney(closure.totalRecovery || 0)}</dd></div>
                       </dl>
                       <div className="mt-3"><span className="text-xs text-muted-foreground">Reason</span><p className="mt-1">{closure.reason}</p></div>
+                      {closure.status === 'reopened' && <div className="mt-3 rounded border border-amber-200 bg-amber-50 p-3"><span className="text-xs text-muted-foreground">Undo reason</span><p>{closure.reopenReason}</p></div>}
                       {closure.balances?.length > 0 && (
                         <MobileTableScroll label="period closure balances" className="mt-4 rounded border bg-card">
                           <table className="w-full text-xs">
-                            <thead className="bg-muted"><tr><th className="px-3 py-2 text-left">Salesperson</th><th className="px-3 py-2 text-right">Approved credit</th><th className="px-3 py-2 text-right">Approved deductions</th><th className="px-3 py-2 text-right">Paid</th><th className="px-3 py-2 text-right">Closing balance</th></tr></thead>
+                            <thead className="bg-muted"><tr><th className="px-3 py-2 text-left">Salesperson</th><th className="px-3 py-2 text-right">Approved credit</th><th className="px-3 py-2 text-right">Approved deductions</th><th className="px-3 py-2 text-right">Settled</th><th className="px-3 py-2 text-right">Closing balance</th></tr></thead>
                             <tbody>{closure.balances.map((balance: any) => <tr key={balance.id || balance.salespersonId} className="border-t"><td className="px-3 py-2">{balance.salespersonName || balance.salespersonId}</td><td className="px-3 py-2 text-right">{formatMoney(balance.approvedCredits || 0)}</td><td className="px-3 py-2 text-right">{formatMoney(balance.approvedDeductions || 0)}</td><td className="px-3 py-2 text-right">{formatMoney(balance.paidAmount || 0)}</td><td className="px-3 py-2 text-right font-medium">{balance.closingBalance < 0 ? `Recovery ${formatMoney(Math.abs(balance.closingBalance))}` : formatMoney(balance.closingBalance || 0)}</td></tr>)}</tbody>
                           </table>
                         </MobileTableScroll>
                       )}
+                      {isAdministrativeRole && closure.status === 'closed' && <button type="button" disabled={reopenPeriodMutation.isPending} className="mt-4 rounded border border-red-300 px-3 py-2 text-xs font-medium text-red-700 disabled:opacity-50" onClick={() => { const reason = prompt(`Reason for undoing the ${formatCommissionMonth(closure.periodStart || closure.period_start)} close?`); if (reason?.trim() && confirm('Undo this close and remove its unsettled carry-forward entries?')) reopenPeriodMutation.mutate({ period: String(closure.periodStart || closure.period_start).slice(0, 7), reason: reason.trim() }) }}>Undo close</button>}
                     </div>
                   </details>
                 ))}
@@ -964,7 +1058,7 @@ export function Commissions() {
         <div className="space-y-6">
           <div className="rounded-lg border bg-card p-6">
             <h3 className="font-semibold mb-1">Programme status and module availability</h3>
-            <p className="text-xs text-muted-foreground mb-4">Suspending or disabling stops new earnings from the effective time. Existing history, reversals, approvals and payments remain available.</p>
+            <p className="text-xs text-muted-foreground mb-4">Suspending or disabling stops new earnings from the effective time. Existing history, reversals, approvals and settlements remain available.</p>
             {programme?.current ? (
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
