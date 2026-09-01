@@ -72,6 +72,7 @@ export function Commissions() {
   const [adjustmentForm, setAdjustmentForm] = useState({ salesperson_id: '', amount: '', adjustment_type: 'manual_add', reason: '', period: today.slice(0, 7), order_id: '' })
   const [transactionPage, setTransactionPage] = useState(1)
   const [managementTransactionPage, setManagementTransactionPage] = useState(1)
+  const [managementSettlementPage, setManagementSettlementPage] = useState(1)
   const [managementTransactionStatus, setManagementTransactionStatus] = useState('')
   const [managementSalespersonId, setManagementSalespersonId] = useState('')
   const [paymentEntry, setPaymentEntry] = useState({ transactionId: '', amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })
@@ -187,6 +188,16 @@ export function Commissions() {
       return (await axios.get(`/api/commissions/transactions?${params.toString()}`)).data
     },
     enabled: canManagementLedger
+  })
+
+  const { data: managementSettlements } = useQuery({
+    queryKey: ['commission-settlements', managementFrom, managementTo, managementSettlementPage, managementSalespersonId],
+    queryFn: async () => {
+      const params = new URLSearchParams({ date_from: managementFrom, date_to: managementTo, page: String(managementSettlementPage), page_size: '25' })
+      if (managementSalespersonId) params.set('salesperson_id', managementSalespersonId)
+      return (await axios.get(`/api/commissions/settlements?${params.toString()}`)).data
+    },
+    enabled: hasPermission('commission.view')
   })
 
   const approveMutation = useMutation({
@@ -728,31 +739,58 @@ export function Commissions() {
        {activeTab === 'management' && (hasPermission('commission.view') || canApprove || canPay || canAdjust) && (
          <div className="space-y-6">
            <div className="flex flex-col gap-3 rounded-lg border bg-card p-4 lg:flex-row lg:items-end lg:justify-between">
-             <div><h3 className="font-semibold">Management review period</h3><p className="text-xs text-muted-foreground">Figures use the date the completed sale qualified for commission.</p></div>
-             <DateRangeFilter dateFrom={managementFrom} dateTo={managementTo} includeClear={false} compact onChange={range => { setManagementFrom(range.dateFrom); setManagementTo(range.dateTo); setManagementTransactionPage(1) }} />
+             <div><h3 className="font-semibold">Management review period</h3><p className="text-xs text-muted-foreground">Recorded and balance figures use the earning date. Settled figures use the actual payment date.</p></div>
+             <DateRangeFilter dateFrom={managementFrom} dateTo={managementTo} includeClear={false} compact onChange={range => { setManagementFrom(range.dateFrom); setManagementTo(range.dateTo); setManagementTransactionPage(1); setManagementSettlementPage(1) }} />
            </div>
 
            {managementSummary && (
              <div className="space-y-3">
                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                 <StatCard title="Recorded" description="Qualifying company sales before corrections." value={formatMoney(managementSummary.totalEarned || 0)} icon={<Wallet className="h-5 w-5" />} />
-                 <StatCard title="Reversals" description="Amounts removed due to returns or corrections." value={formatMoney(managementSummary.totalReversals || 0)} icon={<TrendingDown className="h-5 w-5" />} />
-                 <StatCard title="Balance" description="Net balance after reversals, management changes and carry-forward. Not automatically payable." value={formatMoney(managementSummary.netCommission || 0)} icon={<BarChart3 className="h-5 w-5" />} />
-                 <StatCard title="Management add" description="Extra commission added with a recorded reason." value={formatMoney(managementSummary.totalManualAdditions || 0)} icon={<TrendingUp className="h-5 w-5" />} />
-                 <StatCard title="Management deduct" description="Commission removed with a recorded reason." value={formatMoney(managementSummary.totalManualDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} />
-                 <StatCard title="Carry-forward credit" description="Positive balances brought forward from closed months." value={formatMoney(managementSummary.totalCarryForwardCredits || 0)} icon={<TrendingUp className="h-5 w-5" />} />
-                 <StatCard title="Carry-forward recovery" description="Balances carried forward that reduce payment." value={formatMoney(managementSummary.totalCarryForwardDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} />
-                 <StatCard title="Approved" description="Approved amount available for settlement." value={formatMoney(managementSummary.approvedPayable ?? managementSummary.approvedUnpaid ?? 0)} icon={<CreditCard className="h-5 w-5" />} />
-                 <StatCard title="Settled" description="Commission settlements recorded for the selected period." value={formatMoney(managementSummary.totalPayments || 0)} icon={<CheckCircle2 className="h-5 w-5" />} />
-                 <StatCard title="Recovery" description="Amount offset before a further payment can be made." value={formatMoney(managementSummary.recoveryDue || 0)} icon={<TrendingDown className="h-5 w-5" />} />
-                 <StatCard title="Salespeople" description="Salespeople with commission activity in the selected period." value={String(managementSummary.salespersonCount || 0)} icon={<Users className="h-5 w-5" />} />
+                 <StatCard title="Recorded" description="Qualifying company sales before corrections." value={formatMoney(managementSummary.totalEarned || 0)} icon={<Wallet className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Reversals" description="Amounts removed due to returns or corrections." value={formatMoney(managementSummary.totalReversals || 0)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Balance" description="Net balance after reversals, management changes and carry-forward. Not automatically payable." value={formatMoney(managementSummary.netCommission || 0)} icon={<BarChart3 className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Management add" description="Extra commission added with a recorded reason." value={formatMoney(managementSummary.totalManualAdditions || 0)} icon={<TrendingUp className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Management deduct" description="Commission removed with a recorded reason." value={formatMoney(managementSummary.totalManualDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Carry-forward credit" description="Positive balances brought forward from closed months." value={formatMoney(managementSummary.totalCarryForwardCredits || 0)} icon={<TrendingUp className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Carry-forward recovery" description="Balances carried forward that reduce payment." value={formatMoney(managementSummary.totalCarryForwardDeductions || 0)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Approved" description="Approved amount available for settlement." value={formatMoney(managementSummary.approvedPayable ?? managementSummary.approvedUnpaid ?? 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Settled" description="Payments made during the selected dates, even when earned earlier." value={formatMoney(managementSummary.settledInPeriod ?? managementSummary.totalPayments ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} onClick={() => document.getElementById('commission-settlement-history')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Recovery" description="Amount offset before a further payment can be made." value={formatMoney(managementSummary.recoveryDue || 0)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => document.getElementById('commission-earning-ledger')?.scrollIntoView({ behavior: 'smooth' })} />
+                 <StatCard title="Salespeople" description="Salespeople with commission activity in the selected period." value={String(managementSummary.salespersonCount || 0)} icon={<Users className="h-5 w-5" />} onClick={() => document.getElementById('commission-by-salesperson')?.scrollIntoView({ behavior: 'smooth' })} />
                </div>
              </div>
            )}
+
+          <div id="commission-settlement-history" className="scroll-mt-4 overflow-hidden rounded-lg border bg-card">
+            <div className="border-b px-4 py-3">
+              <h3 className="font-semibold">Settlement history</h3>
+              <p className="text-xs text-muted-foreground">Payments made in the selected dates. The earning month is shown separately, so prior-month commissions remain visible.</p>
+            </div>
+            {managementSettlements?.data?.length ? (
+              <MobileTableScroll label="commission settlement history">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted"><tr><th className="px-4 py-3 text-left">Paid date</th><th className="px-4 py-3 text-left">Salesperson</th><th className="px-4 py-3 text-left">Earning month</th><th className="px-4 py-3 text-left">Reference</th><th className="px-4 py-3 text-left">Method</th><th className="px-4 py-3 text-right">Paid</th><th className="px-4 py-3 text-left">Recorded by</th></tr></thead>
+                  <tbody>{managementSettlements.data.map((payment: any) => <tr key={payment.id} className="border-t hover:bg-muted/40">
+                    <td className="whitespace-nowrap px-4 py-3">{formatCommissionTimestamp(payment.paid_at)}</td>
+                    <td className="px-4 py-3 font-medium">{payment.salesperson_name}</td>
+                    <td className="whitespace-nowrap px-4 py-3">{formatCommissionMonth(payment.commission_month || payment.earned_date)}</td>
+                    <td className="px-4 py-3"><div>{payment.reference || payment.order_number}</div><div className="text-xs text-muted-foreground">{payment.product_name}</div></td>
+                    <td className="px-4 py-3 capitalize">{String(payment.payment_method || 'payment').replaceAll('_', ' ')}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right font-medium">{formatMoney(payment.paid_amount)}</td>
+                    <td className="px-4 py-3">{payment.recorded_by_name || '-'}</td>
+                  </tr>)}</tbody>
+                </table>
+              </MobileTableScroll>
+            ) : <div className="p-6 text-center text-muted-foreground">No commission payments were recorded in these dates</div>}
+            <div className="flex items-center justify-between border-t px-4 py-3 text-sm">
+              <strong>Total paid: {formatMoney(managementSettlements?.totalAmount || 0)}</strong>
+              {managementSettlements?.pagination?.totalPages > 1 && <div className="flex items-center gap-2"><span>Page {managementSettlements.pagination.page} of {managementSettlements.pagination.totalPages}</span><button disabled={managementSettlements.pagination.page <= 1} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => setManagementSettlementPage((page: number) => Math.max(1, page - 1))}>Previous</button><button disabled={managementSettlements.pagination.page >= managementSettlements.pagination.totalPages} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => setManagementSettlementPage((page: number) => page + 1)}>Next</button></div>}
+            </div>
+          </div>
           {managementBySalesperson?.salespeople?.length === 0 ? (
             <div className="rounded-lg border bg-card p-8 text-center text-muted-foreground">No commission data for selected period</div>
           ) : (
-            <div className="rounded-lg border bg-card overflow-hidden">
+            <div id="commission-by-salesperson" className="scroll-mt-4 rounded-lg border bg-card overflow-hidden">
               <div className="px-4 py-3 border-b">
                 <h3 className="font-semibold">Commission by Salesperson</h3>
               </div>
@@ -775,7 +813,7 @@ export function Commissions() {
                         <td className="px-4 py-3 text-right">{formatMoney(sp.grossEarned)}</td>
                         <td className="px-4 py-3 text-right">{formatMoney(sp.reversals)}</td>
                         <td className="px-4 py-3 text-right font-medium">{formatMoney(sp.netCommission)}</td>
-                        <td className="px-4 py-3 text-right">{formatMoney(sp.paid)}</td>
+                        <td className="px-4 py-3 text-right">{formatMoney(sp.settledInPeriod ?? sp.paid ?? 0)}</td>
                         <td className="px-4 py-3 text-right">{sp.recoveryDue > 0 ? `Recovery ${formatMoney(sp.recoveryDue)}` : formatMoney(sp.payableAmount)}</td>
                       </tr>
                     ))}
@@ -785,11 +823,11 @@ export function Commissions() {
             </div>
           )}
 
-          <div className="rounded-lg border bg-card overflow-hidden">
+          <div id="commission-earning-ledger" className="scroll-mt-4 rounded-lg border bg-card overflow-hidden">
             <div className="px-4 py-3 border-b"><h3 className="font-semibold">Commission approval and settlement ledger</h3><p className="text-xs text-muted-foreground">Approve verified earnings, then record the external salary, cash, M-PESA or bank settlement. A settlement cannot exceed the balance after deductions and reversals.</p></div>
             <div className="flex flex-wrap gap-3 border-b bg-muted/20 p-3">
               <select className="rounded border bg-background px-2 py-1 text-sm" value={managementTransactionStatus} onChange={event => { setManagementTransactionStatus(event.target.value); setManagementTransactionPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}><option value="">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="paid">Settled</option><option value="reversed">Reversed</option></select>
-              <select className="rounded border bg-background px-2 py-1 text-sm" value={managementSalespersonId} onChange={event => { setManagementSalespersonId(event.target.value); setManagementTransactionPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}><option value="">All salespeople</option>{salespeople.map((person: any) => <option key={person.id} value={person.id}>{person.full_name || person.name}</option>)}</select>
+              <select className="rounded border bg-background px-2 py-1 text-sm" value={managementSalespersonId} onChange={event => { setManagementSalespersonId(event.target.value); setManagementTransactionPage(1); setManagementSettlementPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}><option value="">All salespeople</option>{salespeople.map((person: any) => <option key={person.id} value={person.id}>{person.full_name || person.name}</option>)}</select>
             </div>
             {paymentEntry.transactionId && canPay && selectedTransactionIds.size === 0 && (
               <form className="grid gap-3 border-b bg-muted/30 p-4 md:grid-cols-6" onSubmit={async event => {
@@ -1467,17 +1505,21 @@ export function Commissions() {
   )
 }
 
-function StatCard({ title, description, value, icon }: { title: string; description?: string; value: string; icon: React.ReactNode }) {
-  return (
-    <div className="rounded-lg border bg-card p-4">
+function StatCard({ title, description, value, icon, onClick }: { title: string; description?: string; value: string; icon: React.ReactNode; onClick?: () => void }) {
+  const content = (
+    <>
       <div className="flex items-center justify-between">
         <div className="text-xs font-medium text-muted-foreground">{title}</div>
         <div className="rounded-lg bg-primary/10 p-2 text-primary">{icon}</div>
       </div>
       <div className="mt-2 text-xl font-bold">{value}</div>
       {description && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>}
-    </div>
+      {onClick && <p className="mt-2 text-xs font-medium text-primary">View details</p>}
+    </>
   )
+  return onClick
+    ? <button type="button" onClick={onClick} className="rounded-lg border bg-card p-4 text-left transition hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">{content}</button>
+    : <div className="rounded-lg border bg-card p-4">{content}</div>
 }
 
 function Clock({ className }: { className?: string }) {

@@ -647,6 +647,52 @@ router.get('/drilldown', async (req, res) => {
       conditions.push(`ct.qualification_date >= $1::date AND ct.qualification_date <= $2::date`)
     }
 
+    if (commissionCard === 'paid') {
+      const paymentParams: any[] = isOwnCommission
+        ? [req.user!.userId, periodFrom, periodTo]
+        : [periodFrom, periodTo]
+      const paymentConditions = isOwnCommission
+        ? `cp.salesperson_id = $1 AND cp.paid_at::date >= $2::date AND cp.paid_at::date < $3::date`
+        : `cp.paid_at::date >= $1::date AND cp.paid_at::date <= $2::date`
+      const result = await query(
+        `SELECT cp.id AS payment_id, ct.id AS transaction_id, ct.order_id,
+                COALESCE(o.order_number, 'Commission adjustment') AS order_number,
+                o.sale_date, ${physicalDeliveryTimestampSql('o')} AS delivery_date,
+                ${commissionCompletionTimestampSql('o')} AS completion_date,
+                ct.qualified_at AS earned_date,
+                COALESCE(p.name, 'Commission adjustment') AS product_name,
+                COALESCE(ct.eligible_quantity, 0) AS eligible_quantity,
+                COALESCE(ct.rate_per_item, 0) AS rate_per_item,
+                COALESCE(ct.amount, cp.total_amount, cp.paid_amount) AS amount,
+                COALESCE(ct.amount, cp.total_amount, cp.paid_amount) AS signed_amount,
+                COALESCE(ct.transaction_type, 'settlement') AS transaction_type,
+                'settled' AS transaction_status,
+                ct.policy_date, ct.qualification_date, ct.commission_month,
+                cp.notes AS reason, sp.full_name AS salesperson_name,
+                cp.paid_amount, cp.paid_at AS last_paid_at,
+                CONCAT(COALESCE(cp.payment_method::text, 'payment'), ': ', COALESCE(NULLIF(cp.reference, ''), 'no reference')) AS payment_references,
+                0 AS reversed_amount, 0 AS outstanding_amount,
+                COUNT(*) OVER()::int AS total_rows
+         FROM commission_payments cp
+         JOIN users sp ON sp.id = cp.salesperson_id
+         LEFT JOIN commission_transactions ct ON ct.id = cp.commission_transaction_id
+         LEFT JOIN orders o ON o.id = ct.order_id
+         LEFT JOIN products p ON p.id = ct.product_id
+         WHERE cp.status <> 'voided' AND ${paymentConditions}
+         ORDER BY cp.paid_at DESC, cp.created_at DESC
+         LIMIT 101`,
+        paymentParams
+      )
+      const total = Number(result.rows[0]?.total_rows || 0)
+      return res.json({
+        kind: 'commissions', card,
+        title: `${isOwnCommission ? 'My' : 'Company'} commission settlements by payment date`,
+        dateFrom: periodFrom,
+        dateTo: isOwnCommission ? today : periodTo,
+        total, truncated: total > 100, rows: result.rows.slice(0, 100)
+      })
+    }
+
     if (commissionCard === 'salespeople') {
       if (!isCompanyCommission) return res.status(400).json({ error: { message: 'Salespeople is a company commission view' } })
       const result = await query(
@@ -685,7 +731,6 @@ router.get('/drilldown', async (req, res) => {
       AND ct.transaction_type IN ('earned', 'manual_add', 'carry_forward')
       AND (ct.transaction_type <> 'carry_forward' OR ct.carry_forward_direction = 'credit')
       AND GREATEST(ct.amount - COALESCE(payments.paid_amount, 0) - COALESCE(reversals.reversed_amount, 0), 0) > 0`)
-    if (commissionCard === 'paid') conditions.push('COALESCE(payments.paid_amount, 0) > 0')
     if (commissionCard === 'outstanding') {
       conditions.push(`ct.transaction_type IN ('earned', 'manual_add', 'carry_forward')
         AND (ct.transaction_type <> 'carry_forward' OR ct.carry_forward_direction = 'credit')

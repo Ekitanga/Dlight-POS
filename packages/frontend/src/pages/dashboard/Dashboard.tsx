@@ -67,6 +67,7 @@ interface ManagementCommissionSummary {
   totalEarned: number
   totalReversals: number
   totalPayments: number
+  settledInPeriod: number
   approvedUnpaid: number
   approvedPayable: number
   pendingAmount: number
@@ -225,7 +226,7 @@ function MobileDrilldownRows({ data, canOpenOrders, onOpenOrder }: {
 
         if (data.kind === 'commissions') {
           return (
-            <article key={row.transaction_id} className="rounded-lg border bg-card p-4 shadow-sm">
+            <article key={row.payment_id || row.transaction_id} className="rounded-lg border bg-card p-4 shadow-sm">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   {row.order_id && canOpenOrders
@@ -239,9 +240,11 @@ function MobileDrilldownRows({ data, canOpenOrders, onOpenOrder }: {
                 <MobileDetail label="Product" full>{row.product_name || '-'}{row.reason && <span className="mt-1 block text-xs text-muted-foreground">{row.reason}</span>}</MobileDetail>
                 <MobileDetail label="Sale date">{displayDate(row.sale_date || row.policy_date)}</MobileDetail>
                 <MobileDetail label="Earned">{displayDate(row.earned_date || row.qualification_date)}</MobileDetail>
+                <MobileDetail label="Settled">{displayDate(row.last_paid_at)}</MobileDetail>
                 <MobileDetail label="Quantity">{Number(row.eligible_quantity || 0)}</MobileDetail>
                 <MobileDetail label="Rate">{formatMoney(row.rate_per_item)}</MobileDetail>
                 <MobileDetail label="Commission"><strong>{formatMoney(row.signed_amount)}</strong></MobileDetail>
+                <MobileDetail label="Paid">{formatMoney(row.paid_amount)}{row.payment_references && <span className="mt-1 block text-xs text-muted-foreground">{row.payment_references}</span>}</MobileDetail>
                 <MobileDetail label="Outstanding">{formatMoney(row.outstanding_amount)}</MobileDetail>
               </dl>
             </article>
@@ -415,13 +418,13 @@ function DashboardDrilldown({
               )}
               {data.kind === 'commissions' && (
                 <table className="w-full min-w-[1320px] text-sm">
-                  <thead className="sticky top-0 z-10 bg-muted"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Sale date</th><th className="px-3 py-3 text-left">Delivered</th><th className="px-3 py-3 text-left">Final completion</th><th className="px-3 py-3 text-left">Earned</th><th className="px-3 py-3 text-left">Salesperson</th><th className="px-3 py-3 text-left">Product</th><th className="px-3 py-3 text-right">Qty</th><th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3 text-right">Commission</th><th className="px-3 py-3 text-right">Paid</th><th className="px-3 py-3 text-right">Outstanding</th><th className="px-3 py-3 text-left">Status</th></tr></thead>
-                  <tbody>{data.rows.map((row, index) => <tr key={row.transaction_id} className="border-t hover:bg-muted/30">
+                  <thead className="sticky top-0 z-10 bg-muted"><tr><th className="px-3 py-3 text-right">#</th><th className="px-3 py-3 text-left">Order</th><th className="px-3 py-3 text-left">Sale date</th><th className="px-3 py-3 text-left">Delivered</th><th className="px-3 py-3 text-left">Final completion</th><th className="px-3 py-3 text-left">Earned</th><th className="px-3 py-3 text-left">Settled</th><th className="px-3 py-3 text-left">Salesperson</th><th className="px-3 py-3 text-left">Product</th><th className="px-3 py-3 text-right">Qty</th><th className="px-3 py-3 text-right">Rate</th><th className="px-3 py-3 text-right">Commission</th><th className="px-3 py-3 text-right">Paid</th><th className="px-3 py-3 text-right">Outstanding</th><th className="px-3 py-3 text-left">Status</th></tr></thead>
+                  <tbody>{data.rows.map((row, index) => <tr key={row.payment_id || row.transaction_id} className="border-t hover:bg-muted/30">
                     <td className="px-3 py-3 text-right text-muted-foreground">{index + 1}</td>
                     <td className="px-3 py-3 font-medium">{row.order_id && canOpenOrders ? <button type="button" onClick={() => onOpenOrder(row.order_id)} className="text-primary hover:underline">{row.order_number}</button> : row.order_number}</td>
-                    <td className="px-3 py-3 whitespace-nowrap">{displayDate(row.sale_date || row.policy_date)}</td><td className="px-3 py-3 whitespace-nowrap">{displayDate(row.delivery_date || row.completion_date)}</td><td className="px-3 py-3 whitespace-nowrap">{displayDate(row.completion_date)}</td><td className="px-3 py-3 whitespace-nowrap">{displayDate(row.earned_date || row.qualification_date)}</td><td className="px-3 py-3">{row.salesperson_name}</td>
+                    <td className="px-3 py-3 whitespace-nowrap">{displayDate(row.sale_date || row.policy_date)}</td><td className="px-3 py-3 whitespace-nowrap">{displayDate(row.delivery_date || row.completion_date)}</td><td className="px-3 py-3 whitespace-nowrap">{displayDate(row.completion_date)}</td><td className="px-3 py-3 whitespace-nowrap">{displayDate(row.earned_date || row.qualification_date)}</td><td className="px-3 py-3 whitespace-nowrap">{displayDate(row.last_paid_at)}</td><td className="px-3 py-3">{row.salesperson_name}</td>
                     <td className="max-w-xs px-3 py-3">{row.product_name}{row.reason && <div className="text-xs text-muted-foreground">{row.reason}</div>}</td><td className="px-3 py-3 text-right">{Number(row.eligible_quantity || 0)}</td><td className="px-3 py-3 text-right whitespace-nowrap">{formatMoney(row.rate_per_item)}</td>
-                    <td className={`px-3 py-3 text-right font-medium whitespace-nowrap ${Number(row.signed_amount) < 0 ? 'text-red-600' : ''}`}>{formatMoney(row.signed_amount)}</td><td className="px-3 py-3 text-right whitespace-nowrap">{formatMoney(row.paid_amount)}</td><td className="px-3 py-3 text-right whitespace-nowrap">{formatMoney(row.outstanding_amount)}</td>
+                    <td className={`px-3 py-3 text-right font-medium whitespace-nowrap ${Number(row.signed_amount) < 0 ? 'text-red-600' : ''}`}>{formatMoney(row.signed_amount)}</td><td className="px-3 py-3 text-right whitespace-nowrap">{formatMoney(row.paid_amount)}{row.payment_references && <div className="max-w-52 whitespace-normal text-xs text-muted-foreground">{row.payment_references}</div>}</td><td className="px-3 py-3 text-right whitespace-nowrap">{formatMoney(row.outstanding_amount)}</td>
                     <td className="px-3 py-3 capitalize">{displayStatus(row.transaction_status)}<div className="text-xs text-muted-foreground">{displayStatus(row.transaction_type)}</div></td>
                   </tr>)}</tbody>
                 </table>
@@ -839,7 +842,7 @@ export function Dashboard() {
                 <StatsCard title="Reversals" value={formatMoney(commissionSummary.reversals)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_reversals', 'My commission reversals')} />
                 <StatsCard title="Balance" value={formatMoney(commissionSummary.netCommission)} icon={<TrendingUp className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_balance', 'My commission balance breakdown')} />
                 <StatsCard title="Approved" value={formatMoney(commissionSummary.approvedPayable ?? commissionSummary.payableAmount ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_approved', 'My approved commission')} />
-                <StatsCard title="Settled" value={formatMoney(commissionSummary.paidAmount || 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_paid', 'My settled commission')} />
+                <StatsCard title="Settled" subtitle="Payments recorded this month" value={formatMoney(commissionSummary.settledInPeriod ?? commissionSummary.paidAmount ?? 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_paid', 'My settled commission')} />
                 <StatsCard title={commissionSummary.recoveryDue > 0 ? 'Recovery' : 'Outstanding'} value={formatMoney(commissionSummary.recoveryDue > 0 ? commissionSummary.recoveryDue : Math.max(0, Number(commissionSummary.outstandingAmount || 0)))} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown(commissionSummary.recoveryDue > 0 ? 'my_commission_recovery' : 'my_commission_outstanding', commissionSummary.recoveryDue > 0 ? 'My commission recovery' : 'My outstanding commission')} />
               </div>
             </>
@@ -857,7 +860,7 @@ export function Dashboard() {
                 <StatsCard title="Recorded" subtitle="Commission earned in this period" value={formatMoney(managementCommission.totalEarned)} icon={<Wallet className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_recorded', 'Company recorded commission sales')} />
                 <StatsCard title="Pending approval" subtitle="Recorded and awaiting approval" value={formatMoney(Math.max(0, managementCommission.pendingAmount || 0))} icon={<History className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_pending', 'Commission pending approval')} />
                 <StatsCard title="Approved for settlement" subtitle="Approved but not yet settled" value={formatMoney(managementCommission.approvedPayable ?? managementCommission.approvedUnpaid ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_approved', 'Commission approved for settlement')} />
-                <StatsCard title="Settled" subtitle="Salary or other settlements recorded for this period" value={formatMoney(managementCommission.totalPayments || 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_paid', 'Company settled commission')} />
+                <StatsCard title="Settled" subtitle="Payments made during these dates, regardless of earning month" value={formatMoney(managementCommission.settledInPeriod ?? managementCommission.totalPayments ?? 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_paid', 'Company settled commission')} />
                 <StatsCard title="Outstanding" subtitle="Pending and approved amounts still unpaid" value={formatMoney(Math.max(0, managementCommission.outstandingAmount || 0))} icon={<TrendingUp className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_outstanding', 'Company outstanding commission')} />
                 <StatsCard title="Reversals" subtitle={managementCommission.recoveryDue > 0 ? `${formatMoney(managementCommission.recoveryDue)} recovery due` : 'Commission removed after a return or adjustment'} value={formatMoney(managementCommission.totalReversals)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_reversals', 'Company commission reversals')} />
                 <StatsCard title="Sales agents" subtitle="Agents with commission activity" value={managementCommission.salespersonCount.toLocaleString()} icon={<Users className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_salespeople', 'Company commission by salesperson')} />

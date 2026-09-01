@@ -1891,7 +1891,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
       {
         payment_method: 'payroll',
         reference: 'SALARY-MAR-2020-P6',
-        settled_at: '2020-03-31',
+        settled_at: '2020-04-02',
         idempotency_key: 'SALARY-MAR-2020-P6'
       }
     )
@@ -1903,7 +1903,26 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
       [payrollSettlement.payment.id]
     )
     assert.equal(storedSettlement.payment_method, 'payroll')
-    assert.equal(storedSettlement.settled_at, '2020-03-31')
+    assert.equal(storedSettlement.settled_at, '2020-04-02')
+
+    const marchCommissionSummary = await request(
+      'GET', '/commissions/summary?date_from=2020-03-01&date_to=2020-03-31', admin.accessToken
+    )
+    assert.equal(Number(marchCommissionSummary.totalPayments), 80)
+    assert.equal(Number(marchCommissionSummary.settledInPeriod), 0)
+    const aprilCommissionSummary = await request(
+      'GET', '/commissions/summary?date_from=2020-04-01&date_to=2020-04-30', admin.accessToken
+    )
+    assert.equal(Number(aprilCommissionSummary.settledInPeriod), 80)
+    const aprilSettlements = await request(
+      'GET', '/commissions/settlements?date_from=2020-04-01&date_to=2020-04-30', admin.accessToken
+    )
+    assert.equal(Number(aprilSettlements.totalAmount), 80)
+    assert.ok(aprilSettlements.data.some((payment: any) => payment.id === payrollSettlement.payment.id && String(payment.commission_month).startsWith('2020-03')))
+    const aprilSettlementDrilldown = await request(
+      'GET', '/dashboard/drilldown?card=company_commission_paid&date_from=2020-04-01&date_to=2020-04-30', admin.accessToken
+    )
+    assert.ok(aprilSettlementDrilldown.rows.some((payment: any) => payment.payment_id === payrollSettlement.payment.id))
 
     await request('POST', `/commissions/transactions/${payrollTransaction.id}/revoke-approval`, admin.accessToken, {
       reason: 'Settlement must be voided first'

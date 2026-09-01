@@ -7,6 +7,7 @@ const commissionDataQueryKeys = [
   ['commission-own-transactions'],
   ['commission-own-history'],
   ['commission-management-transactions'],
+  ['commission-settlements'],
   ['management-commission'],
   ['commission-by-salesperson'],
   ['dashboard-drilldown']

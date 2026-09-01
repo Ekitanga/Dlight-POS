@@ -1078,6 +1078,9 @@ export async function getSalespersonCommissionSummary(
        COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp
                  WHERE cp.salesperson_id = $1 AND cp.status <> 'voided'
                    AND cp.period_start >= $2 AND cp.period_start < $3), 0) AS payments,
+       COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp
+                 WHERE cp.salesperson_id = $1 AND cp.status <> 'voided'
+                   AND cp.paid_at::date >= $2::date AND cp.paid_at::date < $3::date), 0) AS settled_in_period,
        COALESCE(SUM(CASE
          WHEN transaction_status IN ('approved','paid','reversed') AND transaction_type IN ('earned','manual_add') THEN amount
          WHEN transaction_status IN ('approved','paid','reversed') AND transaction_type = 'carry_forward' AND carry_forward_direction = 'credit' THEN amount
@@ -1116,6 +1119,7 @@ export async function getSalespersonCommissionSummary(
     carryForwardDeductions,
     netCommission,
     paidAmount: payments,
+    settledInPeriod: toNumber(row.settled_in_period),
     outstandingAmount,
     payableAmount: approvedPayable,
     approvedPayable,
@@ -1500,7 +1504,11 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
                   WHERE cp.status <> 'voided' AND ((cp.commission_transaction_id IS NOT NULL
                            AND paid_ct.qualification_date >= $1 AND paid_ct.qualification_date <= $2)
                      OR (cp.commission_transaction_id IS NULL
-                          AND cp.period_start >= $1::date AND cp.period_start <= $2::date)), 0) AS total_payments,
+                          AND cp.period_start >= $1::date AND cp.period_start <= $2::date))), 0) AS total_payments,
+       COALESCE((SELECT SUM(cp.paid_amount)
+                 FROM commission_payments cp
+                 WHERE cp.status <> 'voided'
+                   AND cp.paid_at::date >= $1::date AND cp.paid_at::date <= $2::date), 0) AS settled_in_period,
        COALESCE(SUM(CASE
          WHEN ct.transaction_status IN ('approved','paid','reversed')
           AND ct.transaction_type IN ('earned','manual_add') THEN ct.amount
@@ -1512,7 +1520,14 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
          WHEN ct.transaction_status IN ('approved','paid') AND ct.transaction_type = 'manual_deduct' THEN ct.amount
          WHEN ct.transaction_status IN ('approved','paid') AND ct.transaction_type = 'carry_forward' AND ct.carry_forward_direction = 'deduction' THEN ct.amount
          ELSE 0 END), 0) AS approved_deductions,
-       COUNT(DISTINCT ct.salesperson_id) AS salesperson_count,
+       (SELECT COUNT(DISTINCT activity.salesperson_id) FROM (
+          SELECT earning.salesperson_id FROM commission_transactions earning
+          WHERE earning.qualification_date >= $1::date AND earning.qualification_date <= $2::date
+          UNION
+          SELECT payment.salesperson_id FROM commission_payments payment
+          WHERE payment.status <> 'voided'
+            AND payment.paid_at::date >= $1::date AND payment.paid_at::date <= $2::date
+        ) activity) AS salesperson_count,
        COUNT(DISTINCT ct.order_id) AS order_count,
        COALESCE(SUM(CASE WHEN ct.transaction_type = 'earned' THEN ct.eligible_quantity ELSE 0 END), 0)::int AS item_count
      FROM commission_transactions ct
@@ -1531,6 +1546,7 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
     totalCarryForwardCredits: toNumber(row.total_carry_forward_credits),
     totalCarryForwardDeductions: toNumber(row.total_carry_forward_deductions),
     totalPayments: toNumber(row.total_payments),
+    settledInPeriod: toNumber(row.settled_in_period),
     approvedUnpaid: Math.max(0, approvedBalance),
     approvedPayable: Math.max(0, approvedBalance),
     pendingAmount: outstandingAmount - approvedBalance,
@@ -1544,7 +1560,7 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
 }
 
 export async function getManagementCommissionBySalesperson(dateFrom: string, dateTo: string) {
-  const result = await query(
+  const [result, settlementsResult] = await Promise.all([query(
     `SELECT u.id AS salesperson_id, u.full_name, u.email,
        COALESCE(SUM(CASE WHEN ct.transaction_type = 'earned' THEN ct.amount ELSE 0 END), 0) AS gross_earned,
        COALESCE(SUM(CASE WHEN ct.transaction_type = 'reversal' THEN ct.amount ELSE 0 END), 0) AS reversals,
@@ -1579,8 +1595,18 @@ export async function getManagementCommissionBySalesperson(dateFrom: string, dat
      GROUP BY u.id, u.full_name, u.email
      ORDER BY net_commission DESC`,
     [dateFrom, dateTo]
-  )
-  return result.rows.map(row => {
+  ), query(
+    `SELECT cp.salesperson_id, u.full_name, u.email,
+            COALESCE(SUM(cp.paid_amount), 0) AS settled_in_period
+     FROM commission_payments cp
+     JOIN users u ON u.id = cp.salesperson_id
+     WHERE cp.status <> 'voided'
+       AND cp.paid_at::date >= $1::date AND cp.paid_at::date <= $2::date
+     GROUP BY cp.salesperson_id, u.full_name, u.email`,
+    [dateFrom, dateTo]
+  )])
+  const settlements = new Map(settlementsResult.rows.map(row => [row.salesperson_id, row]))
+  const earningRows = result.rows.map(row => {
     const netCommission = toNumber(row.net_commission)
     const paid = toNumber(row.paid)
     const outstandingAmount = netCommission - paid
@@ -1595,6 +1621,7 @@ export async function getManagementCommissionBySalesperson(dateFrom: string, dat
       reversals: toNumber(row.reversals),
       netCommission,
       paid,
+      settledInPeriod: toNumber(settlements.get(row.salesperson_id)?.settled_in_period),
       outstandingAmount,
       payableAmount: Math.max(0, approvedBalance),
       approvedPayable: Math.max(0, approvedBalance),
@@ -1602,6 +1629,76 @@ export async function getManagementCommissionBySalesperson(dateFrom: string, dat
       recoveryDue: Math.max(0, -approvedBalance)
     }
   })
+  const existingIds = new Set(earningRows.map(row => row.salespersonId))
+  for (const row of settlementsResult.rows) {
+    if (existingIds.has(row.salesperson_id)) continue
+    earningRows.push({
+      salespersonId: row.salesperson_id,
+      fullName: row.full_name,
+      email: row.email,
+      orderCount: 0,
+      eligibleQuantity: 0,
+      grossEarned: 0,
+      reversals: 0,
+      netCommission: 0,
+      paid: 0,
+      settledInPeriod: toNumber(row.settled_in_period),
+      outstandingAmount: 0,
+      payableAmount: 0,
+      approvedPayable: 0,
+      pendingAmount: 0,
+      recoveryDue: 0
+    })
+  }
+  return earningRows.sort((a, b) => b.settledInPeriod - a.settledInPeriod || b.netCommission - a.netCommission || a.fullName.localeCompare(b.fullName))
+}
+
+export async function getManagementCommissionSettlements(
+  dateFrom: string,
+  dateTo: string,
+  page: number,
+  pageSize: number,
+  salespersonId?: string
+) {
+  const params: any[] = [dateFrom, dateTo]
+  const conditions = ["cp.status <> 'voided'", 'cp.paid_at::date >= $1::date', 'cp.paid_at::date <= $2::date']
+  if (salespersonId) {
+    params.push(salespersonId)
+    conditions.push(`cp.salesperson_id = $${params.length}`)
+  }
+  const where = conditions.join(' AND ')
+  const count = await query(
+    `SELECT COUNT(*)::int AS total, COALESCE(SUM(cp.paid_amount), 0) AS total_amount
+     FROM commission_payments cp WHERE ${where}`,
+    params
+  )
+  params.push(pageSize, (page - 1) * pageSize)
+  const result = await query(
+    `SELECT cp.id, cp.commission_transaction_id, cp.salesperson_id,
+            sp.full_name AS salesperson_name,
+            COALESCE(o.order_number, 'Commission adjustment') AS order_number,
+            COALESCE(p.name, 'Commission adjustment') AS product_name,
+            ct.qualification_date AS earned_date, ct.commission_month,
+            cp.paid_amount, cp.payment_method::text AS payment_method,
+            cp.reference, cp.paid_at, cp.notes, cp.status,
+            payer.full_name AS recorded_by_name
+     FROM commission_payments cp
+     JOIN users sp ON sp.id = cp.salesperson_id
+     LEFT JOIN commission_transactions ct ON ct.id = cp.commission_transaction_id
+     LEFT JOIN orders o ON o.id = ct.order_id
+     LEFT JOIN products p ON p.id = ct.product_id
+     LEFT JOIN users payer ON payer.id = cp.paid_by
+     WHERE ${where}
+     ORDER BY cp.paid_at DESC, cp.created_at DESC
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params
+  )
+  const total = Number(count.rows[0]?.total || 0)
+  return {
+    data: result.rows,
+    totalAmount: toNumber(count.rows[0]?.total_amount),
+    pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) }
+  }
 }
 
 async function approveCommissionWithClient(client: DbExecutor, transactionId: string, userId: string | null) {

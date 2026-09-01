@@ -16,6 +16,7 @@ import {
   getPotentialCommission,
   getManagementCommissionSummary,
   getManagementCommissionBySalesperson,
+  getManagementCommissionSettlements,
   approveCommission,
   approveCommissionBulk,
   revokeCommissionApproval,
@@ -334,6 +335,27 @@ router.get('/by-salesperson', requirePermission('commission', 'view'), async (re
     res.json({ salespeople: data, dateFrom, dateTo })
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
+router.get('/settlements', requirePermission('commission', 'view'), async (req, res) => {
+  try {
+    const today = nairobiToday()
+    const dateFrom = String(req.query.date_from || `${today.slice(0, 8)}01`)
+    const dateTo = String(req.query.date_to || today)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo) || dateFrom > dateTo) {
+      return res.status(400).json({ error: { message: 'A valid settlement date range is required' } })
+    }
+    const page = Math.max(1, Number(req.query.page) || 1)
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.page_size) || 25))
+    const result = await getManagementCommissionSettlements(
+      dateFrom, dateTo, page, pageSize,
+      req.query.salesperson_id ? String(req.query.salesperson_id) : undefined
+    )
+    res.json({ ...result, dateFrom, dateTo })
+  } catch (error) {
+    const statusCode = (error as any).statusCode || 500
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Unable to load commission settlements' : (error as Error).message } })
   }
 })
 
