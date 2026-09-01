@@ -374,6 +374,10 @@ router.get('/transactions', requireAnyPermission([['commission', 'view'], ['comm
     const today = nairobiToday()
     const dateFrom = String(req.query.date_from || `${today.slice(0, 8)}01`)
     const dateTo = String(req.query.date_to || today)
+    const commissionMonth = req.query.commission_month ? String(req.query.commission_month) : undefined
+    if (commissionMonth && !/^\d{4}-\d{2}-01$/.test(commissionMonth)) {
+      return res.status(400).json({ error: { message: 'Commission month must use YYYY-MM-01' } })
+    }
     const page = Math.max(1, Number(req.query.page) || 1)
     const pageSize = Math.min(100, Math.max(1, Number(req.query.page_size) || 50))
     const result = await getManagementCommissionTransactions(
@@ -382,9 +386,10 @@ router.get('/transactions', requireAnyPermission([['commission', 'view'], ['comm
       page,
       pageSize,
       req.query.status ? String(req.query.status) : undefined,
-      req.query.salesperson_id ? String(req.query.salesperson_id) : undefined
+      req.query.salesperson_id ? String(req.query.salesperson_id) : undefined,
+      commissionMonth
     )
-    res.json({ ...result, dateFrom, dateTo })
+    res.json({ ...result, dateFrom, dateTo, commissionMonth: commissionMonth || null })
   } catch (error) {
     const statusCode = (error as any).statusCode || 500
     res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (error as Error).message } })

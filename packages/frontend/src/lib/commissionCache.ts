@@ -10,6 +10,8 @@ const commissionDataQueryKeys = [
   ['commission-settlements'],
   ['management-commission'],
   ['commission-by-salesperson'],
+  ['commission-period-readiness'],
+  ['commission-period-closures'],
   ['dashboard-drilldown']
 ]
 

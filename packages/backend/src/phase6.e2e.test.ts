@@ -1884,6 +1884,17 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
        RETURNING *`,
       [programme.id, attendantUser.id, adminUser.id]
     )
+    const monthCloseLedger = await request(
+      'GET',
+      '/commissions/transactions?date_from=2020-04-01&date_to=2020-04-30&commission_month=2020-03-01&status=approved&page=1&page_size=25',
+      admin.accessToken
+    )
+    assert.ok(monthCloseLedger.data.some((transaction: any) => transaction.id === payrollTransaction.id))
+    assert.equal(monthCloseLedger.commissionMonth, '2020-03-01')
+    assert.equal(monthCloseLedger.pagination.pageSize, 25)
+    await request(
+      'GET', '/commissions/transactions?commission_month=2020-03-15', admin.accessToken, undefined, 400
+    )
     const payrollSettlement = await request(
       'POST',
       `/commissions/transactions/${payrollTransaction.id}/pay`,

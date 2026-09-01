@@ -72,9 +72,12 @@ export function Commissions() {
   const [adjustmentForm, setAdjustmentForm] = useState({ salesperson_id: '', amount: '', adjustment_type: 'manual_add', reason: '', period: today.slice(0, 7), order_id: '' })
   const [transactionPage, setTransactionPage] = useState(1)
   const [managementTransactionPage, setManagementTransactionPage] = useState(1)
+  const [managementTransactionPageSize, setManagementTransactionPageSize] = useState(25)
   const [managementSettlementPage, setManagementSettlementPage] = useState(1)
+  const [managementSettlementPageSize, setManagementSettlementPageSize] = useState(25)
   const [managementTransactionStatus, setManagementTransactionStatus] = useState('')
   const [managementSalespersonId, setManagementSalespersonId] = useState('')
+  const [managementClosePeriod, setManagementClosePeriod] = useState('')
   const [paymentEntry, setPaymentEntry] = useState({ transactionId: '', amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })
   const [bulkPaymentEntry, setBulkPaymentEntry] = useState({ amount: '', payment_method: 'payroll', reference: '', notes: '', settled_at: today, idempotency_key: paymentConfirmationKey() })
   const [selectedApprovalIds, setSelectedApprovalIds] = useState<Set<string>>(new Set())
@@ -180,20 +183,21 @@ export function Commissions() {
   })
 
   const { data: managementTransactions } = useQuery({
-    queryKey: ['commission-management-transactions', managementFrom, managementTo, managementTransactionPage, managementTransactionStatus, managementSalespersonId],
+    queryKey: ['commission-management-transactions', managementFrom, managementTo, managementTransactionPage, managementTransactionPageSize, managementTransactionStatus, managementSalespersonId, managementClosePeriod],
     queryFn: async () => {
-      const params = new URLSearchParams({ date_from: managementFrom, date_to: managementTo, page: String(managementTransactionPage), page_size: '25' })
+      const params = new URLSearchParams({ date_from: managementFrom, date_to: managementTo, page: String(managementTransactionPage), page_size: String(managementTransactionPageSize) })
       if (managementTransactionStatus) params.set('status', managementTransactionStatus)
       if (managementSalespersonId) params.set('salesperson_id', managementSalespersonId)
+      if (managementClosePeriod) params.set('commission_month', `${managementClosePeriod}-01`)
       return (await axios.get(`/api/commissions/transactions?${params.toString()}`)).data
     },
     enabled: canManagementLedger
   })
 
   const { data: managementSettlements } = useQuery({
-    queryKey: ['commission-settlements', managementFrom, managementTo, managementSettlementPage, managementSalespersonId],
+    queryKey: ['commission-settlements', managementFrom, managementTo, managementSettlementPage, managementSettlementPageSize, managementSalespersonId],
     queryFn: async () => {
-      const params = new URLSearchParams({ date_from: managementFrom, date_to: managementTo, page: String(managementSettlementPage), page_size: '25' })
+      const params = new URLSearchParams({ date_from: managementFrom, date_to: managementTo, page: String(managementSettlementPage), page_size: String(managementSettlementPageSize) })
       if (managementSalespersonId) params.set('salesperson_id', managementSalespersonId)
       return (await axios.get(`/api/commissions/settlements?${params.toString()}`)).data
     },
@@ -212,6 +216,7 @@ export function Commissions() {
       (await axios.post('/api/commissions/bulk-approve', { transaction_ids: transactionIds })).data,
     onSuccess: () => {
       setSelectedApprovalIds(new Set())
+      setManagementTransactionPage(1)
       void invalidateCommissionData(queryClient)
     }
   })
@@ -412,6 +417,20 @@ export function Commissions() {
     (sum, tx) => sum + Math.max(0, Number(tx.amount || 0) - Number(tx.paid_amount || 0) - Number(tx.reversed_amount || 0)),
     0
   )
+  const openPeriodReview = (periodStart: string) => {
+    const month = String(periodStart).slice(0, 7)
+    const [year, monthNumber] = month.split('-').map(Number)
+    const monthEnd = new Date(Date.UTC(year, monthNumber, 0)).toISOString().slice(0, 10)
+    setManagementFrom(`${month}-01`)
+    setManagementTo(monthEnd)
+    setManagementClosePeriod(month)
+    setManagementTransactionStatus('pending')
+    setManagementSalespersonId('')
+    setManagementTransactionPage(1)
+    setSelectedApprovalIds(new Set())
+    setSelectedTransactionIds(new Set())
+    setTab('management')
+  }
 
   return (
     <div className="space-y-6">
@@ -738,9 +757,15 @@ export function Commissions() {
 
        {activeTab === 'management' && (hasPermission('commission.view') || canApprove || canPay || canAdjust) && (
          <div className="space-y-6">
+           {managementClosePeriod && (
+             <div className="flex flex-col gap-3 rounded-lg border border-amber-300 bg-amber-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+               <div><strong>Month-close review: {formatCommissionMonth(managementClosePeriod)}</strong><p className="text-sm text-muted-foreground">This ledger is locked to the selected commission month and starts with pending entries, including records across every page.</p></div>
+               <button type="button" className="rounded border border-amber-400 bg-background px-3 py-2 text-sm font-medium" onClick={() => setTab('settings')}>Return to close preview</button>
+             </div>
+           )}
            <div className="flex flex-col gap-3 rounded-lg border bg-card p-4 lg:flex-row lg:items-end lg:justify-between">
              <div><h3 className="font-semibold">Management review period</h3><p className="text-xs text-muted-foreground">Recorded and balance figures use the earning date. Settled figures use the actual payment date.</p></div>
-             <DateRangeFilter dateFrom={managementFrom} dateTo={managementTo} includeClear={false} compact onChange={range => { setManagementFrom(range.dateFrom); setManagementTo(range.dateTo); setManagementTransactionPage(1); setManagementSettlementPage(1) }} />
+             <DateRangeFilter dateFrom={managementFrom} dateTo={managementTo} includeClear={false} compact onChange={range => { setManagementFrom(range.dateFrom); setManagementTo(range.dateTo); setManagementClosePeriod(''); setManagementTransactionPage(1); setManagementSettlementPage(1) }} />
            </div>
 
            {managementSummary && (
@@ -784,7 +809,7 @@ export function Commissions() {
             ) : <div className="p-6 text-center text-muted-foreground">No commission payments were recorded in these dates</div>}
             <div className="flex items-center justify-between border-t px-4 py-3 text-sm">
               <strong>Total paid: {formatMoney(managementSettlements?.totalAmount || 0)}</strong>
-              {managementSettlements?.pagination?.totalPages > 1 && <div className="flex items-center gap-2"><span>Page {managementSettlements.pagination.page} of {managementSettlements.pagination.totalPages}</span><button disabled={managementSettlements.pagination.page <= 1} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => setManagementSettlementPage((page: number) => Math.max(1, page - 1))}>Previous</button><button disabled={managementSettlements.pagination.page >= managementSettlements.pagination.totalPages} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => setManagementSettlementPage((page: number) => page + 1)}>Next</button></div>}
+              {managementSettlements?.pagination && <PaginationControls pagination={managementSettlements.pagination} pageSize={managementSettlementPageSize} label="settlements" onPageChange={setManagementSettlementPage} onPageSizeChange={size => { setManagementSettlementPageSize(size); setManagementSettlementPage(1) }} />}
             </div>
           </div>
           {managementBySalesperson?.salespeople?.length === 0 ? (
@@ -824,11 +849,13 @@ export function Commissions() {
           )}
 
           <div id="commission-earning-ledger" className="scroll-mt-4 rounded-lg border bg-card overflow-hidden">
-            <div className="px-4 py-3 border-b"><h3 className="font-semibold">Commission approval and settlement ledger</h3><p className="text-xs text-muted-foreground">Approve verified earnings, then record the external salary, cash, M-PESA or bank settlement. A settlement cannot exceed the balance after deductions and reversals.</p></div>
+            <div className="px-4 py-3 border-b"><h3 className="font-semibold">Commission approval and settlement ledger</h3><p className="text-xs text-muted-foreground">{managementClosePeriod ? `Reviewing every ${formatCommissionMonth(managementClosePeriod)} ledger entry by commission month.` : 'Approve verified earnings, then record the external salary, cash, M-PESA or bank settlement.'} A settlement cannot exceed the balance after deductions and reversals.</p></div>
             <div className="flex flex-wrap gap-3 border-b bg-muted/20 p-3">
               <select className="rounded border bg-background px-2 py-1 text-sm" value={managementTransactionStatus} onChange={event => { setManagementTransactionStatus(event.target.value); setManagementTransactionPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}><option value="">All statuses</option><option value="pending">Pending</option><option value="approved">Approved</option><option value="paid">Settled</option><option value="reversed">Reversed</option></select>
               <select className="rounded border bg-background px-2 py-1 text-sm" value={managementSalespersonId} onChange={event => { setManagementSalespersonId(event.target.value); setManagementTransactionPage(1); setManagementSettlementPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}><option value="">All salespeople</option>{salespeople.map((person: any) => <option key={person.id} value={person.id}>{person.full_name || person.name}</option>)}</select>
             </div>
+            {managementTransactions?.pagination && <div className="border-b px-4 py-3"><PaginationControls pagination={managementTransactions.pagination} pageSize={managementTransactionPageSize} label="ledger entries" onPageChange={page => { setManagementTransactionPage(page); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }} onPageSizeChange={size => { setManagementTransactionPageSize(size); setManagementTransactionPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }} /></div>}
+            {canApprove && bulkPendingIds.length > 0 && <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-blue-50/60 p-4"><div><strong>{bulkPendingIds.length} pending entries match this review</strong><p className="text-xs text-muted-foreground">The selection includes every matching page, not only the rows currently visible.</p></div><div className="flex flex-wrap gap-2"><button type="button" className="rounded border border-blue-400 bg-background px-3 py-2 text-sm font-medium text-blue-800" onClick={() => { setSelectedApprovalIds(allFilteredPendingSelected ? new Set() : new Set(bulkPendingIds)); setSelectedTransactionIds(new Set()) }}>{allFilteredPendingSelected ? 'Clear all pending' : `Select all ${bulkPendingIds.length} pending`}</button>{allFilteredPendingSelected && <button type="button" disabled={bulkApproveMutation.isPending} className="rounded bg-blue-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50" onClick={() => { if (confirm(`Approve all ${bulkPendingIds.length} reviewed commission entries with a total ledger amount of ${formatMoney(managementTransactions.bulkSelection.pendingAmount || 0)}?`)) bulkApproveMutation.mutate(Array.from(selectedApprovalIds)) }}>{bulkApproveMutation.isPending ? 'Approving...' : `Approve all ${bulkPendingIds.length}`}</button>}</div></div>}
             {paymentEntry.transactionId && canPay && selectedTransactionIds.size === 0 && (
               <form className="grid gap-3 border-b bg-muted/30 p-4 md:grid-cols-6" onSubmit={async event => {
                 event.preventDefault()
@@ -865,7 +892,7 @@ export function Commissions() {
                     return (<tr key={tx.id} className={`border-t ${payable || approvable ? '' : 'opacity-70'}`}>
                       <td className="px-4 py-3 text-center">{(approvable || payable) && <input aria-label={`Select ${approvable ? 'for approval' : 'for settlement'}`} type="checkbox" checked={checked} onChange={event => { if (approvable) { const next = new Set(selectedApprovalIds); if (event.target.checked) next.add(tx.id); else next.delete(tx.id); setSelectedApprovalIds(next); setSelectedTransactionIds(new Set()) } else { const next = new Set(selectedTransactionIds); if (event.target.checked) next.add(tx.id); else next.delete(tx.id); setSelectedTransactionIds(next); setSelectedApprovalIds(new Set()) } }} />}</td>
                       <td className="px-4 py-3">{tx.salesperson_name}</td>
-                      <td className="px-4 py-3"><div>{tx.order_number}</div><div className="text-xs text-muted-foreground">{tx.product_name}</div></td>
+                      <td className="px-4 py-3"><div>{tx.order_id ? <a className="text-primary hover:underline" target="_blank" rel="noreferrer" href={`/orders?order_id=${encodeURIComponent(tx.order_id)}`}>{tx.order_number}</a> : tx.order_number}</div><div className="text-xs text-muted-foreground">{tx.product_name}</div></td>
                       <td className="px-4 py-3 capitalize">{String(tx.transaction_type).replace('_', ' ')}</td>
                       <td className="px-4 py-3 text-right font-medium">{formatMoney(tx.amount)}</td>
                       <td className="px-4 py-3 text-right">{formatMoney(tx.paid_amount)}{Number(tx.reversed_amount || 0) > 0 && <div className="text-xs text-red-600">Offset {formatMoney(tx.reversed_amount)}</div>}</td>
@@ -911,7 +938,7 @@ export function Commissions() {
                 {bulkPayMutation.isError && <p className="text-sm text-red-600 md:col-span-6">{(bulkPayMutation.error as any)?.response?.data?.error?.message || 'Unable to record selected settlements'}</p>}
               </form>
             )}
-            {managementTransactions?.pagination?.totalPages > 1 && <div className="flex items-center justify-between border-t px-4 py-3 text-sm"><span>Page {managementTransactions.pagination.page} of {managementTransactions.pagination.totalPages}</span><div className="flex gap-2"><button disabled={managementTransactions.pagination.page <= 1} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => { setManagementTransactionPage(page => Math.max(1, page - 1)); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}>Previous</button><button disabled={managementTransactions.pagination.page >= managementTransactions.pagination.totalPages} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => { setManagementTransactionPage(page => page + 1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }}>Next</button></div></div>}
+            {managementTransactions?.pagination && <div className="border-t px-4 py-3"><PaginationControls pagination={managementTransactions.pagination} pageSize={managementTransactionPageSize} label="ledger entries" onPageChange={page => { setManagementTransactionPage(page); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }} onPageSizeChange={size => { setManagementTransactionPageSize(size); setManagementTransactionPage(1); setSelectedApprovalIds(new Set()); setSelectedTransactionIds(new Set()) }} /></div>}
           </div>
 
           {canAdjust && (
@@ -1011,13 +1038,15 @@ export function Commissions() {
               <p className="mt-1 text-sm text-muted-foreground">Close only a fully completed Nairobi calendar month after every pending item has been approved or resolved.</p>
             </div>
             <div className="mt-4 rounded border border-amber-300 bg-amber-100/70 p-3 text-sm text-amber-950">
-              Closing freezes the source month. Unpaid credit and recovery balances move to the following month. An administrator can undo the close only before a later period is closed or the carried balance is settled.
+              <strong>You do not have to pay commission before closing.</strong> First review and approve valid entries. If salary has already been paid, record the settlement before closing. Otherwise close the month and the unpaid balance moves forward. An administrator can undo the close only before a later period is closed or the carried balance is settled.
             </div>
             {periodReadinessLoading ? <p className="mt-4 text-sm text-muted-foreground">Preparing close preview...</p> : periodReadiness && (
               <div className={`mt-4 rounded border p-4 ${periodReadiness.isReadyToClose ? 'border-emerald-200 bg-emerald-50/60' : 'border-red-200 bg-red-50/60'}`}>
                 <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">{formatCommissionMonth(periodReadiness.periodStart)} close preview</h3><span className={`rounded-full px-2 py-1 text-xs font-medium ${periodReadiness.isReadyToClose ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>{periodReadiness.isReadyToClose ? 'Ready to close' : 'Review required'}</span></div>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-5 text-sm"><div><span className="block text-xs text-muted-foreground">Approved credit</span>{formatMoney(periodReadiness.totalApprovedCredits || 0)}</div><div><span className="block text-xs text-muted-foreground">Deductions</span>{formatMoney(periodReadiness.totalApprovedDeductions || 0)}</div><div><span className="block text-xs text-muted-foreground">Settled</span>{formatMoney(periodReadiness.totalSettled || 0)}</div><div><span className="block text-xs text-muted-foreground">Moving forward</span>{formatMoney(periodReadiness.totalUnpaid || 0)}</div><div><span className="block text-xs text-muted-foreground">Recovery moving forward</span>{formatMoney(periodReadiness.totalRecovery || 0)}</div></div>
                 {periodReadiness.blockers?.length > 0 && <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-red-800">{periodReadiness.blockers.map((blocker: string) => <li key={blocker}>{blocker}</li>)}</ul>}
+                {periodReadiness.pendingCount > 0 && <div className="mt-4 rounded border border-red-200 bg-card p-3"><p className="text-sm"><strong>Next action:</strong> review the pending entries, correct any erroneous order first, then approve the verified entries. The bulk selector covers all pages.</p><button type="button" className="mt-3 rounded bg-red-700 px-4 py-2 text-sm font-medium text-white" onClick={() => openPeriodReview(periodReadiness.periodStart)}>Review all {periodReadiness.pendingCount} pending entries</button></div>}
+                {periodReadiness.priorUnclosedPeriod && <button type="button" className="mt-3 rounded border border-red-300 bg-card px-3 py-2 text-sm font-medium text-red-800" onClick={() => setPeriodCloseForm(current => ({ ...current, period: String(periodReadiness.priorUnclosedPeriod).slice(0, 7) }))}>Open required prior month</button>}
                 {periodReadiness.balances?.length > 0 && <MobileTableScroll label="commission close preview" className="mt-4 rounded border bg-card"><table className="w-full text-xs"><thead className="bg-muted"><tr><th className="px-3 py-2 text-left">Attendant</th><th className="px-3 py-2 text-right">Approved</th><th className="px-3 py-2 text-right">Settled</th><th className="px-3 py-2 text-right">Result</th></tr></thead><tbody>{periodReadiness.balances.map((balance: any) => <tr key={balance.salespersonId} className="border-t"><td className="px-3 py-2">{balance.salespersonName}</td><td className="px-3 py-2 text-right">{formatMoney((balance.approvedCredits || 0) - (balance.approvedDeductions || 0))}</td><td className="px-3 py-2 text-right">{formatMoney(balance.paidAmount || 0)}</td><td className="px-3 py-2 text-right font-medium">{balance.closingBalance < 0 ? `Recovery ${formatMoney(Math.abs(balance.closingBalance))}` : `${formatMoney(balance.closingBalance || 0)} forward`}</td></tr>)}</tbody></table></MobileTableScroll>}
               </div>
             )}
@@ -1035,8 +1064,9 @@ export function Commissions() {
                 Close reason
                 <input required className="mt-1 block w-full rounded border bg-background px-3 py-2 text-sm" placeholder="Why this period is ready to close" value={periodCloseForm.reason} onChange={event => setPeriodCloseForm({ ...periodCloseForm, reason: event.target.value })} />
               </label>
-              <div className="flex items-end"><button disabled={closePeriodMutation.isPending || !periodReadiness?.isReadyToClose} className="w-full rounded bg-amber-700 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{closePeriodMutation.isPending ? 'Closing period...' : 'Close period'}</button></div>
+              <div className="flex items-end"><button disabled={closePeriodMutation.isPending || !periodReadiness?.isReadyToClose} title={!periodReadiness?.isReadyToClose ? 'Resolve the close-preview blockers first' : 'Close this reviewed period'} className="w-full rounded bg-amber-700 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50">{closePeriodMutation.isPending ? 'Closing period...' : periodReadiness?.isReadyToClose ? 'Close period' : periodReadiness?.pendingCount ? `Review ${periodReadiness.pendingCount} pending first` : 'Resolve close blockers first'}</button></div>
             </form>
+            {!periodReadiness?.isReadyToClose && <p className="mt-2 text-right text-xs text-red-700">The close button will enable automatically when the preview has no blockers.</p>}
             {closePeriodMutation.isError && (
               <div className="mt-4 rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">
                 <p>{(closePeriodMutation.error as any)?.response?.data?.error?.message || 'Unable to close this period'}</p>
@@ -1520,6 +1550,26 @@ function StatCard({ title, description, value, icon, onClick }: { title: string;
   return onClick
     ? <button type="button" onClick={onClick} className="rounded-lg border bg-card p-4 text-left transition hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">{content}</button>
     : <div className="rounded-lg border bg-card p-4">{content}</div>
+}
+
+function PaginationControls({ pagination, pageSize, label, onPageChange, onPageSizeChange }: {
+  pagination: { page: number; pageSize: number; total: number; totalPages: number }
+  pageSize: number
+  label: string
+  onPageChange: (page: number) => void
+  onPageSizeChange: (size: number) => void
+}) {
+  const totalPages = Math.max(1, Number(pagination.totalPages || 0))
+  const first = pagination.total > 0 ? (pagination.page - 1) * pageSize + 1 : 0
+  const last = Math.min(pagination.total, pagination.page * pageSize)
+  return <div className="flex flex-wrap items-center justify-between gap-3 text-sm">
+    <span>Showing {first}-{last} of {pagination.total} {label} · Page {pagination.page} of {totalPages}</span>
+    <div className="flex flex-wrap items-center gap-2">
+      <label className="text-xs text-muted-foreground">Rows <select className="ml-1 rounded border bg-background px-2 py-1 text-sm" value={pageSize} onChange={event => onPageSizeChange(Number(event.target.value))}><option value={25}>25</option><option value={50}>50</option><option value={100}>100</option></select></label>
+      <button type="button" disabled={pagination.page <= 1} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => onPageChange(Math.max(1, pagination.page - 1))}>Previous</button>
+      <button type="button" disabled={pagination.page >= totalPages} className="rounded border px-3 py-1 disabled:opacity-50" onClick={() => onPageChange(pagination.page + 1)}>Next</button>
+    </div>
+  </div>
 }
 
 function Clock({ className }: { className?: string }) {

@@ -1356,10 +1356,13 @@ export async function getManagementCommissionTransactions(
   page: number,
   pageSize: number,
   status?: string,
-  salespersonId?: string
+  salespersonId?: string,
+  commissionMonth?: string
 ) {
-  const conditions = ['ct.qualification_date >= $1', 'ct.qualification_date <= $2']
-  const params: any[] = [dateFrom, dateTo]
+  const conditions = commissionMonth
+    ? ['ct.commission_month = $1::date']
+    : ['ct.qualification_date >= $1', 'ct.qualification_date <= $2']
+  const params: any[] = commissionMonth ? [commissionMonth] : [dateFrom, dateTo]
   if (status) {
     params.push(status)
     conditions.push(`ct.transaction_status = $${params.length}`)
@@ -1441,7 +1444,7 @@ export async function getManagementCommissionTransactions(
   )
   params.push(pageSize, (page - 1) * pageSize)
   const result = await query(
-    `SELECT ct.id, ct.salesperson_id, sp.full_name AS salesperson_name,
+    `SELECT ct.id, ct.salesperson_id, ct.order_id, sp.full_name AS salesperson_name,
             COALESCE(o.order_number, 'Manual adjustment') AS order_number,
             COALESCE(p.name, 'Commission adjustment') AS product_name,
             ct.eligible_quantity, ct.rate_per_item, ct.amount, ct.transaction_type, ct.carry_forward_direction,
