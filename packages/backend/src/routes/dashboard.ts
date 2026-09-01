@@ -635,6 +635,11 @@ router.get('/drilldown', async (req, res) => {
 
     const periodFrom = isOwnCommission ? firstDayOfMonth(today) : dateFrom
     const periodTo = isOwnCommission ? nextMonthStart(periodFrom) : dateTo
+    const commissionActivityDate = `(CASE
+      WHEN ct.transaction_type='earned'
+        AND date_trunc('month', ct.policy_date)::date=ct.commission_month THEN ct.policy_date
+      WHEN ct.source_period IS NOT NULL AND ct.commission_month=ct.source_period THEN ct.commission_month
+      ELSE ct.qualification_date END)`
     const params: any[] = []
     const conditions: string[] = []
     if (isOwnCommission) {
@@ -644,7 +649,7 @@ router.get('/drilldown', async (req, res) => {
       conditions.push(`ct.commission_month >= $${params.length - 1}::date AND ct.commission_month < $${params.length}::date`)
     } else {
       params.push(periodFrom, periodTo)
-      conditions.push(`ct.qualification_date >= $1::date AND ct.qualification_date <= $2::date`)
+      conditions.push(`${commissionActivityDate} >= $1::date AND ${commissionActivityDate} <= $2::date`)
     }
 
     if (commissionCard === 'paid') {
@@ -667,7 +672,7 @@ router.get('/drilldown', async (req, res) => {
                 COALESCE(ct.amount, cp.total_amount, cp.paid_amount) AS signed_amount,
                 COALESCE(ct.transaction_type, 'settlement') AS transaction_type,
                 'settled' AS transaction_status,
-                ct.policy_date, ct.qualification_date, ct.commission_month,
+                ct.policy_date, ct.qualification_date, ct.commission_month, ct.source_period,
                 cp.notes AS reason, sp.full_name AS salesperson_name,
                 cp.paid_amount, cp.paid_at AS last_paid_at,
                 CONCAT(COALESCE(cp.payment_method::text, 'payment'), ': ', COALESCE(NULLIF(cp.reference, ''), 'no reference')) AS payment_references,
@@ -755,7 +760,7 @@ router.get('/drilldown', async (req, res) => {
                 WHEN ct.transaction_type = 'carry_forward' AND ct.carry_forward_direction = 'deduction' THEN -ct.amount
                 ELSE 0 END AS signed_amount,
               ct.transaction_type, ct.carry_forward_direction, ct.transaction_status,
-              ct.policy_date, ct.qualification_date, ct.commission_month, ct.reason,
+              ct.policy_date, ct.qualification_date, ct.commission_month, ct.source_period, ct.reason,
               sp.full_name AS salesperson_name,
               COALESCE(payments.paid_amount, 0) AS paid_amount,
               payments.last_paid_at, payments.payment_references,

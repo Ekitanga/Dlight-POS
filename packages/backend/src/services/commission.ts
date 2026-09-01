@@ -929,18 +929,39 @@ export async function earnCommission(
   const qualificationTimestamp = new Date(qualificationDate).toISOString()
   const qualificationBusinessDate = nairobiDate(qualificationTimestamp)
   const qualificationBusinessTimestamp = normalizeNairobiTimestamp(qualificationTimestamp)
-  const monthDate = commissionPeriodForTimestamp(qualificationTimestamp)
+  const qualificationMonth = commissionPeriodForTimestamp(qualificationTimestamp)
+  const sourcePeriod = commissionPeriodForTimestamp(policyDate)
 
   return withExecutorTransaction(executor, async (client) => {
-    await lockCommissionPeriod(client, monthDate)
-    const closedPeriod = await client.query(
+    // A sale belongs to its source month while that month remains open. This
+    // lets an August order completed during the September month-end review be
+    // included in August. Once August is closed, the same late qualification
+    // is routed to the current open period without rewriting closed history.
+    await lockCommissionPeriod(client, sourcePeriod)
+    const sourceClosure = await client.query(
+      `SELECT id FROM commission_period_closures
+       WHERE period_start = $1::date AND status = 'closed'`,
+      [sourcePeriod]
+    )
+    let monthDate = sourceClosure.rows.length > 0 ? qualificationMonth : sourcePeriod
+    if (monthDate !== sourcePeriod) await lockCommissionPeriod(client, monthDate)
+    let targetClosure = await client.query(
       `SELECT id FROM commission_period_closures
        WHERE period_start = $1::date AND status = 'closed'`,
       [monthDate]
     )
-    if (closedPeriod.rows.length > 0) {
+    if (targetClosure.rows.length > 0) {
+      monthDate = commissionPeriodForTimestamp(new Date())
+      if (monthDate !== sourcePeriod && monthDate !== qualificationMonth) await lockCommissionPeriod(client, monthDate)
+      targetClosure = await client.query(
+        `SELECT id FROM commission_period_closures
+         WHERE period_start = $1::date AND status = 'closed'`,
+        [monthDate]
+      )
+    }
+    if (targetClosure.rows.length > 0) {
       throw Object.assign(
-        new Error(`Commission period ${monthDate} is closed; use a reviewed manual correction in an open period`),
+        new Error('No open commission period is available for this earning'),
         { statusCode: 409 }
       )
     }
@@ -958,10 +979,12 @@ export async function earnCommission(
 
     const result = await client.query(
       `INSERT INTO commission_transactions
-       (programme_id, salesperson_id, order_id, order_item_id, product_id, category_id, eligible_quantity, rate_per_item, amount, transaction_type, transaction_status, policy_date, qualification_date, qualified_at, commission_month, reference_type, reference_id, created_by, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'earned', 'pending', $10::date, $11::date, $12::timestamp, $13::date, $14, $15, $16, NOW())
+       (programme_id, salesperson_id, order_id, order_item_id, product_id, category_id, eligible_quantity, rate_per_item, amount, transaction_type, transaction_status, policy_date, qualification_date, qualified_at, commission_month, source_period, reason, reference_type, reference_id, created_by, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'earned', 'pending', $10::date, $11::date, $12::timestamp, $13::date, $14::date, $15, $16, $17, $18, NOW())
        RETURNING id, amount`,
-      [programme.id, salespersonId, orderId, orderItemId, productId, categoryId, quantity, rate, amount, dateOnly(policyDate), qualificationBusinessDate, qualificationBusinessTimestamp, monthDate, referenceType, referenceId, createdBy]
+      [programme.id, salespersonId, orderId, orderItemId, productId, categoryId, quantity, rate, amount, dateOnly(policyDate), qualificationBusinessDate, qualificationBusinessTimestamp, monthDate, sourcePeriod,
+       monthDate !== sourcePeriod ? `Late qualification from closed commission period ${sourcePeriod}` : null,
+       referenceType, referenceId, createdBy]
     )
 
     await logAudit({
@@ -970,7 +993,7 @@ export async function earnCommission(
       action: 'commission_earned',
       entityType: 'commission_transaction',
       entityId: result.rows[0].id,
-      newValues: { order_id: orderId, order_item_id: orderItemId, salesperson_id: salespersonId, policy_date: dateOnly(policyDate), qualification_date: qualificationBusinessDate, quantity, rate_per_item: rate, amount }
+      newValues: { order_id: orderId, order_item_id: orderItemId, salesperson_id: salespersonId, policy_date: dateOnly(policyDate), qualification_date: qualificationBusinessDate, commission_month: monthDate, source_period: sourcePeriod, quantity, rate_per_item: rate, amount }
     })
 
     return { transactionId: result.rows[0].id, amount }
@@ -991,7 +1014,7 @@ export async function reverseCommission(
   return withExecutorTransaction(executor, async (client) => {
     const originalResult = await client.query(
       `SELECT id, programme_id, salesperson_id, product_id, category_id, rate_per_item, amount,
-              eligible_quantity, commission_month, transaction_status
+              eligible_quantity, commission_month, source_period, transaction_status
        FROM commission_transactions
        WHERE id = $1 AND transaction_type = 'earned'
        FOR UPDATE`,
@@ -1020,9 +1043,17 @@ export async function reverseCommission(
     const currentDate = nairobiDate(now)
     const currentTimestamp = normalizeNairobiTimestamp(now)
     const currentMonth = currentDate.slice(0, 7) + '-01'
+    const sourcePeriod = dateOnly(original.commission_month)
+    await lockCommissionPeriod(client, sourcePeriod)
+    const sourceClosure = await client.query(
+      `SELECT id FROM commission_period_closures WHERE period_start=$1::date AND status='closed'`,
+      [sourcePeriod]
+    )
+    const targetMonth = sourceClosure.rows.length > 0 ? currentMonth : sourcePeriod
+    if (targetMonth !== sourcePeriod) await lockCommissionPeriod(client, targetMonth)
     await client.query(
       'SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))',
-      [original.salesperson_id, currentMonth]
+      [original.salesperson_id, targetMonth]
     )
     // A reversal must immediately reduce a previously approved/payable amount.
     // For a not-yet-approved earning it remains pending for normal review.
@@ -1030,10 +1061,12 @@ export async function reverseCommission(
 
     const result = await client.query(
       `INSERT INTO commission_transactions
-       (programme_id, salesperson_id, order_id, order_item_id, product_id, category_id, eligible_quantity, rate_per_item, amount, transaction_type, transaction_status, qualification_date, qualified_at, commission_month, original_transaction_id, reference_type, reference_id, reason, created_by, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reversal', $10, $11::date, $12::timestamp, $13::date, $14, $15, $16, $17, $18, NOW())
+       (programme_id, salesperson_id, order_id, order_item_id, product_id, category_id, eligible_quantity, rate_per_item, amount, transaction_type, transaction_status, qualification_date, qualified_at, commission_month, source_period, original_transaction_id, reference_type, reference_id, reason, created_by, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reversal', $10, $11::date, $12::timestamp, $13::date, $14::date, $15, $16, $17, $18, $19, NOW())
        RETURNING id, amount`,
-      [original.programme_id, original.salesperson_id, orderId, orderItemId, original.product_id, original.category_id, reversalQuantity, rate, reversalAmount, reversalStatus, currentDate, currentTimestamp, currentMonth, originalTransactionId, referenceType, referenceId, reason, createdBy]
+      [original.programme_id, original.salesperson_id, orderId, orderItemId, original.product_id, original.category_id, reversalQuantity, rate, reversalAmount, reversalStatus, currentDate, currentTimestamp, targetMonth, original.source_period || sourcePeriod, originalTransactionId, referenceType, referenceId,
+       targetMonth !== sourcePeriod ? `[Correction for closed commission period ${sourcePeriod}] ${reason}` : reason,
+       createdBy]
     )
 
     if (alreadyReversed + reversalQuantity >= Number(original.eligible_quantity)) {
@@ -1359,9 +1392,14 @@ export async function getManagementCommissionTransactions(
   salespersonId?: string,
   commissionMonth?: string
 ) {
+  const activityDate = (alias: string) => `(CASE
+    WHEN ${alias}.transaction_type='earned'
+      AND date_trunc('month', ${alias}.policy_date)::date=${alias}.commission_month THEN ${alias}.policy_date
+    WHEN ${alias}.source_period IS NOT NULL AND ${alias}.commission_month=${alias}.source_period THEN ${alias}.commission_month
+    ELSE ${alias}.qualification_date END)`
   const conditions = commissionMonth
     ? ['ct.commission_month = $1::date']
-    : ['ct.qualification_date >= $1', 'ct.qualification_date <= $2']
+    : [`${activityDate('ct')} >= $1::date`, `${activityDate('ct')} <= $2::date`]
   const params: any[] = commissionMonth ? [commissionMonth] : [dateFrom, dateTo]
   if (status) {
     params.push(status)
@@ -1448,7 +1486,7 @@ export async function getManagementCommissionTransactions(
             COALESCE(o.order_number, 'Manual adjustment') AS order_number,
             COALESCE(p.name, 'Commission adjustment') AS product_name,
             ct.eligible_quantity, ct.rate_per_item, ct.amount, ct.transaction_type, ct.carry_forward_direction,
-            ct.transaction_status, ct.qualification_date, ct.qualified_at, ct.commission_month,
+            ct.transaction_status, ct.policy_date, ct.qualification_date, ct.qualified_at, ct.commission_month, ct.source_period,
             ct.reason, approver.full_name AS approved_by_name, ct.approved_at,
              COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided'), 0) AS paid_amount,
              (SELECT MAX(cp.paid_at) FROM commission_payments cp WHERE cp.commission_transaction_id = ct.id AND cp.status <> 'voided') AS last_paid_at,
@@ -1493,6 +1531,11 @@ export async function getManagementCommissionTransactions(
 }
 
 export async function getManagementCommissionSummary(dateFrom: string, dateTo: string) {
+  const activityDate = (alias: string) => `(CASE
+    WHEN ${alias}.transaction_type='earned'
+      AND date_trunc('month', ${alias}.policy_date)::date=${alias}.commission_month THEN ${alias}.policy_date
+    WHEN ${alias}.source_period IS NOT NULL AND ${alias}.commission_month=${alias}.source_period THEN ${alias}.commission_month
+    ELSE ${alias}.qualification_date END)`
   const result = await query(
     `SELECT
        COALESCE(SUM(CASE WHEN ct.transaction_type = 'earned' THEN ct.amount ELSE 0 END), 0) AS total_earned,
@@ -1505,7 +1548,7 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
                  FROM commission_payments cp
                  LEFT JOIN commission_transactions paid_ct ON paid_ct.id = cp.commission_transaction_id
                   WHERE cp.status <> 'voided' AND ((cp.commission_transaction_id IS NOT NULL
-                           AND paid_ct.qualification_date >= $1 AND paid_ct.qualification_date <= $2)
+                           AND ${activityDate('paid_ct')} >= $1::date AND ${activityDate('paid_ct')} <= $2::date)
                      OR (cp.commission_transaction_id IS NULL
                           AND cp.period_start >= $1::date AND cp.period_start <= $2::date))), 0) AS total_payments,
        COALESCE((SELECT SUM(cp.paid_amount)
@@ -1525,7 +1568,7 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
          ELSE 0 END), 0) AS approved_deductions,
        (SELECT COUNT(DISTINCT activity.salesperson_id) FROM (
           SELECT earning.salesperson_id FROM commission_transactions earning
-          WHERE earning.qualification_date >= $1::date AND earning.qualification_date <= $2::date
+          WHERE ${activityDate('earning')} >= $1::date AND ${activityDate('earning')} <= $2::date
           UNION
           SELECT payment.salesperson_id FROM commission_payments payment
           WHERE payment.status <> 'voided'
@@ -1534,7 +1577,7 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
        COUNT(DISTINCT ct.order_id) AS order_count,
        COALESCE(SUM(CASE WHEN ct.transaction_type = 'earned' THEN ct.eligible_quantity ELSE 0 END), 0)::int AS item_count
      FROM commission_transactions ct
-     WHERE ct.qualification_date >= $1 AND ct.qualification_date <= $2`,
+     WHERE ${activityDate('ct')} >= $1::date AND ${activityDate('ct')} <= $2::date`,
     [dateFrom, dateTo]
   )
   const row = result.rows[0]
@@ -1563,6 +1606,11 @@ export async function getManagementCommissionSummary(dateFrom: string, dateTo: s
 }
 
 export async function getManagementCommissionBySalesperson(dateFrom: string, dateTo: string) {
+  const activityDate = (alias: string) => `(CASE
+    WHEN ${alias}.transaction_type='earned'
+      AND date_trunc('month', ${alias}.policy_date)::date=${alias}.commission_month THEN ${alias}.policy_date
+    WHEN ${alias}.source_period IS NOT NULL AND ${alias}.commission_month=${alias}.source_period THEN ${alias}.commission_month
+    ELSE ${alias}.qualification_date END)`
   const [result, settlementsResult] = await Promise.all([query(
     `SELECT u.id AS salesperson_id, u.full_name, u.email,
        COALESCE(SUM(CASE WHEN ct.transaction_type = 'earned' THEN ct.amount ELSE 0 END), 0) AS gross_earned,
@@ -1589,12 +1637,12 @@ export async function getManagementCommissionBySalesperson(dateFrom: string, dat
                  LEFT JOIN commission_transactions paid_ct ON paid_ct.id = cp.commission_transaction_id
                   WHERE cp.salesperson_id = u.id AND cp.status <> 'voided'
                    AND ((cp.commission_transaction_id IS NOT NULL
-                         AND paid_ct.qualification_date >= $1 AND paid_ct.qualification_date <= $2)
+                         AND ${activityDate('paid_ct')} >= $1::date AND ${activityDate('paid_ct')} <= $2::date)
                      OR (cp.commission_transaction_id IS NULL
                          AND cp.period_start >= $1::date AND cp.period_start <= $2::date))), 0) AS paid
      FROM commission_transactions ct
      JOIN users u ON u.id = ct.salesperson_id
-     WHERE ct.qualification_date >= $1 AND ct.qualification_date <= $2
+     WHERE ${activityDate('ct')} >= $1::date AND ${activityDate('ct')} <= $2::date
      GROUP BY u.id, u.full_name, u.email
      ORDER BY net_commission DESC`,
     [dateFrom, dateTo]
@@ -1819,7 +1867,8 @@ async function payCommissionWithClient(
   transactionId: string,
   userId: string | null,
   input: NormalizedCommissionPaymentInput,
-  skipWhenNoCapacity = false
+  skipWhenNoCapacity = false,
+  allowSelfPayment = false
 ) {
     const transactionResult = await client.query(
       `SELECT * FROM commission_transactions
@@ -1833,7 +1882,7 @@ async function payCommissionWithClient(
     )
     const commission = transactionResult.rows[0]
     if (!commission) return null
-    if (userId && commission.salesperson_id === userId) {
+    if (!allowSelfPayment && userId && commission.salesperson_id === userId) {
       throw Object.assign(new Error('You cannot record payment for your own commission'), { statusCode: 403 })
     }
     // All payment capacity is period-wide. This lock serializes payment
@@ -2420,10 +2469,11 @@ export async function getCommissionPeriodReadiness(period: string): Promise<Comm
 }
 
 /**
- * Close a completed calendar month. The source period receives an approved
- * offset and the exact same amount is moved to the next open period. This
- * makes the source immutable without losing either unpaid commission or a
- * recovery due after an overpayment.
+ * Close a completed calendar month and certify its approved net commission as
+ * paid through the business's external salary/payroll process. Positive
+ * balances are settled effective on the final day of the source month. Only a
+ * genuine recovery (deductions above earned commission) moves to the next
+ * open period.
  */
 export async function closeCommissionPeriod(
   period: string,
@@ -2534,6 +2584,34 @@ export async function closeCommissionPeriod(
         )
     const closure = closureResult.rows[0]
 
+    const closeReference = `PAYROLL-CLOSE-${periodStart.slice(0, 7)}-${String(closure.id).slice(0, 8)}`
+    const payableTransactions = await client.query(
+      `SELECT id
+       FROM commission_transactions
+       WHERE commission_month=$1::date
+         AND transaction_status IN ('approved','paid')
+         AND (transaction_type IN ('earned','manual_add')
+           OR (transaction_type='carry_forward' AND carry_forward_direction='credit'))
+       ORDER BY salesperson_id, created_at, id`,
+      [periodStart]
+    )
+    const closeSettlementIds: string[] = []
+    let closeSettlementTotal = 0
+    const closeAttempt = new Date(closure.created_at).getTime()
+    for (const payable of payableTransactions.rows) {
+      const normalized = normalizeCommissionPaymentInput({
+        paymentMethod: 'payroll',
+        reference: closeReference,
+        notes: `Automatically recorded when ${periodStart} was closed. ${closeReason}`,
+        settledAt: periodEnd
+      }, `commission-close:${closure.id}:${closeAttempt}:${payable.id}`)
+      const settlement = await payCommissionWithClient(client, payable.id, userId, normalized, true, true)
+      if (settlement?.payment && !settlement.idempotent) {
+        closeSettlementIds.push(settlement.payment.id)
+        closeSettlementTotal += toNumber(settlement.payment.paid_amount)
+      }
+    }
+
     const balancesResult = await client.query(
       `WITH ledger AS (
          SELECT ct.salesperson_id,
@@ -2591,13 +2669,11 @@ export async function closeCommissionPeriod(
       let sourceOffsetTransactionId: string | null = null
       let carryForwardTransactionId: string | null = null
 
-      if (carryAmount >= 0.01) {
-        // A positive source balance is an unpaid credit, so the source gets a
-        // deduction and the following month receives a credit. A negative
-        // source balance is an overpayment/recovery, so the following month
-        // receives exactly one approved deduction.
-        const sourceDirection = closingBalance > 0 ? 'deduction' : 'credit'
-        const targetDirection = closingBalance > 0 ? 'credit' : 'deduction'
+      if (closingBalance < -0.004 && carryAmount >= 0.01) {
+        // A negative balance cannot be paid. Preserve it as a recovery against
+        // the attendant in the following open month.
+        const sourceDirection = 'credit'
+        const targetDirection = 'deduction'
         const sourceOffset = await client.query(
           `INSERT INTO commission_transactions
             (programme_id, salesperson_id, amount, transaction_type, carry_forward_direction,
@@ -2615,7 +2691,7 @@ export async function closeCommissionPeriod(
             `${periodEnd} 23:59:59.999`,
             periodStart,
             closure.id,
-            `Period ${periodStart} closing offset; carried to ${nextPeriodStart}. ${closeReason}`,
+            `Period ${periodStart} recovery offset; recovery continues in ${nextPeriodStart}. ${closeReason}`,
             userId
           ]
         )
@@ -2638,7 +2714,7 @@ export async function closeCommissionPeriod(
             `${nextPeriodStart} 00:00:00.000`,
             nextPeriodStart,
             closure.id,
-            `Carry-forward from closed period ${periodStart}. ${closeReason}`,
+            `Recovery due from closed period ${periodStart}. ${closeReason}`,
             userId
           ]
         )
@@ -2684,6 +2760,9 @@ export async function closeCommissionPeriod(
         period_start: periodStart,
         period_end: periodEnd,
         reason: closeReason,
+        offline_payroll_reference: closeReference,
+        offline_payroll_settlement_total: amountToCents(closeSettlementTotal),
+        offline_payroll_settlement_ids: closeSettlementIds,
         salesperson_balances: balances.map(balance => ({
           salesperson_id: balance.salespersonId,
           closing_balance: balance.closingBalance,
@@ -2750,6 +2829,14 @@ export async function reopenCommissionPeriod(period: string, reason: string, use
     if (carryPayments.rows.length > 0) {
       throw Object.assign(new Error('Cannot undo this close because a carried balance has already been settled. Void that settlement first.'), { statusCode: 409 })
     }
+    const closePayments = await client.query(
+      `SELECT cp.id, cp.commission_transaction_id
+       FROM commission_payments cp
+       WHERE cp.status <> 'voided'
+         AND cp.idempotency_key LIKE $1
+       FOR UPDATE`,
+      [`commission-close:${closure.id}:%`]
+    )
 
     // A period-level deduction can make another credit appear payable. Ensure
     // removing a carried credit would not leave the following month overpaid.
@@ -2796,6 +2883,29 @@ export async function reopenCommissionPeriod(period: string, reason: string, use
        WHERE id=$1`,
       [closure.id, userId, reopenReason]
     )
+    for (const payment of closePayments.rows) {
+      await client.query(
+        `UPDATE commission_payments
+         SET status='voided', voided_by=$2, voided_at=NOW(), void_reason=$3
+         WHERE id=$1`,
+        [payment.id, userId, `Automatically voided when period close was undone. ${reopenReason}`]
+      )
+      const activePaid = await client.query(
+        `SELECT COALESCE(SUM(paid_amount),0) AS paid
+         FROM commission_payments
+         WHERE commission_transaction_id=$1 AND status <> 'voided'`,
+        [payment.commission_transaction_id]
+      )
+      const transactionRow = await client.query(
+        `SELECT amount FROM commission_transactions WHERE id=$1`,
+        [payment.commission_transaction_id]
+      )
+      await client.query(
+        `UPDATE commission_transactions SET transaction_status=$2 WHERE id=$1`,
+        [payment.commission_transaction_id,
+         toNumber(activePaid.rows[0]?.paid) + 0.000001 >= toNumber(transactionRow.rows[0]?.amount) ? 'paid' : 'approved']
+      )
+    }
     await client.query(
       `DELETE FROM commission_transactions
        WHERE transaction_type='carry_forward' AND reference_type='commission_period_closure' AND reference_id=$1`,
@@ -2808,9 +2918,86 @@ export async function reopenCommissionPeriod(period: string, reason: string, use
         status: 'closed', period_start: periodStart, closed_at: closure.closed_at,
         balances: balancesResult.rows.map((row: any) => ({ salesperson_id: row.salesperson_id, closing_balance: row.closing_balance }))
       },
-      newValues: { status: 'reopened', reason: reopenReason }
+      newValues: { status: 'reopened', reason: reopenReason, voided_close_settlement_ids: closePayments.rows.map((row: any) => row.id) }
     })
     return { id: closure.id, periodStart, status: 'reopened', reopenReason }
+  })
+}
+
+/**
+ * One-time/admin repair for earnings that qualified after month-end but before
+ * their source month was closed under the former qualification-month policy.
+ * The source closure must first be safely reopened. Existing payment records
+ * stay linked, but their accounting period and effective date move to the
+ * source month-end. Every affected id and former date is retained in audit.
+ */
+export async function reclassifyPreCloseOrderCommissions(
+  period: string,
+  reason: string,
+  userId: string | null
+) {
+  const { periodStart, periodEnd, nextPeriodStart } = normalizeCommissionPeriod(period)
+  const repairReason = String(reason || '').trim()
+  if (!repairReason) throw Object.assign(new Error('A reason is required to repair commission periods'), { statusCode: 400 })
+
+  return transaction(async client => {
+    await lockCommissionPeriod(client, periodStart)
+    await lockCommissionPeriod(client, nextPeriodStart)
+    await client.query('LOCK TABLE commission_transactions, commission_payments IN SHARE ROW EXCLUSIVE MODE')
+    const closureResult = await client.query(
+      `SELECT id, status, closed_at
+       FROM commission_period_closures
+       WHERE period_start=$1::date
+       FOR UPDATE`,
+      [periodStart]
+    )
+    const closure = closureResult.rows[0]
+    if (!closure || closure.status !== 'reopened' || !closure.closed_at) {
+      throw Object.assign(new Error(`Commission period ${periodStart} must be safely reopened before reclassification`), { statusCode: 409 })
+    }
+    const affected = await client.query(
+      `SELECT ct.id, ct.commission_month, ct.source_period, ct.amount
+       FROM commission_transactions ct
+       WHERE ct.transaction_type='earned'
+         AND date_trunc('month', ct.policy_date)::date=$1::date
+         AND ct.commission_month <> $1::date
+         AND ct.created_at <= $2::timestamp
+       ORDER BY ct.created_at, ct.id
+       FOR UPDATE OF ct`,
+      [periodStart, closure.closed_at]
+    )
+    const ids = affected.rows.map((row: any) => row.id)
+    const affectedPayments = ids.length > 0
+      ? await client.query(
+          `SELECT id, commission_transaction_id, period_start, paid_at
+           FROM commission_payments
+           WHERE commission_transaction_id=ANY($1::uuid[]) AND status <> 'voided'
+           FOR UPDATE`,
+          [ids]
+        )
+      : { rows: [] }
+    if (ids.length > 0) {
+      await client.query(
+        `UPDATE commission_transactions
+         SET commission_month=$2::date, source_period=$2::date,
+             reason=CASE WHEN reason IS NULL OR reason='' THEN $3 ELSE reason || E'\n' || $3 END
+         WHERE id=ANY($1::uuid[])`,
+        [ids, periodStart, `[Period corrected to source month] ${repairReason}`]
+      )
+      await client.query(
+        `UPDATE commission_payments
+         SET period_start=$2::date, period_end=$3::date, paid_at=$3::date + TIME '12:00:00',
+             notes=CASE WHEN notes IS NULL OR notes='' THEN $4 ELSE notes || E'\n' || $4 END
+         WHERE commission_transaction_id=ANY($1::uuid[]) AND status <> 'voided'`,
+        [ids, periodStart, periodEnd, `Effective period corrected to ${periodStart}. ${repairReason}`]
+      )
+    }
+    await logAudit({
+      client, userId, action: 'commission_period_reclassified', entityType: 'commission_period_closure', entityId: closure.id,
+      oldValues: { transactions: affected.rows, payments: affectedPayments.rows },
+      newValues: { period_start: periodStart, effective_settlement_date: periodEnd, transaction_ids: ids, reason: repairReason }
+    })
+    return { periodStart, transactionCount: ids.length, totalAmount: amountToCents(affected.rows.reduce((sum: number, row: any) => sum + toNumber(row.amount), 0)), transactionIds: ids }
   })
 }
 
@@ -3078,7 +3265,8 @@ export async function evaluateOrdersForDateRange(
     const candidateOrderIds = [...new Set(orderResult.rows.map((row: any) => row.id))]
     const existingResult = await client.query(
       `SELECT id, order_id, order_item_id, salesperson_id, programme_id,
-              eligible_quantity, rate_per_item, amount, policy_date, qualification_date, commission_month
+              eligible_quantity, rate_per_item, amount, policy_date, qualification_date, commission_month,
+              source_period, created_at
        FROM commission_transactions ct
        WHERE ct.transaction_type = 'earned'
          AND (
@@ -3283,7 +3471,19 @@ export async function evaluateOrdersForDateRange(
       if (expectedDate && dateOnly(earned.qualification_date) !== expectedDate) {
         issues.push({ type: 'qualification_date_mismatch', severity: 'error', transactionId: earned.id, orderId: earned.order_id, orderItemId: earned.order_item_id, message: `Recorded qualification date ${dateOnly(earned.qualification_date)} differs from authoritative date ${expectedDate}. Manual reviewed correction is required.` })
       }
-      const expectedMonth = expectedDate ? `${expectedDate.slice(0, 7)}-01` : ''
+      const expectedSourceMonth = expected.saleDate ? `${expected.saleDate.slice(0, 7)}-01` : ''
+      const expectedQualificationMonth = expectedDate ? `${expectedDate.slice(0, 7)}-01` : ''
+      let expectedMonth = expectedSourceMonth
+      if (expectedSourceMonth) {
+        const sourceClosure = await client.query(
+          `SELECT closed_at FROM commission_period_closures
+           WHERE period_start=$1::date AND status='closed'`,
+          [expectedSourceMonth]
+        )
+        if (sourceClosure.rows[0]?.closed_at && new Date(earned.created_at) > new Date(sourceClosure.rows[0].closed_at)) {
+          expectedMonth = expectedQualificationMonth
+        }
+      }
       if (expectedMonth && dateOnly(earned.commission_month) !== expectedMonth) {
         issues.push({ type: 'period_mismatch', severity: 'error', transactionId: earned.id, orderId: earned.order_id, orderItemId: earned.order_item_id, message: `Recorded commission month ${dateOnly(earned.commission_month)} differs from the authoritative month ${expectedMonth}. Manual reviewed correction is required.` })
       }

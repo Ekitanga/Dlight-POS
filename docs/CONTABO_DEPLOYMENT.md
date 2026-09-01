@@ -304,3 +304,12 @@ Stop:
 ```bash
 docker compose -f deploy/contabo/docker-compose.yml down
 ```
+### Commission source-month and offline-close release (2026-09-01)
+
+After pulling the reviewed release, deploy it with:
+
+```bash
+bash deploy/contabo/apply-commission-offline-close-release-20260901.sh
+```
+
+The script stops the application, creates and verifies a database backup, rebuilds the application image, restarts it, and requires a successful internal health check. Closing a commission month now certifies the approved net amount as paid through offline payroll on the final day of that month. Undo close voids only the settlements created by that close.

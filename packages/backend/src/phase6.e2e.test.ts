@@ -59,6 +59,7 @@ const users = await db.query(
   [passwordHash]
 )
 const adminUser = users.rows.find(row => row.role === 'admin')
+const ownerUser = users.rows.find(row => row.role === 'owner')
 const attendantUser = users.rows.find(row => row.role === 'attendant')
 
 await db.query(
@@ -122,7 +123,7 @@ process.env.JWT_SECRET = 'phase6-access-secret-that-is-long-and-safe'
 process.env.JWT_REFRESH_SECRET = 'phase6-refresh-secret-that-is-long-and-safe'
 const { default: app } = await import('./index.js')
 const { pool: appPool } = await import('./db/pool.js')
-const { evaluateOrderItemFromRecords } = await import('./services/commission.js')
+const { evaluateOrderItemFromRecords, reclassifyPreCloseOrderCommissions } = await import('./services/commission.js')
 const { isSpeedafDeliveredCollectedEvent, syncSpeedafTracking } = await import('./services/speedafTracking.js')
 const server = app.listen(0)
 await new Promise<void>(resolve => server.once('listening', resolve))
@@ -1515,7 +1516,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await db.query('UPDATE settings SET commission_module_enabled = TRUE')
   })
 
-  await t.test('15b. an August sale completed in September uses the August rate and September earning month', async () => {
+  await t.test('15b. an August sale completed before August close uses the August rate and earning month', async () => {
     const historicalSaleDate = '2026-08-01'
     const completionDate = '2026-09-05'
     const sourceProgramme = await row(
@@ -1595,11 +1596,11 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(Number(earning.amount), 70)
     assert.equal(earning.policy_date, historicalSaleDate)
     assert.equal(earning.qualification_date, completionDate)
-    assert.equal(earning.commission_month, `${completionDate.slice(0, 7)}-01`)
+    assert.equal(earning.commission_month, `${historicalSaleDate.slice(0, 7)}-01`)
 
     // Speedaf physical delivery is not final completion. A parcel delivered in
-    // August and fully remitted in September belongs to September's completed
-    // sales and commission accounting, while retaining its August sale rate.
+    // August and fully remitted in September remains in August commission while
+    // August is open, while retaining its real September qualification date.
     const speedafSaleDate = '2026-08-02'
     const speedafDeliveryDate = '2026-08-31'
     const speedafCompletionDate = '2026-09-02'
@@ -1663,7 +1664,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     )
     assert.equal(speedafEarning.policy_date, speedafSaleDate)
     assert.equal(speedafEarning.qualification_date, speedafCompletionDate)
-    assert.equal(speedafEarning.commission_month, '2026-09-01')
+    assert.equal(speedafEarning.commission_month, '2026-08-01')
 
     const augustSpeedafCompleted = await request(
       'GET',
@@ -1682,12 +1683,12 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(String(completedSpeedafRow.completion_date).slice(0, 10), speedafCompletionDate)
     assert.equal(completedSpeedafRow.commission_status, 'earned')
 
-    const septemberCommissionDrilldown = await request(
+    const augustCommissionDrilldown = await request(
       'GET',
-      `/dashboard/drilldown?card=company_commission_recorded&date_from=${speedafCompletionDate}&date_to=${speedafCompletionDate}`,
+      `/dashboard/drilldown?card=company_commission_recorded&date_from=${speedafSaleDate}&date_to=${speedafSaleDate}`,
       admin.accessToken
     )
-    const speedafCommissionRow = septemberCommissionDrilldown.rows.find((item: any) => item.order_id === historicalSpeedafOrder.id)
+    const speedafCommissionRow = augustCommissionDrilldown.rows.find((item: any) => item.order_id === historicalSpeedafOrder.id)
     assert.ok(speedafCommissionRow)
     assert.equal(String(speedafCommissionRow.delivery_date).slice(0, 10), speedafDeliveryDate)
     assert.equal(String(speedafCommissionRow.completion_date).slice(0, 10), speedafCompletionDate)
@@ -1831,6 +1832,16 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
   await t.test('16b. commission month-end controls support external payroll settlement and guarded admin undo', async () => {
     const programme = await row('SELECT id FROM commission_programmes ORDER BY effective_from DESC LIMIT 1')
 
+    const ownerFebruaryCredit = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+         qualification_date, qualified_at, commission_month, reason, approved_by, approved_at, created_by)
+       VALUES ($1, $2, 60, 'manual_add', 'approved', '2020-02-29', '2020-02-29 12:00:00', '2020-02-01',
+               'Offline close settlement test', $3, NOW(), $3)
+       RETURNING *`,
+      [programme.id, ownerUser.id, adminUser.id]
+    )
+
     const februaryReadiness = await request(
       'GET',
       '/commissions/periods/readiness?period=2020-02',
@@ -1838,16 +1849,26 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     )
     assert.equal(februaryReadiness.periodStart, '2020-02-01')
     assert.equal(februaryReadiness.isReadyToClose, true)
-    assert.equal(Number(februaryReadiness.totalApprovedCredits), 100)
+    assert.equal(Number(februaryReadiness.totalApprovedCredits), 160)
     assert.equal(Number(februaryReadiness.totalApprovedDeductions), 45)
     assert.equal(Number(februaryReadiness.totalSettled), 55)
-    assert.equal(Number(februaryReadiness.totalUnpaid), 0)
+    assert.equal(Number(februaryReadiness.totalUnpaid), 60)
     assert.equal(Number(februaryReadiness.totalRecovery), 0)
 
     const februaryClosure = await request('POST', '/commissions/periods/close', admin.accessToken, {
       period: '2020-02', reason: 'Phase 6 zero-balance February close'
     }, 201)
     assert.equal(februaryClosure.status, 'closed')
+    assert.equal(Number(februaryClosure.totalUnpaid), 0)
+    const automaticClosePayment = await row(
+      `SELECT id, paid_amount, paid_at::date::text AS paid_at, status
+       FROM commission_payments
+       WHERE commission_transaction_id=$1 AND status <> 'voided'`,
+      [ownerFebruaryCredit.id]
+    )
+    assert.equal(Number(automaticClosePayment.paid_amount), 60)
+    assert.equal(automaticClosePayment.paid_at, '2020-02-29')
+    assert.equal((await row('SELECT transaction_status FROM commission_transactions WHERE id=$1', [ownerFebruaryCredit.id])).transaction_status, 'paid')
     await request('POST', '/commissions/periods/reopen', attendant.accessToken, {
       period: '2020-02', reason: 'An attendant must not undo month close'
     }, 403)
@@ -1856,6 +1877,8 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     })
     assert.equal(reopened.id, februaryClosure.id)
     assert.equal(reopened.status, 'reopened')
+    assert.equal((await row('SELECT status FROM commission_payments WHERE id=$1', [automaticClosePayment.id])).status, 'voided')
+    assert.equal((await row('SELECT transaction_status FROM commission_transactions WHERE id=$1', [ownerFebruaryCredit.id])).transaction_status, 'approved')
     assert.equal((await row(
       'SELECT status FROM commission_period_closures WHERE id=$1',
       [februaryClosure.id]
@@ -1865,6 +1888,29 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
       [februaryClosure.id]
     ), 0)
     await waitForAudit('commission_period_reopened', februaryClosure.id)
+
+    const preCloseLateEarning = await row(
+      `INSERT INTO commission_transactions
+        (programme_id, salesperson_id, amount, transaction_type, transaction_status,
+         policy_date, qualification_date, qualified_at, commission_month, reason, approved_by, approved_at, created_by, created_at)
+       VALUES ($1, $2, 20, 'earned', 'approved', '2020-02-28', '2020-03-01', '2020-03-01 09:00:00', '2020-03-01',
+               'Former qualification-month allocation', $3, NOW(), $3, '2020-03-01 09:00:00')
+       RETURNING *`,
+      [programme.id, attendantUser.id, adminUser.id]
+    )
+    const repaired = await reclassifyPreCloseOrderCommissions(
+      '2020-02', 'Test source-month correction before reclose', adminUser.id
+    )
+    assert.equal(repaired.transactionCount, 1)
+    const repairedEarning = await row(
+      `SELECT commission_month::text AS commission_month, source_period::text AS source_period,
+              qualification_date::text AS qualification_date
+       FROM commission_transactions WHERE id=$1`,
+      [preCloseLateEarning.id]
+    )
+    assert.equal(repairedEarning.commission_month, '2020-02-01')
+    assert.equal(repairedEarning.source_period, '2020-02-01')
+    assert.equal(repairedEarning.qualification_date, '2020-03-01')
 
     const reclosed = await request('POST', '/commissions/periods/close', admin.accessToken, {
       period: '2020-02', reason: 'Phase 6 reviewed February reclose'
