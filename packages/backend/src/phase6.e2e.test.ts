@@ -1773,6 +1773,28 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     ), 1)
     await waitForAudit('commission_period_closed', closure.id)
 
+    // Regression: the closure balance rows reference both generated recovery
+    // transactions. Undo must remove those summaries before deleting the
+    // generated ledger rows or PostgreSQL correctly rejects the deletion.
+    const reopenedRecovery = await request('POST', '/commissions/periods/reopen', admin.accessToken, {
+      period: closedMonth, reason: 'Verify recovery close can be safely undone'
+    })
+    assert.equal(reopenedRecovery.id, closure.id)
+    assert.equal(await count(
+      'SELECT COUNT(*) FROM commission_period_closure_balances WHERE closure_id=$1',
+      [closure.id]
+    ), 0)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM commission_transactions
+       WHERE reference_type='commission_period_closure' AND reference_id=$1`,
+      [closure.id]
+    ), 0)
+    const reclosedRecovery = await request('POST', '/commissions/periods/close', admin.accessToken, {
+      period: closedMonth, reason: 'Restore audited historical month close after undo verification'
+    }, 201)
+    assert.equal(reclosedRecovery.id, closure.id)
+    assert.equal(Number(reclosedRecovery.totalRecovery), 45)
+
     await request('GET', '/commissions/periods?limit=10', admin.accessToken)
     await request('POST', '/commissions/periods/close', admin.accessToken, {
       period: closedMonth, reason: 'Must not close twice'

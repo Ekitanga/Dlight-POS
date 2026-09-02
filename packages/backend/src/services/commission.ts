@@ -2906,12 +2906,15 @@ export async function reopenCommissionPeriod(period: string, reason: string, use
          toNumber(activePaid.rows[0]?.paid) + 0.000001 >= toNumber(transactionRow.rows[0]?.amount) ? 'paid' : 'approved']
       )
     }
+    // Closure balances retain foreign keys to the two recovery ledger rows.
+    // Remove the summary rows first so PostgreSQL can safely delete those
+    // generated transactions. Both operations remain inside this transaction.
+    await client.query(`DELETE FROM commission_period_closure_balances WHERE closure_id=$1`, [closure.id])
     await client.query(
       `DELETE FROM commission_transactions
        WHERE transaction_type='carry_forward' AND reference_type='commission_period_closure' AND reference_id=$1`,
       [closure.id]
     )
-    await client.query(`DELETE FROM commission_period_closure_balances WHERE closure_id=$1`, [closure.id])
     await logAudit({
       client, userId, action: 'commission_period_reopened', entityType: 'commission_period_closure', entityId: closure.id,
       oldValues: {
