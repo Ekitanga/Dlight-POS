@@ -2829,6 +2829,15 @@ export async function reopenCommissionPeriod(period: string, reason: string, use
     if (carryPayments.rows.length > 0) {
       throw Object.assign(new Error('Cannot undo this close because a carried balance has already been settled. Void that settlement first.'), { statusCode: 409 })
     }
+    const voidedCarryPayments = await client.query(
+      `SELECT cp.id, cp.commission_transaction_id
+       FROM commission_payments cp
+       JOIN commission_transactions ct ON ct.id=cp.commission_transaction_id
+       WHERE ct.reference_type='commission_period_closure' AND ct.reference_id=$1
+         AND cp.status='voided'
+       FOR UPDATE OF cp`,
+      [closure.id]
+    )
     const closePayments = await client.query(
       `SELECT cp.id, cp.commission_transaction_id
        FROM commission_payments cp
@@ -2908,8 +2917,19 @@ export async function reopenCommissionPeriod(period: string, reason: string, use
     }
     // Closure balances retain foreign keys to the two recovery ledger rows.
     // Remove the summary rows first so PostgreSQL can safely delete those
-    // generated transactions. Both operations remain inside this transaction.
+    // generated transactions. A voided payment remains as audit evidence but
+    // must be detached from its disposable generated row first; retain that
+    // former link in the payment notes and the reopen audit entry.
     await client.query(`DELETE FROM commission_period_closure_balances WHERE closure_id=$1`, [closure.id])
+    for (const payment of voidedCarryPayments.rows) {
+      await client.query(
+        `UPDATE commission_payments
+         SET commission_transaction_id=NULL,
+             notes=CASE WHEN notes IS NULL OR notes='' THEN $2 ELSE notes || E'\n' || $2 END
+         WHERE id=$1`,
+        [payment.id, `Detached from generated transaction ${payment.commission_transaction_id} when commission close ${closure.id} was undone.`]
+      )
+    }
     await client.query(
       `DELETE FROM commission_transactions
        WHERE transaction_type='carry_forward' AND reference_type='commission_period_closure' AND reference_id=$1`,
@@ -2921,7 +2941,11 @@ export async function reopenCommissionPeriod(period: string, reason: string, use
         status: 'closed', period_start: periodStart, closed_at: closure.closed_at,
         balances: balancesResult.rows.map((row: any) => ({ salesperson_id: row.salesperson_id, closing_balance: row.closing_balance }))
       },
-      newValues: { status: 'reopened', reason: reopenReason, voided_close_settlement_ids: closePayments.rows.map((row: any) => row.id) }
+      newValues: {
+        status: 'reopened', reason: reopenReason,
+        voided_close_settlement_ids: closePayments.rows.map((row: any) => row.id),
+        detached_voided_carry_payments: voidedCarryPayments.rows
+      }
     })
     return { id: closure.id, periodStart, status: 'reopened', reopenReason }
   })

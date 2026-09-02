@@ -1774,8 +1774,21 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await waitForAudit('commission_period_closed', closure.id)
 
     // Regression: the closure balance rows reference both generated recovery
-    // transactions. Undo must remove those summaries before deleting the
-    // generated ledger rows or PostgreSQL correctly rejects the deletion.
+    // transactions, while an already-voided settlement can still reference a
+    // generated row. Undo retains that payment history, detaches its obsolete
+    // link, and removes the generated ledger rows without violating either FK.
+    const historicalVoidedCarryPayment = await row(
+      `INSERT INTO commission_payments
+        (commission_transaction_id, salesperson_id, period_start, period_end,
+         total_amount, paid_amount, payment_method, reference, paid_by, paid_at,
+         notes, status, created_by, voided_by, voided_at, void_reason)
+       VALUES ($1, $2, $3::date, '2020-02-29', 45, 45, 'cash',
+               'P6-VOIDED-CARRY-HISTORY', $4, '2020-02-01 12:00:00',
+               'Historical voided carry settlement', 'voided', $4, $4, NOW(),
+               'Voided before reopening the source close')
+       RETURNING id`,
+      [attendantBalance.carryForwardTransactionId, attendantUser.id, nextMonth, adminUser.id]
+    )
     const reopenedRecovery = await request('POST', '/commissions/periods/reopen', admin.accessToken, {
       period: closedMonth, reason: 'Verify recovery close can be safely undone'
     })
@@ -1789,6 +1802,12 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
        WHERE reference_type='commission_period_closure' AND reference_id=$1`,
       [closure.id]
     ), 0)
+    const retainedVoidedPayment = await row(
+      `SELECT commission_transaction_id, notes FROM commission_payments WHERE id=$1`,
+      [historicalVoidedCarryPayment.id]
+    )
+    assert.equal(retainedVoidedPayment.commission_transaction_id, null)
+    assert.match(retainedVoidedPayment.notes, /Detached from generated transaction/)
     const reclosedRecovery = await request('POST', '/commissions/periods/close', admin.accessToken, {
       period: closedMonth, reason: 'Restore audited historical month close after undo verification'
     }, 201)
