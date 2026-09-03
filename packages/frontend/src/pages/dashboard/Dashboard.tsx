@@ -491,8 +491,11 @@ export function Dashboard() {
   })
 
   const { data: commissionSummary } = useQuery({
-    queryKey: ['commission-own-summary'],
-    queryFn: async () => (await axios.get('/api/commissions/own/summary')).data,
+    queryKey: ['commission-own-summary', dateFrom, dateTo],
+    queryFn: async () => {
+      const params = new URLSearchParams({ date_from: dateFrom, date_to: dateTo })
+      return (await axios.get(`/api/commissions/own/summary?${params.toString()}`)).data
+    },
     enabled: canOwnCommissionSummary && !isAdministrativeRole,
     staleTime: 0,
     refetchOnMount: 'always'
@@ -836,13 +839,16 @@ export function Dashboard() {
           {commissionStatus && <div className={`rounded-lg border px-3 py-2 text-sm ${commissionStatus.status === 'active' ? 'border-emerald-200 bg-emerald-50/50' : 'border-amber-200 bg-amber-50/50'}`}><strong>Commission is {commissionStatus.status === 'active' ? 'active' : 'paused'}.</strong> {commissionStatus.status === 'active' ? 'Earnings are added after payment, completion and Speedaf remittance where applicable.' : 'New earnings are paused. History and payments remain available.'}</div>}
           {showOwnCommission && canOwnCommissionSummary && commissionSummary && (
             <>
-              <h3 className="text-sm font-semibold">My commission — {new Date(`${today.slice(0, 7)}-01T12:00:00`).toLocaleDateString('en-KE', { month: 'long', year: 'numeric' })}</h3>
+              <div>
+                <h3 className="text-sm font-semibold">My commission — selected period</h3>
+                <p className="mt-1 text-xs text-muted-foreground">{formatDisplayDate(commissionSummary.dateFrom || dateFrom)} to {formatDisplayDate(commissionSummary.dateTo || dateTo)}</p>
+              </div>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <StatsCard title="Recorded" value={formatMoney(commissionSummary.grossEarned)} icon={<Wallet className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_recorded', 'My recorded commission sales')} />
                 <StatsCard title="Reversals" value={formatMoney(commissionSummary.reversals)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_reversals', 'My commission reversals')} />
                 <StatsCard title="Balance" subtitle={Number(commissionSummary.carryForwardCredits || 0) > 0 ? `${formatMoney(commissionSummary.carryForwardCredits)} relates to an earlier earning period` : 'Commission recorded for this earning period'} value={formatMoney(commissionSummary.netCommission)} icon={<TrendingUp className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_balance', 'My commission balance breakdown')} />
                 <StatsCard title="Approved" value={formatMoney(commissionSummary.approvedPayable ?? commissionSummary.payableAmount ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_approved', 'My approved commission')} />
-                <StatsCard title="Settled" subtitle="Payments recorded this month" value={formatMoney(commissionSummary.settledInPeriod ?? commissionSummary.paidAmount ?? 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_paid', 'My settled commission')} />
+                <StatsCard title="Settled" subtitle="Payments recorded during the selected period" value={formatMoney(commissionSummary.settledInPeriod ?? commissionSummary.paidAmount ?? 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_paid', 'My settled commission')} />
                 <StatsCard title={commissionSummary.recoveryDue > 0 ? 'Recovery' : 'Outstanding'} value={formatMoney(commissionSummary.recoveryDue > 0 ? commissionSummary.recoveryDue : Math.max(0, Number(commissionSummary.outstandingAmount || 0)))} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown(commissionSummary.recoveryDue > 0 ? 'my_commission_recovery' : 'my_commission_outstanding', commissionSummary.recoveryDue > 0 ? 'My commission recovery' : 'My outstanding commission')} />
               </div>
             </>

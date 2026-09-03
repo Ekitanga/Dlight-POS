@@ -39,9 +39,10 @@ function nairobiToday() {
   }).format(new Date())
 }
 
-function nextMonthStart(monthStart: string) {
-  const [year, month] = monthStart.split('-').map(Number)
-  return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10)
+function isIsoDate(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const parsed = new Date(`${value}T00:00:00Z`)
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
 }
 
 router.use(authMiddleware)
@@ -272,10 +273,13 @@ router.delete('/eligibility/:id', requirePermission('commission', 'manage'), asy
 router.get('/own/summary', requireAnyPermission([['commission', 'own_view'], ['commission', 'own_monthly']]), async (req, res) => {
   try {
     const today = nairobiToday()
-    const monthStart = today.slice(0, 8) + '01'
-    const nextMonth = nextMonthStart(monthStart)
-    const summary = await getSalespersonCommissionSummary(req.user!.userId, monthStart, nextMonth)
-    res.json(summary)
+    const dateFrom = String(req.query.date_from || `${today.slice(0, 8)}01`)
+    const dateTo = String(req.query.date_to || today)
+    if (!isIsoDate(dateFrom) || !isIsoDate(dateTo) || dateFrom > dateTo) {
+      return res.status(400).json({ error: { message: 'Choose a valid commission date range' } })
+    }
+    const summary = await getSalespersonCommissionSummary(req.user!.userId, dateFrom, dateTo)
+    res.json({ ...summary, dateFrom, dateTo })
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }

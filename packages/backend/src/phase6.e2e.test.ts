@@ -1666,6 +1666,43 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(speedafEarning.qualification_date, speedafCompletionDate)
     assert.equal(speedafEarning.commission_month, '2026-08-01')
 
+    const augustOwnCommission = await request(
+      'GET',
+      `/commissions/own/summary?date_from=${speedafSaleDate}&date_to=${speedafSaleDate}`,
+      attendant.accessToken
+    )
+    assert.equal(augustOwnCommission.dateFrom, speedafSaleDate)
+    assert.equal(augustOwnCommission.dateTo, speedafSaleDate)
+    assert.equal(Number(augustOwnCommission.grossEarned), 35)
+    assert.equal(Number(augustOwnCommission.earnedCount), 1)
+    const septemberOwnCommission = await request(
+      'GET',
+      `/commissions/own/summary?date_from=${speedafCompletionDate}&date_to=${speedafCompletionDate}`,
+      attendant.accessToken
+    )
+    const septemberAttributedCommission = await row(
+      `SELECT COALESCE(SUM(amount),0) AS amount, COUNT(*)::int AS count
+       FROM commission_transactions ct
+       WHERE ct.salesperson_id=$1 AND ct.transaction_type='earned'
+         AND (CASE
+           WHEN date_trunc('month',ct.policy_date)::date=ct.commission_month THEN ct.policy_date
+           WHEN ct.source_period IS NOT NULL AND ct.commission_month=ct.source_period THEN ct.commission_month
+           ELSE ct.qualification_date
+         END)=$2::date`,
+      [attendantUser.id, speedafCompletionDate]
+    )
+    assert.equal(septemberOwnCommission.dateFrom, speedafCompletionDate)
+    assert.equal(septemberOwnCommission.dateTo, speedafCompletionDate)
+    assert.equal(Number(septemberOwnCommission.grossEarned), Number(septemberAttributedCommission.amount))
+    assert.equal(Number(septemberOwnCommission.earnedCount), Number(septemberAttributedCommission.count))
+    await request(
+      'GET',
+      '/commissions/own/summary?date_from=2026-09-31&date_to=2026-09-01',
+      attendant.accessToken,
+      undefined,
+      400
+    )
+
     const augustSpeedafCompleted = await request(
       'GET',
       `/dashboard/drilldown?card=my_completed_orders&date_from=${speedafDeliveryDate}&date_to=${speedafDeliveryDate}`,

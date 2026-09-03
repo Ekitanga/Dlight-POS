@@ -1097,9 +1097,14 @@ export async function reverseCommission(
 
 export async function getSalespersonCommissionSummary(
   salespersonId: string,
-  monthStart: string,
-  monthEnd: string
+  dateFrom: string,
+  dateTo: string
 ) {
+  const activityDate = (alias: string) => `(CASE
+    WHEN ${alias}.transaction_type='earned'
+      AND date_trunc('month', ${alias}.policy_date)::date=${alias}.commission_month THEN ${alias}.policy_date
+    WHEN ${alias}.source_period IS NOT NULL AND ${alias}.commission_month=${alias}.source_period THEN ${alias}.commission_month
+    ELSE ${alias}.qualification_date END)`
   const result = await query(
     `SELECT
        COALESCE(SUM(CASE WHEN transaction_type = 'earned' THEN amount ELSE 0 END), 0) AS gross_earned,
@@ -1108,12 +1113,17 @@ export async function getSalespersonCommissionSummary(
        COALESCE(SUM(CASE WHEN transaction_type = 'manual_deduct' THEN amount ELSE 0 END), 0) AS manual_deductions,
        COALESCE(SUM(CASE WHEN transaction_type = 'carry_forward' AND carry_forward_direction = 'credit' THEN amount ELSE 0 END), 0) AS carry_forward_credits,
        COALESCE(SUM(CASE WHEN transaction_type = 'carry_forward' AND carry_forward_direction = 'deduction' THEN amount ELSE 0 END), 0) AS carry_forward_deductions,
+       COALESCE((SELECT SUM(cp.paid_amount)
+                 FROM commission_payments cp
+                 LEFT JOIN commission_transactions paid_ct ON paid_ct.id=cp.commission_transaction_id
+                 WHERE cp.salesperson_id=$1 AND cp.status <> 'voided'
+                   AND ((cp.commission_transaction_id IS NOT NULL
+                         AND ${activityDate('paid_ct')} >= $2::date AND ${activityDate('paid_ct')} <= $3::date)
+                     OR (cp.commission_transaction_id IS NULL
+                         AND cp.period_start >= $2::date AND cp.period_start <= $3::date))), 0) AS payments,
        COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp
                  WHERE cp.salesperson_id = $1 AND cp.status <> 'voided'
-                   AND cp.period_start >= $2 AND cp.period_start < $3), 0) AS payments,
-       COALESCE((SELECT SUM(cp.paid_amount) FROM commission_payments cp
-                 WHERE cp.salesperson_id = $1 AND cp.status <> 'voided'
-                   AND cp.paid_at::date >= $2::date AND cp.paid_at::date < $3::date), 0) AS settled_in_period,
+                   AND cp.paid_at::date >= $2::date AND cp.paid_at::date <= $3::date), 0) AS settled_in_period,
        COALESCE(SUM(CASE
          WHEN transaction_status IN ('approved','paid','reversed') AND transaction_type IN ('earned','manual_add') THEN amount
          WHEN transaction_status IN ('approved','paid','reversed') AND transaction_type = 'carry_forward' AND carry_forward_direction = 'credit' THEN amount
@@ -1127,9 +1137,9 @@ export async function getSalespersonCommissionSummary(
        COUNT(CASE WHEN transaction_type = 'reversal' THEN 1 END) AS reversal_count
      FROM commission_transactions
      WHERE salesperson_id = $1
-       AND commission_month >= $2
-       AND commission_month < $3`,
-    [salespersonId, monthStart, monthEnd]
+       AND ${activityDate('commission_transactions')} >= $2::date
+       AND ${activityDate('commission_transactions')} <= $3::date`,
+    [salespersonId, dateFrom, dateTo]
   )
   const row = result.rows[0]
   const grossEarned = toNumber(row.gross_earned)
