@@ -87,12 +87,25 @@ interface ManagementCommissionSalesperson {
   eligibleQuantity: number
   grossEarned: number
   reversals: number
+  netEarned: number
   netCommission: number
   paid: number
   outstandingAmount: number
   approvedPayable: number
   pendingAmount: number
   recoveryDue: number
+}
+
+interface PersonalCommissionMonth {
+  month: string
+  grossEarned: number
+  reversals: number
+  netCommission: number
+  approvedAmount: number
+  paidAmount: number
+  outstandingAmount: number
+  recoveryDue: number
+  status: string
 }
 
 interface StatsCardProps {
@@ -144,6 +157,35 @@ function displayStatus(value: string | null | undefined): string {
 function displayRateSummary(value: string | null | undefined): string {
   if (!value) return '-'
   return String(value).split(',').map(rate => formatMoney(Number(rate.trim()))).join(', ')
+}
+
+function shiftCommissionMonth(month: string, offset: number): string {
+  const [year, monthNumber] = month.split('-').map(Number)
+  return new Date(Date.UTC(year, monthNumber - 1 + offset, 1)).toISOString().slice(0, 7)
+}
+
+function commissionMonthRange(month: string, today: string) {
+  const [year, monthNumber] = month.split('-').map(Number)
+  const dateFrom = `${month}-01`
+  const monthEnd = new Date(Date.UTC(year, monthNumber, 0)).toISOString().slice(0, 10)
+  return { dateFrom, dateTo: month === today.slice(0, 7) ? today : monthEnd }
+}
+
+function formatCommissionMonth(month: string): string {
+  const [year, monthNumber] = String(month).slice(0, 7).split('-').map(Number)
+  return new Intl.DateTimeFormat('en-KE', { month: 'long', year: 'numeric', timeZone: 'Africa/Nairobi' })
+    .format(new Date(Date.UTC(year, monthNumber - 1, 1, 12)))
+}
+
+function commissionHistoryStatus(status: string): { label: string; className: string } {
+  if (status === 'paid_and_closed') return { label: 'Paid and closed', className: 'bg-emerald-100 text-emerald-800' }
+  if (status === 'closed_with_recovery') return { label: 'Closed - recovery due', className: 'bg-red-100 text-red-800' }
+  if (status === 'awaiting_approval') return { label: 'Awaiting approval', className: 'bg-amber-100 text-amber-800' }
+  if (status === 'ready_for_payment') return { label: 'Ready for payment', className: 'bg-blue-100 text-blue-800' }
+  if (status === 'recovery_due') return { label: 'Recovery due', className: 'bg-red-100 text-red-800' }
+  if (status === 'paid') return { label: 'Paid', className: 'bg-emerald-100 text-emerald-800' }
+  if (status === 'no_commission') return { label: 'No commission', className: 'bg-muted text-muted-foreground' }
+  return { label: 'In progress', className: 'bg-blue-100 text-blue-800' }
 }
 
 function commissionStatusClass(status: string | null | undefined): string {
@@ -452,9 +494,13 @@ export function Dashboard() {
   const navigate = useNavigate()
   const { user, hasPermission } = useAuthStore()
   const today = todayDate()
-  const [dateFrom, setDateFrom] = useState(today)
-  const [dateTo, setDateTo] = useState(today)
+  const thisMonth = presetDateRange('month')
+  const [dateFrom, setDateFrom] = useState(thisMonth.dateFrom)
+  const [dateTo, setDateTo] = useState(thisMonth.dateTo)
   const [commissionRange, setCommissionRange] = useState(() => presetDateRange('month'))
+  const [commissionHistoryPreset, setCommissionHistoryPreset] = useState<'4' | '6' | '12' | 'custom'>('4')
+  const [commissionHistoryFrom, setCommissionHistoryFrom] = useState(() => shiftCommissionMonth(today.slice(0, 7), -3))
+  const [commissionHistoryTo, setCommissionHistoryTo] = useState(() => today.slice(0, 7))
   const [drilldownSelection, setDrilldownSelection] = useState<DrilldownSelection | null>(null)
   const [drilldownDateFrom, setDrilldownDateFrom] = useState(today)
   const [drilldownDateTo, setDrilldownDateTo] = useState(today)
@@ -500,6 +546,34 @@ export function Dashboard() {
     staleTime: 0,
     refetchOnMount: 'always'
   })
+
+  const commissionHistoryRangeIsValid = commissionHistoryFrom <= commissionHistoryTo
+  const { data: commissionHistoryResponse, isLoading: commissionHistoryLoading } = useQuery<{ history: PersonalCommissionMonth[] }>({
+    queryKey: ['commission-own-history-dashboard', commissionHistoryPreset, commissionHistoryFrom, commissionHistoryTo],
+    queryFn: async () => {
+      const params = new URLSearchParams({ include_empty: 'true' })
+      if (commissionHistoryPreset === 'custom') {
+        params.set('month_from', commissionHistoryFrom)
+        params.set('month_to', commissionHistoryTo)
+      } else {
+        params.set('limit', commissionHistoryPreset)
+      }
+      return (await axios.get(`/api/commissions/own/history?${params.toString()}`)).data
+    },
+    enabled: showOwnCommission && hasPermission('commission.own_history') && commissionHistoryRangeIsValid,
+    staleTime: 0,
+    refetchOnMount: 'always'
+  })
+  const commissionHistory = commissionHistoryResponse?.history || []
+  const commissionHistoryTotals = commissionHistory.reduce((totals, month) => ({
+    grossEarned: totals.grossEarned + Number(month.grossEarned || 0),
+    reversals: totals.reversals + Number(month.reversals || 0),
+    netEarned: totals.netEarned + Number(month.netEarned || 0),
+    approvedAmount: totals.approvedAmount + Number(month.approvedAmount || 0),
+    paidAmount: totals.paidAmount + Number(month.paidAmount || 0),
+    outstandingAmount: totals.outstandingAmount + Math.max(0, Number(month.outstandingAmount || 0)),
+    recoveryDue: totals.recoveryDue + Math.max(0, Number(month.recoveryDue || 0))
+  }), { grossEarned: 0, reversals: 0, netEarned: 0, approvedAmount: 0, paidAmount: 0, outstandingAmount: 0, recoveryDue: 0 })
 
   const { data: commissionStatus } = useQuery({
     queryKey: ['commission-status'],
@@ -567,6 +641,12 @@ export function Dashboard() {
     setDrilldownDateFrom(commissionRange.dateFrom)
     setDrilldownDateTo(commissionRange.dateTo)
     setDrilldownSelection({ card, title })
+  }
+  const openCommissionHistoryMonth = (month: PersonalCommissionMonth) => {
+    const range = commissionMonthRange(String(month.month).slice(0, 7), today)
+    setDrilldownDateFrom(range.dateFrom)
+    setDrilldownDateTo(range.dateTo)
+    setDrilldownSelection({ card: 'my_commission_balance', title: `My commission - ${formatCommissionMonth(month.month)}` })
   }
   const financialMax = Math.max(
     canManagementSales ? stats?.periodSales || 0 : 0,
@@ -851,6 +931,105 @@ export function Dashboard() {
                 <StatsCard title="Settled" subtitle="Payments recorded during the selected period" value={formatMoney(commissionSummary.settledInPeriod ?? commissionSummary.paidAmount ?? 0)} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_paid', 'My settled commission')} />
                 <StatsCard title={commissionSummary.recoveryDue > 0 ? 'Recovery' : 'Outstanding'} value={formatMoney(commissionSummary.recoveryDue > 0 ? commissionSummary.recoveryDue : Math.max(0, Number(commissionSummary.outstandingAmount || 0)))} icon={<CreditCard className="h-5 w-5" />} onClick={() => openDrilldown(commissionSummary.recoveryDue > 0 ? 'my_commission_recovery' : 'my_commission_outstanding', commissionSummary.recoveryDue > 0 ? 'My commission recovery' : 'My outstanding commission')} />
               </div>
+              {hasPermission('commission.own_history') && (
+                <div className="overflow-hidden rounded-lg border bg-card">
+                  <div className="flex flex-col gap-3 border-b px-4 py-4 lg:flex-row lg:items-end lg:justify-between">
+                    <div>
+                      <h3 className="font-semibold">My commission history</h3>
+                      <p className="mt-1 text-xs text-muted-foreground">Compare monthly earnings at a glance. Select a month to view its commission entries.</p>
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+                      <label className="text-xs font-medium text-muted-foreground">
+                        Months shown
+                        <select
+                          value={commissionHistoryPreset}
+                          onChange={event => setCommissionHistoryPreset(event.target.value as '4' | '6' | '12' | 'custom')}
+                          className="mt-1 w-full min-w-40 rounded-lg border bg-background px-3 py-2 text-sm text-foreground"
+                        >
+                          <option value="4">Last 4 months</option>
+                          <option value="6">Last 6 months</option>
+                          <option value="12">Last 12 months</option>
+                          <option value="custom">Custom months</option>
+                        </select>
+                      </label>
+                      {commissionHistoryPreset === 'custom' && (
+                        <>
+                          <label className="text-xs font-medium text-muted-foreground">
+                            From
+                            <input type="month" value={commissionHistoryFrom} max={commissionHistoryTo} onChange={event => setCommissionHistoryFrom(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground" />
+                          </label>
+                          <label className="text-xs font-medium text-muted-foreground">
+                            To
+                            <input type="month" value={commissionHistoryTo} min={commissionHistoryFrom} max={today.slice(0, 7)} onChange={event => setCommissionHistoryTo(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground" />
+                          </label>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {!commissionHistoryRangeIsValid ? (
+                    <div className="p-4 text-sm text-destructive">The first month must be before the last month.</div>
+                  ) : commissionHistoryLoading ? (
+                    <div className="p-6 text-center text-sm text-muted-foreground">Loading commission history...</div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[940px] text-sm">
+                        <thead className="bg-muted/70">
+                          <tr>
+                            <th className="px-4 py-3 text-left">Month</th>
+                            <th className="px-4 py-3 text-right">Recorded</th>
+                            <th className="px-4 py-3 text-right">Reversals</th>
+                            <th className="px-4 py-3 text-right">Net earned</th>
+                            <th className="px-4 py-3 text-right">Approved</th>
+                            <th className="px-4 py-3 text-right">Paid</th>
+                            <th className="px-4 py-3 text-right">Outstanding</th>
+                            <th className="px-4 py-3 text-left">Status</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {commissionHistory.map(month => {
+                            const status = commissionHistoryStatus(month.status)
+                            return (
+                              <tr
+                                key={month.month}
+                                role="button"
+                                tabIndex={0}
+                                title={`View ${formatCommissionMonth(month.month)} commission details`}
+                                onClick={() => openCommissionHistoryMonth(month)}
+                                onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') openCommissionHistoryMonth(month) }}
+                                className="cursor-pointer border-t transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary"
+                              >
+                                <td className="px-4 py-3 font-medium">{formatCommissionMonth(month.month)}</td>
+                                <td className="px-4 py-3 text-right">{formatMoney(month.grossEarned)}</td>
+                                <td className="px-4 py-3 text-right">{formatMoney(month.reversals)}</td>
+                                <td className="px-4 py-3 text-right font-medium">{formatMoney(month.netEarned)}</td>
+                                <td className="px-4 py-3 text-right">{formatMoney(month.approvedAmount)}</td>
+                                <td className="px-4 py-3 text-right">{formatMoney(month.paidAmount)}</td>
+                                <td className="px-4 py-3 text-right">{month.recoveryDue > 0 ? `Recovery ${formatMoney(month.recoveryDue)}` : formatMoney(Math.max(0, month.outstandingAmount))}</td>
+                                <td className="px-4 py-3"><span className={`inline-flex rounded-full px-2 py-1 text-xs font-medium ${status.className}`}>{status.label}</span></td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                        <tfoot className="border-t-2 bg-muted/40 font-semibold">
+                          <tr>
+                            <td className="px-4 py-3">Total for shown months</td>
+                            <td className="px-4 py-3 text-right">{formatMoney(commissionHistoryTotals.grossEarned)}</td>
+                            <td className="px-4 py-3 text-right">{formatMoney(commissionHistoryTotals.reversals)}</td>
+                            <td className="px-4 py-3 text-right">{formatMoney(commissionHistoryTotals.netEarned)}</td>
+                            <td className="px-4 py-3 text-right">{formatMoney(commissionHistoryTotals.approvedAmount)}</td>
+                            <td className="px-4 py-3 text-right">{formatMoney(commissionHistoryTotals.paidAmount)}</td>
+                            <td className="px-4 py-3 text-right">
+                              {formatMoney(commissionHistoryTotals.outstandingAmount)}
+                              {commissionHistoryTotals.recoveryDue > 0 && <span className="block text-xs font-normal text-destructive">{formatMoney(commissionHistoryTotals.recoveryDue)} recovery</span>}
+                            </td>
+                            <td className="px-4 py-3 text-xs font-normal text-muted-foreground">{commissionHistory.length} month{commissionHistory.length === 1 ? '' : 's'}</td>
+                          </tr>
+                        </tfoot>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
           {showOwnCommission && !canOwnCommissionSummary && <div className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">Open Commission centre for the detailed information available to your role.</div>}

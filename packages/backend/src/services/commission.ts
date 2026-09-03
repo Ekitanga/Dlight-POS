@@ -1327,7 +1327,41 @@ export async function getPotentialCommission(salespersonId: string) {
   return potential
 }
 
-export async function getSalespersonMonthlyCommissionHistory(salespersonId: string, limit = 24) {
+interface SalespersonMonthlyCommissionHistoryOptions {
+  limit?: number
+  includeEmptyMonths?: boolean
+  monthFrom?: string
+  monthTo?: string
+}
+
+export async function getSalespersonMonthlyCommissionHistory(
+  salespersonId: string,
+  options: SalespersonMonthlyCommissionHistoryOptions = {}
+) {
+  const safeLimit = Math.min(60, Math.max(1, Math.floor(options.limit || 24)))
+  const monthFrom = options.monthFrom ? `${options.monthFrom.slice(0, 7)}-01` : null
+  const monthTo = options.monthTo ? `${options.monthTo.slice(0, 7)}-01` : null
+  const targetMonths: string[] = []
+
+  if (options.includeEmptyMonths) {
+    const endMonth = monthTo || `${nairobiDate(new Date()).slice(0, 7)}-01`
+    const [endYear, endMonthNumber] = endMonth.slice(0, 7).split('-').map(Number)
+    const startMonth = monthFrom || new Date(Date.UTC(endYear, endMonthNumber - safeLimit, 1)).toISOString().slice(0, 10)
+    const [startYear, startMonthNumber] = startMonth.slice(0, 7).split('-').map(Number)
+    const monthCount = Math.min(60, Math.max(0, (endYear - startYear) * 12 + endMonthNumber - startMonthNumber + 1))
+    for (let offset = 0; offset < monthCount; offset += 1) {
+      targetMonths.push(new Date(Date.UTC(endYear, endMonthNumber - 1 - offset, 1)).toISOString().slice(0, 10))
+    }
+  }
+
+  const parameters: any[] = [salespersonId]
+  let rangeCondition = ''
+  if (targetMonths.length > 0) {
+    parameters.push(targetMonths[targetMonths.length - 1], targetMonths[0])
+    rangeCondition = `AND ct.commission_month BETWEEN $2::date AND $3::date`
+  }
+  parameters.push(safeLimit)
+  const limitParameter = `$${parameters.length}`
   const result = await query(
     `SELECT ct.commission_month,
        COALESCE(SUM(CASE WHEN ct.transaction_type = 'earned' THEN ct.eligible_quantity ELSE 0 END), 0) AS eligible_quantity,
@@ -1351,15 +1385,34 @@ export async function getSalespersonMonthlyCommissionHistory(salespersonId: stri
                    AND date_trunc('month', cp.period_start)::date = date_trunc('month', ct.commission_month)::date), 0) AS paid_amount,
        (SELECT MAX(cp.paid_at) FROM commission_payments cp
          WHERE cp.salesperson_id = $1 AND cp.status <> 'voided'
-          AND date_trunc('month', cp.period_start)::date = date_trunc('month', ct.commission_month)::date) AS last_paid_at
+          AND date_trunc('month', cp.period_start)::date = date_trunc('month', ct.commission_month)::date) AS last_paid_at,
+       (SELECT status FROM commission_period_closures closure
+         WHERE closure.period_start = ct.commission_month LIMIT 1) AS period_status,
+       (SELECT balance.closing_balance
+          FROM commission_period_closures closure
+          JOIN commission_period_closure_balances balance ON balance.closure_id = closure.id
+         WHERE closure.period_start = ct.commission_month AND balance.salesperson_id = $1
+         LIMIT 1) AS closure_balance,
+       (SELECT balance.approved_credits
+          FROM commission_period_closures closure
+          JOIN commission_period_closure_balances balance ON balance.closure_id = closure.id
+         WHERE closure.period_start = ct.commission_month AND balance.salesperson_id = $1
+         LIMIT 1) AS closure_approved_credits,
+       (SELECT balance.approved_deductions
+          FROM commission_period_closures closure
+          JOIN commission_period_closure_balances balance ON balance.closure_id = closure.id
+         WHERE closure.period_start = ct.commission_month AND balance.salesperson_id = $1
+         LIMIT 1) AS closure_approved_deductions
      FROM commission_transactions ct
      WHERE ct.salesperson_id = $1
+       ${rangeCondition}
      GROUP BY ct.commission_month
      ORDER BY ct.commission_month DESC
-     LIMIT $2`,
-    [salespersonId, Math.min(60, Math.max(1, limit))]
+     LIMIT ${limitParameter}`,
+    parameters
   )
-  return result.rows.map(row => {
+
+  const summarize = (row: any) => {
     const gross = toNumber(row.gross_earned)
     const reversals = toNumber(row.reversals)
     const additions = toNumber(row.manual_additions)
@@ -1369,7 +1422,25 @@ export async function getSalespersonMonthlyCommissionHistory(salespersonId: stri
     const net = gross - reversals + additions - deductions + carryForwardCredits - carryForwardDeductions
     const paid = toNumber(row.paid_amount)
     const outstanding = net - paid
-    const approvedBalance = toNumber(row.approved_credits) - toNumber(row.approved_deductions) - paid
+    const approvedTotal = toNumber(row.approved_credits) - toNumber(row.approved_deductions)
+    const approvedBalance = approvedTotal - paid
+    const pendingAmount = outstanding - approvedBalance
+    const periodStatus = row.period_status || 'open'
+    const closureBalance = row.closure_balance == null ? null : toNumber(row.closure_balance)
+    const closureApprovedTotal = row.closure_approved_credits == null
+      ? null
+      : toNumber(row.closure_approved_credits) - toNumber(row.closure_approved_deductions)
+    const netEarned = periodStatus === 'closed' && closureApprovedTotal != null
+      ? closureApprovedTotal
+      : gross - reversals + additions - deductions
+    const recoveryDue = Math.max(0, periodStatus === 'closed' && closureBalance != null ? -closureBalance : -approvedBalance)
+    let status = 'in_progress'
+    if (periodStatus === 'closed') status = recoveryDue > 0 ? 'closed_with_recovery' : 'paid_and_closed'
+    else if (pendingAmount > 0) status = 'awaiting_approval'
+    else if (approvedBalance > 0) status = 'ready_for_payment'
+    else if (recoveryDue > 0) status = 'recovery_due'
+    else if (paid > 0 && outstanding <= 0) status = 'paid'
+    else if (net === 0) status = 'no_commission'
     return {
       month: row.commission_month,
       eligibleQuantity: Number(row.eligible_quantity || 0),
@@ -1379,18 +1450,45 @@ export async function getSalespersonMonthlyCommissionHistory(salespersonId: stri
       manualDeductions: deductions,
       carryForwardCredits,
       carryForwardDeductions,
+      netEarned,
       netCommission: net,
-      approvedAmount: Math.max(0, approvedBalance),
+      approvedAmount: Math.max(0, closureApprovedTotal ?? approvedTotal),
       approvedPayable: Math.max(0, approvedBalance),
       paidAmount: paid,
       outstandingAmount: outstanding,
       payableAmount: Math.max(0, approvedBalance),
-      pendingAmount: outstanding - approvedBalance,
-      recoveryDue: Math.max(0, -approvedBalance),
+      pendingAmount,
+      recoveryDue,
       paymentStatus: approvedBalance <= 0 ? (paid > 0 ? 'paid_or_offset' : 'offset') : paid <= 0 ? 'unpaid' : 'partial',
-      lastPaidAt: row.last_paid_at
+      lastPaidAt: row.last_paid_at,
+      periodStatus,
+      status
     }
-  })
+  }
+
+  const summaries = new Map(result.rows.map(row => {
+    const summary = summarize(row)
+    return [String(summary.month).slice(0, 10), summary]
+  }))
+  if (targetMonths.length === 0) return [...summaries.values()]
+
+  const closureResult = await query(
+    `SELECT closure.period_start, closure.status, balance.closing_balance,
+            balance.approved_credits, balance.approved_deductions
+       FROM commission_period_closures closure
+       LEFT JOIN commission_period_closure_balances balance
+         ON balance.closure_id = closure.id AND balance.salesperson_id = $2
+      WHERE closure.period_start = ANY($1::date[])`,
+    [targetMonths, salespersonId]
+  )
+  const closureDetails = new Map(closureResult.rows.map(row => [String(row.period_start).slice(0, 10), row]))
+  return targetMonths.map(month => summaries.get(month) || summarize({
+    commission_month: month,
+    period_status: closureDetails.get(month)?.status || 'open',
+    closure_balance: closureDetails.get(month)?.closing_balance ?? null,
+    closure_approved_credits: closureDetails.get(month)?.approved_credits ?? null,
+    closure_approved_deductions: closureDetails.get(month)?.approved_deductions ?? null
+  }))
 }
 
 export async function getManagementCommissionTransactions(

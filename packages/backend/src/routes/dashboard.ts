@@ -99,11 +99,6 @@ function isBusinessDate(value: unknown): value is string {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`))
 }
 
-function nextMonthStart(monthStart: string): string {
-  const [year, month] = monthStart.split('-').map(Number)
-  return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10)
-}
-
 const personalOrderCards: Record<string, { permission: string; title: string; condition: string }> = {
   my_sales_today: {
     permission: 'dashboard.personal_sales',
@@ -633,8 +628,8 @@ router.get('/drilldown', async (req, res) => {
       return res.status(403).json({ error: { message: 'Permission required: commission.view' } })
     }
 
-    const periodFrom = isOwnCommission ? firstDayOfMonth(today) : dateFrom
-    const periodTo = isOwnCommission ? nextMonthStart(periodFrom) : dateTo
+    const periodFrom = dateFrom
+    const periodTo = dateTo
     const commissionActivityDate = `(CASE
       WHEN ct.transaction_type='earned'
         AND date_trunc('month', ct.policy_date)::date=ct.commission_month THEN ct.policy_date
@@ -646,7 +641,7 @@ router.get('/drilldown', async (req, res) => {
       params.push(req.user!.userId)
       conditions.push(`ct.salesperson_id = $${params.length}`)
       params.push(periodFrom, periodTo)
-      conditions.push(`ct.commission_month >= $${params.length - 1}::date AND ct.commission_month < $${params.length}::date`)
+      conditions.push(`${commissionActivityDate} >= $${params.length - 1}::date AND ${commissionActivityDate} <= $${params.length}::date`)
     } else {
       params.push(periodFrom, periodTo)
       conditions.push(`${commissionActivityDate} >= $1::date AND ${commissionActivityDate} <= $2::date`)
@@ -657,7 +652,7 @@ router.get('/drilldown', async (req, res) => {
         ? [req.user!.userId, periodFrom, periodTo]
         : [periodFrom, periodTo]
       const paymentConditions = isOwnCommission
-        ? `cp.salesperson_id = $1 AND cp.paid_at::date >= $2::date AND cp.paid_at::date < $3::date`
+        ? `cp.salesperson_id = $1 AND cp.paid_at::date >= $2::date AND cp.paid_at::date <= $3::date`
         : `cp.paid_at::date >= $1::date AND cp.paid_at::date <= $2::date`
       const result = await query(
         `SELECT cp.id AS payment_id, ct.id AS transaction_id, ct.order_id,
@@ -693,7 +688,7 @@ router.get('/drilldown', async (req, res) => {
         kind: 'commissions', card,
         title: `${isOwnCommission ? 'My' : 'Company'} commission settlements by payment date`,
         dateFrom: periodFrom,
-        dateTo: isOwnCommission ? today : periodTo,
+        dateTo: periodTo,
         total, truncated: total > 100, rows: result.rows.slice(0, 100)
       })
     }
@@ -796,7 +791,7 @@ router.get('/drilldown', async (req, res) => {
       kind: 'commissions', card,
       title: `${isOwnCommission ? 'My ' : 'Company '}${commissionCardTitles[commissionCard].toLowerCase()}`,
       dateFrom: periodFrom,
-      dateTo: isOwnCommission ? today : periodTo,
+      dateTo: periodTo,
       total, truncated: total > 100, rows: result.rows.slice(0, 100)
     })
   } catch (err) {

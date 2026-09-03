@@ -1695,6 +1695,29 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(septemberOwnCommission.dateTo, speedafCompletionDate)
     assert.equal(Number(septemberOwnCommission.grossEarned), Number(septemberAttributedCommission.amount))
     assert.equal(Number(septemberOwnCommission.earnedCount), Number(septemberAttributedCommission.count))
+    const fourMonthHistory = await request(
+      'GET',
+      '/commissions/own/history?limit=4&include_empty=true',
+      attendant.accessToken
+    )
+    assert.equal(fourMonthHistory.history.length, 4)
+    assert.equal(String(fourMonthHistory.history[0].month).slice(0, 7), isoDate().slice(0, 7))
+    const selectedHistory = await request(
+      'GET',
+      '/commissions/own/history?month_from=2026-08&month_to=2026-09&include_empty=true',
+      attendant.accessToken
+    )
+    assert.deepEqual(selectedHistory.history.map((month: any) => String(month.month).slice(0, 7)), ['2026-09', '2026-08'])
+    const augustHistory = selectedHistory.history.find((month: any) => String(month.month).startsWith('2026-08'))
+    assert.ok(Number(augustHistory.grossEarned) >= 35)
+    assert.ok(Number(augustHistory.netCommission) >= 35)
+    await request(
+      'GET',
+      '/commissions/own/history?month_from=2026-08&include_empty=true',
+      attendant.accessToken,
+      undefined,
+      400
+    )
     await request(
       'GET',
       '/commissions/own/summary?date_from=2026-09-31&date_to=2026-09-01',
@@ -1719,6 +1742,19 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(String(completedSpeedafRow.delivery_date).slice(0, 10), speedafDeliveryDate)
     assert.equal(String(completedSpeedafRow.completion_date).slice(0, 10), speedafCompletionDate)
     assert.equal(completedSpeedafRow.commission_status, 'earned')
+
+    const augustPersonalCommissionDrilldown = await request(
+      'GET',
+      '/dashboard/drilldown?card=my_commission_balance&date_from=2026-08-01&date_to=2026-08-31',
+      attendant.accessToken
+    )
+    assert.ok(augustPersonalCommissionDrilldown.rows.some((item: any) => item.order_id === historicalSpeedafOrder.id))
+    const septemberPersonalCommissionDrilldown = await request(
+      'GET',
+      '/dashboard/drilldown?card=my_commission_balance&date_from=2026-09-01&date_to=2026-09-30',
+      attendant.accessToken
+    )
+    assert.ok(!septemberPersonalCommissionDrilldown.rows.some((item: any) => item.order_id === historicalSpeedafOrder.id))
 
     const augustCommissionDrilldown = await request(
       'GET',
@@ -1792,6 +1828,16 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(closure.periodStart, closedMonth)
     assert.equal((await row('SELECT status FROM commission_period_closures WHERE id=$1', [closure.id])).status, 'closed')
     assert.equal(Number(closure.totalRecovery), 45)
+    const closedMonthHistory = await request(
+      'GET',
+      '/commissions/own/history?month_from=2020-01&month_to=2020-01&include_empty=true',
+      attendant.accessToken
+    )
+    assert.equal(closedMonthHistory.history.length, 1)
+    assert.equal(closedMonthHistory.history[0].status, 'closed_with_recovery')
+    assert.equal(Number(closedMonthHistory.history[0].recoveryDue), 45)
+    assert.equal(Number(closedMonthHistory.history[0].netEarned), 105)
+    assert.equal(Number(closedMonthHistory.history[0].approvedAmount), 105)
     const attendantBalance = closure.balances.find((balance: any) => balance.salespersonId === attendantUser.id)
     assert.equal(Number(attendantBalance.closingBalance), -45)
     assert.ok(attendantBalance.sourceOffsetTransactionId)

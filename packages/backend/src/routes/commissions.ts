@@ -45,6 +45,10 @@ function isIsoDate(value: string) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
 }
 
+function isIsoMonth(value: string) {
+  return /^\d{4}-(0[1-9]|1[0-2])$/.test(value)
+}
+
 router.use(authMiddleware)
 
 // Commission operators need their own narrowly scoped selector data. Requiring
@@ -365,8 +369,26 @@ router.get('/settlements', requirePermission('commission', 'view'), async (req, 
 
 router.get('/own/history', requirePermission('commission', 'own_history'), async (req, res) => {
   try {
-    const history = await getSalespersonMonthlyCommissionHistory(req.user!.userId, Number(req.query.limit) || 24)
-    res.json({ history })
+    const limit = Math.min(60, Math.max(1, Number(req.query.limit) || 24))
+    const monthFrom = req.query.month_from ? String(req.query.month_from) : undefined
+    const monthTo = req.query.month_to ? String(req.query.month_to) : undefined
+    if ((monthFrom && !monthTo) || (!monthFrom && monthTo) || (monthFrom && monthTo && (!isIsoMonth(monthFrom) || !isIsoMonth(monthTo) || monthFrom > monthTo))) {
+      return res.status(400).json({ error: { message: 'Choose a valid commission month range' } })
+    }
+    if (monthFrom && monthTo) {
+      const [fromYear, fromMonth] = monthFrom.split('-').map(Number)
+      const [toYear, toMonth] = monthTo.split('-').map(Number)
+      if ((toYear - fromYear) * 12 + toMonth - fromMonth + 1 > 60) {
+        return res.status(400).json({ error: { message: 'Commission history is limited to 60 months at a time' } })
+      }
+    }
+    const history = await getSalespersonMonthlyCommissionHistory(req.user!.userId, {
+      limit,
+      includeEmptyMonths: req.query.include_empty === 'true',
+      monthFrom,
+      monthTo
+    })
+    res.json({ history, monthFrom: monthFrom || null, monthTo: monthTo || null })
   } catch (error) {
     const status = (error as any).statusCode || 500
     res.status(status).json({ error: { message: status === 500 ? 'Database error' : (error as Error).message } })
