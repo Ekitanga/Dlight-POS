@@ -23,6 +23,7 @@ import {
   History,
   ChevronLeft,
   ChevronRight,
+  Download,
   ExternalLink,
   X
 } from 'lucide-react'
@@ -87,7 +88,6 @@ interface ManagementCommissionSalesperson {
   eligibleQuantity: number
   grossEarned: number
   reversals: number
-  netEarned: number
   netCommission: number
   paid: number
   outstandingAmount: number
@@ -100,12 +100,36 @@ interface PersonalCommissionMonth {
   month: string
   grossEarned: number
   reversals: number
+  netEarned: number
   netCommission: number
   approvedAmount: number
   paidAmount: number
   outstandingAmount: number
   recoveryDue: number
   status: string
+}
+
+interface DailyWhatsappReportRow {
+  orderId: string
+  orderNumber: string
+  location: string
+  productSummary: string
+  status: 'paid' | 'pending_speedaf'
+  handledBy: string
+  riderAmount: number | null
+}
+
+interface DailyWhatsappReport {
+  reportDate: string
+  generatedAt: string
+  preparedBy: string
+  summary: {
+    totalOrders: number
+    paidOrders: number
+    pendingSpeedafOrders: number
+    totalRiderAmount: number
+  }
+  rows: DailyWhatsappReportRow[]
 }
 
 interface StatsCardProps {
@@ -186,6 +210,176 @@ function commissionHistoryStatus(status: string): { label: string; className: st
   if (status === 'paid') return { label: 'Paid', className: 'bg-emerald-100 text-emerald-800' }
   if (status === 'no_commission') return { label: 'No commission', className: 'bg-muted text-muted-foreground' }
   return { label: 'In progress', className: 'bg-blue-100 text-blue-800' }
+}
+
+const DAILY_REPORT_ROWS_PER_IMAGE = 12
+
+function dailyReportStatusLabel(status: DailyWhatsappReportRow['status']): string {
+  return status === 'paid' ? 'Paid' : 'Pending Speedaf'
+}
+
+function wrapCanvasText(context: CanvasRenderingContext2D, value: string, maxWidth: number, maxLines: number): string[] {
+  const words = String(value || '-').trim().split(/\s+/)
+  const lines: string[] = []
+  let current = ''
+  for (const word of words) {
+    const candidate = current ? `${current} ${word}` : word
+    if (context.measureText(candidate).width <= maxWidth) {
+      current = candidate
+      continue
+    }
+    if (current) lines.push(current)
+    current = word
+    if (lines.length === maxLines) break
+  }
+  if (current && lines.length < maxLines) lines.push(current)
+  const consumed = lines.join(' ').length
+  if (consumed < String(value || '-').trim().length && lines.length > 0) {
+    let last = lines[lines.length - 1]
+    while (last.length > 1 && context.measureText(`${last}...`).width > maxWidth) last = last.slice(0, -1)
+    lines[lines.length - 1] = `${last}...`
+  }
+  return lines.length > 0 ? lines : ['-']
+}
+
+function drawCanvasLines(context: CanvasRenderingContext2D, lines: string[], x: number, y: number, lineHeight: number) {
+  lines.forEach((line, index) => context.fillText(line, x, y + index * lineHeight))
+}
+
+function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappReportRow[], page: number, pages: number): HTMLCanvasElement {
+  const width = 1400
+  const left = 48
+  const right = width - 48
+  const columns = {
+    location: { x: left, width: 250 },
+    items: { x: 298, width: 470 },
+    status: { x: 768, width: 210 },
+    handler: { x: 978, width: 210 },
+    amount: { x: 1188, width: 164 }
+  }
+  const measurementCanvas = document.createElement('canvas')
+  const measurementContext = measurementCanvas.getContext('2d')!
+  measurementContext.font = '20px Arial, sans-serif'
+  const preparedRows = rows.map(row => {
+    const locationLines = wrapCanvasText(measurementContext, row.location, columns.location.width - 28, 2)
+    const itemLines = wrapCanvasText(measurementContext, row.productSummary, columns.items.width - 28, 5)
+    const handlerLines = wrapCanvasText(measurementContext, row.handledBy, columns.handler.width - 28, 2)
+    const height = Math.max(78, locationLines.length * 27 + 50, itemLines.length * 27 + 28, handlerLines.length * 27 + 28)
+    return { row, locationLines, itemLines, handlerLines, height }
+  })
+  const headerHeight = 250
+  const tableHeaderHeight = 58
+  const footerHeight = 72
+  const height = headerHeight + tableHeaderHeight + preparedRows.reduce((total, row) => total + row.height, 0) + footerHeight
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')!
+
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, width, height)
+  context.fillStyle = '#111827'
+  context.fillRect(0, 0, width, 112)
+  context.fillStyle = '#d2a45f'
+  context.font = 'bold 30px Arial, sans-serif'
+  context.fillText('DLIGHT GIFTSHOP', left, 52)
+  context.fillStyle = '#ffffff'
+  context.font = 'bold 24px Arial, sans-serif'
+  context.fillText('Daily Order Report', left, 88)
+  context.textAlign = 'right'
+  context.font = '20px Arial, sans-serif'
+  context.fillText(`Page ${page} of ${pages}`, right, 70)
+  context.textAlign = 'left'
+
+  context.fillStyle = '#111827'
+  context.font = 'bold 34px Arial, sans-serif'
+  context.fillText(formatDisplayDate(report.reportDate), left, 164)
+  context.font = '19px Arial, sans-serif'
+  context.fillStyle = '#4b5563'
+  context.fillText(`Prepared by ${report.preparedBy}`, left, 201)
+  const generated = new Date(report.generatedAt).toLocaleString('en-KE', { timeZone: 'Africa/Nairobi', dateStyle: 'medium', timeStyle: 'short' })
+  context.textAlign = 'right'
+  context.fillText(`Generated ${generated}`, right, 201)
+  context.textAlign = 'left'
+  context.fillStyle = '#f7f2e9'
+  context.fillRect(left, 218, right - left, 32)
+  context.fillStyle = '#6b4a1f'
+  context.font = 'bold 17px Arial, sans-serif'
+  context.fillText(`${report.summary.totalOrders} orders   |   ${report.summary.paidOrders} Paid   |   ${report.summary.pendingSpeedafOrders} Pending Speedaf   |   Rider amount ${formatMoney(report.summary.totalRiderAmount)}`, left + 12, 240)
+
+  let y = headerHeight
+  context.fillStyle = '#f3f4f6'
+  context.fillRect(left, y, right - left, tableHeaderHeight)
+  context.fillStyle = '#374151'
+  context.font = 'bold 18px Arial, sans-serif'
+  context.fillText('Location / Order', columns.location.x + 14, y + 36)
+  context.fillText('Item(s)', columns.items.x + 14, y + 36)
+  context.fillText('Status', columns.status.x + 14, y + 36)
+  context.fillText('Rider / Courier', columns.handler.x + 14, y + 36)
+  context.textAlign = 'right'
+  context.fillText('Rider amount', right - 14, y + 36)
+  context.textAlign = 'left'
+  y += tableHeaderHeight
+
+  preparedRows.forEach(({ row, locationLines, itemLines, handlerLines, height: rowHeight }, index) => {
+    context.fillStyle = index % 2 === 0 ? '#ffffff' : '#fafafa'
+    context.fillRect(left, y, right - left, rowHeight)
+    context.strokeStyle = '#e5e7eb'
+    context.beginPath()
+    context.moveTo(left, y)
+    context.lineTo(right, y)
+    context.stroke()
+
+    context.fillStyle = '#111827'
+    context.font = '20px Arial, sans-serif'
+    drawCanvasLines(context, locationLines, columns.location.x + 14, y + 30, 27)
+    context.fillStyle = '#6b7280'
+    context.font = '16px Arial, sans-serif'
+    context.fillText(row.orderNumber, columns.location.x + 14, y + locationLines.length * 27 + 33)
+    context.fillStyle = '#111827'
+    context.font = '20px Arial, sans-serif'
+    drawCanvasLines(context, itemLines, columns.items.x + 14, y + 30, 27)
+
+    const statusLabel = dailyReportStatusLabel(row.status)
+    context.fillStyle = row.status === 'paid' ? '#dcfce7' : '#fef3c7'
+    context.fillRect(columns.status.x + 14, y + 16, columns.status.width - 28, 36)
+    context.fillStyle = row.status === 'paid' ? '#166534' : '#92400e'
+    context.font = 'bold 17px Arial, sans-serif'
+    context.fillText(statusLabel, columns.status.x + 24, y + 40)
+
+    context.fillStyle = '#111827'
+    context.font = '20px Arial, sans-serif'
+    drawCanvasLines(context, handlerLines, columns.handler.x + 14, y + 30, 27)
+    context.textAlign = 'right'
+    context.fillText(row.riderAmount == null ? '-' : formatMoney(row.riderAmount), right - 14, y + 30)
+    context.textAlign = 'left'
+    y += rowHeight
+  })
+
+  context.strokeStyle = '#d1d5db'
+  ;[columns.items.x, columns.status.x, columns.handler.x, columns.amount.x].forEach(x => {
+    context.beginPath()
+    context.moveTo(x, headerHeight)
+    context.lineTo(x, y)
+    context.stroke()
+  })
+  context.strokeRect(left, headerHeight, right - left, y - headerHeight)
+  context.fillStyle = '#6b7280'
+  context.font = '16px Arial, sans-serif'
+  context.fillText('Paid = completed in Dlight POS. Pending Speedaf = Speedaf COD awaiting completion.', left, y + 42)
+  return canvas
+}
+
+function downloadDailyReportImages(report: DailyWhatsappReport) {
+  const pages = Math.max(1, Math.ceil(report.rows.length / DAILY_REPORT_ROWS_PER_IMAGE))
+  for (let page = 0; page < pages; page += 1) {
+    const rows = report.rows.slice(page * DAILY_REPORT_ROWS_PER_IMAGE, (page + 1) * DAILY_REPORT_ROWS_PER_IMAGE)
+    const canvas = renderDailyReportPage(report, rows, page + 1, pages)
+    const link = document.createElement('a')
+    link.download = `dlight-daily-report-${report.reportDate}${pages > 1 ? `-page-${page + 1}` : ''}.png`
+    link.href = canvas.toDataURL('image/png')
+    link.click()
+  }
 }
 
 function commissionStatusClass(status: string | null | undefined): string {
@@ -501,6 +695,8 @@ export function Dashboard() {
   const [commissionHistoryPreset, setCommissionHistoryPreset] = useState<'4' | '6' | '12' | 'custom'>('4')
   const [commissionHistoryFrom, setCommissionHistoryFrom] = useState(() => shiftCommissionMonth(today.slice(0, 7), -3))
   const [commissionHistoryTo, setCommissionHistoryTo] = useState(() => today.slice(0, 7))
+  const [dailyReportDate, setDailyReportDate] = useState(today)
+  const [dailyReportDownloading, setDailyReportDownloading] = useState(false)
   const [drilldownSelection, setDrilldownSelection] = useState<DrilldownSelection | null>(null)
   const [drilldownDateFrom, setDrilldownDateFrom] = useState(today)
   const [drilldownDateTo, setDrilldownDateTo] = useState(today)
@@ -534,6 +730,19 @@ export function Dashboard() {
       return response.data
     },
     enabled: hasDashboardStats
+  })
+
+  const {
+    data: dailyReport,
+    isLoading: dailyReportLoading,
+    error: dailyReportError,
+    refetch: refetchDailyReport
+  } = useQuery<DailyWhatsappReport>({
+    queryKey: ['dashboard-daily-whatsapp-report', dailyReportDate],
+    queryFn: async () => (await axios.get(`/api/dashboard/daily-whatsapp-report?date=${dailyReportDate}`)).data,
+    enabled: !isAdministrativeRole && canPersonalOrders,
+    staleTime: 0,
+    refetchOnMount: 'always'
   })
 
   const { data: commissionSummary } = useQuery({
@@ -648,6 +857,15 @@ export function Dashboard() {
     setDrilldownDateTo(range.dateTo)
     setDrilldownSelection({ card: 'my_commission_balance', title: `My commission - ${formatCommissionMonth(month.month)}` })
   }
+  const downloadDailyReport = async () => {
+    setDailyReportDownloading(true)
+    try {
+      const refreshed = await refetchDailyReport()
+      if (refreshed.data && refreshed.data.rows.length > 0) downloadDailyReportImages(refreshed.data)
+    } finally {
+      setDailyReportDownloading(false)
+    }
+  }
   const financialMax = Math.max(
     canManagementSales ? stats?.periodSales || 0 : 0,
     canManagementExpenses ? stats?.periodExpenses || 0 : 0,
@@ -716,6 +934,83 @@ export function Dashboard() {
             {canPersonalOrders && <StatsCard title="My open orders" subtitle="Current open queue · All dates" value={stats?.myOpenOrders || 0} icon={<ShoppingBag className="h-6 w-6" />} onClick={() => openDrilldown('my_open_orders', 'My open orders')} />}
             {canPersonalOrders && <StatsCard title="My completed sales — selected period" subtitle="Orders I created, filtered by completion date" value={stats?.myCompletedOrders || 0} icon={<CheckCircle2 className="h-6 w-6" />} onClick={() => openDrilldown('my_completed_orders', 'My completed sales for the selected period')} />}
             {canPersonalSpeedaf && <StatsCard title="My Speedaf orders awaiting completion" value={stats?.myPendingSpeedafOrders || 0} subtitle={`${formatMoney(stats?.myPendingSpeedafValue)} awaiting remittance · All dates`} icon={<Truck className="h-6 w-6" />} onClick={() => openDrilldown('my_speedaf_pending', 'My Speedaf orders awaiting completion')} />}
+          </div>
+        </section>
+      )}
+
+      {!isAdministrativeRole && canPersonalOrders && (
+        <section className="space-y-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold">Daily WhatsApp report</h2>
+              <p className="text-sm text-muted-foreground">A simple image of your completed orders and Speedaf COD orders for one sale date.</p>
+            </div>
+            <div className="flex flex-col gap-2 min-[430px]:flex-row min-[430px]:items-end">
+              <label className="text-xs font-medium text-muted-foreground">
+                Report date
+                <input type="date" value={dailyReportDate} max={today} onChange={event => setDailyReportDate(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground" />
+              </label>
+              <button
+                type="button"
+                onClick={downloadDailyReport}
+                disabled={dailyReportDownloading || dailyReportLoading || !dailyReport?.rows.length}
+                className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Download className="h-4 w-4" />
+                {dailyReportDownloading ? 'Preparing image...' : 'Download image'}
+              </button>
+            </div>
+          </div>
+
+          <div className="overflow-hidden rounded-lg border bg-card">
+            <div className="border-b bg-slate-950 px-4 py-4 text-white">
+              <p className="text-xs font-semibold tracking-wider text-primary">DLIGHT GIFTSHOP</p>
+              <div className="mt-1 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                <div><h3 className="text-lg font-semibold">Daily Order Report</h3><p className="text-sm text-slate-300">{formatDisplayDate(dailyReport?.reportDate || dailyReportDate)}</p></div>
+                {dailyReport && <p className="text-xs text-slate-300">Prepared by {dailyReport.preparedBy}</p>}
+              </div>
+            </div>
+            {dailyReportError ? (
+              <div className="p-5 text-sm text-destructive">The daily report could not be loaded. Please try again.</div>
+            ) : dailyReportLoading ? (
+              <div className="p-6 text-center text-sm text-muted-foreground">Loading daily report...</div>
+            ) : !dailyReport?.rows.length ? (
+              <div className="p-6 text-center text-sm text-muted-foreground">No completed or pending Speedaf orders were found for this date.</div>
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-x-5 gap-y-1 border-b bg-primary/5 px-4 py-2 text-xs font-medium text-muted-foreground">
+                  <span>{dailyReport.summary.totalOrders} orders</span>
+                  <span>{dailyReport.summary.paidOrders} Paid</span>
+                  <span>{dailyReport.summary.pendingSpeedafOrders} Pending Speedaf</span>
+                  <span>Rider amount {formatMoney(dailyReport.summary.totalRiderAmount)}</span>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[820px] text-sm">
+                    <thead className="bg-muted/70">
+                      <tr>
+                        <th className="px-4 py-3 text-left">Location / Order</th>
+                        <th className="px-4 py-3 text-left">Item(s)</th>
+                        <th className="px-4 py-3 text-left">Status</th>
+                        <th className="px-4 py-3 text-left">Rider / Courier</th>
+                        <th className="px-4 py-3 text-right">Rider amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {dailyReport.rows.map(row => (
+                        <tr key={row.orderId} className="border-t align-top">
+                          <td className="px-4 py-3 font-medium">{row.location}<span className="mt-1 block text-xs font-normal text-muted-foreground">{row.orderNumber}</span></td>
+                          <td className="max-w-md px-4 py-3">{row.productSummary}</td>
+                          <td className="px-4 py-3"><span className={`inline-flex whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium ${row.status === 'paid' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{dailyReportStatusLabel(row.status)}</span></td>
+                          <td className="px-4 py-3">{row.handledBy}</td>
+                          <td className="px-4 py-3 text-right">{row.riderAmount == null ? '-' : formatMoney(row.riderAmount)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {dailyReport.rows.length > DAILY_REPORT_ROWS_PER_IMAGE && <p className="border-t px-4 py-2 text-xs text-muted-foreground">The download will be split into {Math.ceil(dailyReport.rows.length / DAILY_REPORT_ROWS_PER_IMAGE)} readable images.</p>}
+              </>
+            )}
           </div>
         </section>
       )}

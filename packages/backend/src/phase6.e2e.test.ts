@@ -1237,11 +1237,19 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     }, 403)
     assert.equal((await row('SELECT status FROM orders WHERE id=$1', [ownCodOrder.id])).status, 'delivered')
     assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [ownCodOrder.id]), 0)
+    const pendingDailyReport = await request('GET', `/dashboard/daily-whatsapp-report?date=${isoDate()}`, attendant.accessToken)
+    const pendingSpeedafReportRow = pendingDailyReport.rows.find((item: any) => item.orderId === ownCodOrder.id)
+    assert.ok(pendingSpeedafReportRow)
+    assert.equal(pendingSpeedafReportRow.status, 'pending_speedaf')
+    assert.equal(pendingSpeedafReportRow.riderAmount, null)
+    await request('GET', '/dashboard/daily-whatsapp-report?date=2026-02-31', attendant.accessToken, undefined, 400)
     await request('POST', `/deliveries/orders/${ownCodOrder.id}/cod`, admin.accessToken, {
       amount: 100, payment_method: 'mpesa', reference: 'P6-OWN-COD-ADMIN-REMIT'
     }, 201)
     assert.equal((await row('SELECT status FROM orders WHERE id=$1', [ownCodOrder.id])).status, 'collected_paid')
     assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [ownCodOrder.id]), 1)
+    const completedSpeedafDailyReport = await request('GET', `/dashboard/daily-whatsapp-report?date=${isoDate()}`, attendant.accessToken)
+    assert.equal(completedSpeedafDailyReport.rows.find((item: any) => item.orderId === ownCodOrder.id)?.status, 'paid')
 
     // The order creator owns the sale. Completion unlocks commission without a
     // second commission-specific verification step.
@@ -1252,6 +1260,21 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await request('PUT', `/orders/${selfCompletedOrder.id}/status`, attendant.accessToken, { status: 'confirmed' })
     await request('PUT', `/orders/${selfCompletedOrder.id}/status`, attendant.accessToken, { status: 'delivered' })
     assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [selfCompletedOrder.id]), 1)
+
+    const dailyRiderOrder = await createOrder({
+      ...customer('Daily WhatsApp Rider'), delivery_type: 'rider', rider_id: rider.id,
+      customer_delivery_fee: 100, actual_rider_fee: 60, payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 100)]
+    }, attendant.accessToken)
+    await advance(dailyRiderOrder.id, ['confirmed', 'in_transit', 'delivered'])
+    const dailyReport = await request('GET', `/dashboard/daily-whatsapp-report?date=${isoDate()}`, attendant.accessToken)
+    const riderReportRow = dailyReport.rows.find((item: any) => item.orderId === dailyRiderOrder.id)
+    assert.ok(riderReportRow)
+    assert.equal(riderReportRow.status, 'paid')
+    assert.equal(riderReportRow.handledBy, rider.name)
+    assert.equal(Number(riderReportRow.riderAmount), 60)
+    assert.ok(String(riderReportRow.productSummary).includes(stockProduct.name))
+    assert.ok(Number(dailyReport.summary.totalRiderAmount) >= 60)
 
     // The COD separation-of-duties scenario above also uses this stock item;
     // take the return baseline only after that independent sale has consumed

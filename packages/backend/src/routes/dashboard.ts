@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { query } from '../db/index.js'
 import { recognizedExpensesSql } from '../lib/expenseRecognition.js'
-import { getUserPermissions } from '../middleware/auth.js'
+import { getUserPermissions, requirePermission } from '../middleware/auth.js'
 import { evaluateOrderItemFromRecords } from '../services/commission.js'
 
 const router = Router()
@@ -96,7 +96,9 @@ function asInteger(value: unknown): number {
 }
 
 function isBusinessDate(value: unknown): value is string {
-  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`))
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false
+  const parsed = new Date(`${value}T00:00:00Z`)
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value
 }
 
 const personalOrderCards: Record<string, { permission: string; title: string; condition: string }> = {
@@ -470,6 +472,75 @@ router.get('/stats', async (req, res) => {
   } catch (err) {
     console.error('Dashboard error:', err)
     res.status(500).json({ error: { message: 'Unable to load dashboard data' } })
+  }
+})
+
+router.get('/daily-whatsapp-report', requirePermission('dashboard', 'personal_orders'), async (req, res) => {
+  try {
+    const reportDate = typeof req.query.date === 'string' ? req.query.date : nairobiDate()
+    if (!isBusinessDate(reportDate)) {
+      return res.status(400).json({ error: { message: 'A valid daily report date is required' } })
+    }
+
+    const [preparedByResult, reportResult] = await Promise.all([
+      query('SELECT full_name FROM users WHERE id = $1', [req.user!.userId]),
+      query(
+        `SELECT o.id AS order_id, o.order_number,
+                CASE WHEN o.delivery_type = 'walk_in' THEN 'Shop collection'
+                  ELSE COALESCE(NULLIF(o.delivery_address, ''), NULLIF(customer.address, ''), 'Location not recorded') END AS location,
+                COALESCE(items.product_summary, 'Items not recorded') AS product_summary,
+                CASE WHEN ${commissionCompletedStatusSql('o')} THEN 'paid' ELSE 'pending_speedaf' END AS report_status,
+                CASE WHEN o.delivery_type = 'rider' THEN COALESCE(rider.name, 'Rider not recorded')
+                  WHEN o.delivery_type = 'courier' THEN COALESCE(courier.name, 'Speedaf')
+                  ELSE 'Shop' END AS handled_by,
+                CASE WHEN o.delivery_type = 'rider' THEN COALESCE(o.delivery_cost, 0) ELSE NULL END AS rider_amount
+           FROM orders o
+           LEFT JOIN customers customer ON customer.id = o.customer_id
+           LEFT JOIN riders rider ON rider.id = o.rider_id
+           LEFT JOIN couriers courier ON courier.id = o.courier_id
+           LEFT JOIN LATERAL (
+             SELECT string_agg(oi.quantity::text || ' x ' || product.name, ', ' ORDER BY product.name) AS product_summary
+               FROM order_items oi
+               JOIN products product ON product.id = oi.product_id
+              WHERE oi.order_id = o.id
+           ) items ON TRUE
+          WHERE o.created_by = $1
+            AND COALESCE(o.sale_date, o.created_at::date) = $2::date
+            AND (
+              ${commissionCompletedStatusSql('o')}
+              OR (o.delivery_type = 'courier' AND o.courier_payment_type = 'cod'
+                  AND o.status NOT IN ('collected_paid', 'cancelled', 'returned'))
+            )
+          ORDER BY CASE WHEN ${commissionCompletedStatusSql('o')} THEN 0 ELSE 1 END,
+                   o.created_at ASC, o.order_number ASC`,
+        [req.user!.userId, reportDate]
+      )
+    ])
+
+    const rows = reportResult.rows.map(row => ({
+      orderId: row.order_id,
+      orderNumber: row.order_number,
+      location: row.location,
+      productSummary: row.product_summary,
+      status: row.report_status,
+      handledBy: row.handled_by,
+      riderAmount: row.rider_amount == null ? null : asNumber(row.rider_amount)
+    }))
+    res.json({
+      reportDate,
+      generatedAt: new Date().toISOString(),
+      preparedBy: preparedByResult.rows[0]?.full_name || 'Attendant',
+      summary: {
+        totalOrders: rows.length,
+        paidOrders: rows.filter(row => row.status === 'paid').length,
+        pendingSpeedafOrders: rows.filter(row => row.status === 'pending_speedaf').length,
+        totalRiderAmount: rows.reduce((total, row) => total + (row.riderAmount || 0), 0)
+      },
+      rows
+    })
+  } catch (err) {
+    console.error('Daily WhatsApp report error:', err)
+    res.status(500).json({ error: { message: 'Unable to load the daily WhatsApp report' } })
   }
 })
 
