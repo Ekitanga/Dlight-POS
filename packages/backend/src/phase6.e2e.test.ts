@@ -381,6 +381,9 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     })
     await advance(stockFromSupplierPreferred.id, ['confirmed', 'delivered'])
     assert.equal(Number((await row('SELECT quantity FROM inventory WHERE product_id=$1', [supplierProduct.id])).quantity), supplierPreferredStockBefore - 1)
+    const sourceReport = await request('GET', `/dashboard/daily-whatsapp-report?date=${isoDate()}`, admin.accessToken)
+    assert.equal(sourceReport.rows.find((item: any) => item.orderId === supplierFromStockedProduct.id)?.sourceSummary, supplier.name)
+    assert.equal(sourceReport.rows.find((item: any) => item.orderId === stockFromSupplierPreferred.id)?.sourceSummary, 'Shop stock')
     await assertGlobalIntegrity()
   })
 
@@ -1273,6 +1276,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(riderReportRow.status, 'paid')
     assert.equal(riderReportRow.handledBy, rider.name)
     assert.equal(Number(riderReportRow.riderAmount), 60)
+    assert.equal(riderReportRow.sourceSummary, 'Shop stock')
     assert.ok(String(riderReportRow.productSummary).includes(stockProduct.name))
     assert.ok(Number(dailyReport.summary.totalRiderAmount) >= 60)
 

@@ -115,6 +115,7 @@ interface DailyWhatsappReportRow {
   orderNumber: string
   location: string
   productSummary: string
+  sourceSummary: string
   status: 'paid' | 'pending_speedaf'
   handledBy: string
   riderAmount: number | null
@@ -252,10 +253,11 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
   const left = 48
   const right = width - 48
   const columns = {
-    location: { x: left, width: 250 },
-    items: { x: 298, width: 470 },
-    status: { x: 768, width: 210 },
-    handler: { x: 978, width: 210 },
+    location: { x: left, width: 220 },
+    items: { x: 268, width: 335 },
+    source: { x: 603, width: 205 },
+    status: { x: 808, width: 190 },
+    handler: { x: 998, width: 190 },
     amount: { x: 1188, width: 164 }
   }
   const measurementCanvas = document.createElement('canvas')
@@ -264,9 +266,10 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
   const preparedRows = rows.map(row => {
     const locationLines = wrapCanvasText(measurementContext, row.location, columns.location.width - 28, 2)
     const itemLines = wrapCanvasText(measurementContext, row.productSummary, columns.items.width - 28, 5)
+    const sourceLines = wrapCanvasText(measurementContext, row.sourceSummary, columns.source.width - 28, 3)
     const handlerLines = wrapCanvasText(measurementContext, row.handledBy, columns.handler.width - 28, 2)
-    const height = Math.max(78, locationLines.length * 27 + 50, itemLines.length * 27 + 28, handlerLines.length * 27 + 28)
-    return { row, locationLines, itemLines, handlerLines, height }
+    const height = Math.max(78, locationLines.length * 27 + 50, itemLines.length * 27 + 28, sourceLines.length * 27 + 28, handlerLines.length * 27 + 28)
+    return { row, locationLines, itemLines, sourceLines, handlerLines, height }
   })
   const headerHeight = 250
   const tableHeaderHeight = 58
@@ -315,6 +318,7 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
   context.font = 'bold 18px Arial, sans-serif'
   context.fillText('Location / Order', columns.location.x + 14, y + 36)
   context.fillText('Item(s)', columns.items.x + 14, y + 36)
+  context.fillText('Supplier', columns.source.x + 14, y + 36)
   context.fillText('Status', columns.status.x + 14, y + 36)
   context.fillText('Rider / Courier', columns.handler.x + 14, y + 36)
   context.textAlign = 'right'
@@ -322,7 +326,7 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
   context.textAlign = 'left'
   y += tableHeaderHeight
 
-  preparedRows.forEach(({ row, locationLines, itemLines, handlerLines, height: rowHeight }, index) => {
+  preparedRows.forEach(({ row, locationLines, itemLines, sourceLines, handlerLines, height: rowHeight }, index) => {
     context.fillStyle = index % 2 === 0 ? '#ffffff' : '#fafafa'
     context.fillRect(left, y, right - left, rowHeight)
     context.strokeStyle = '#e5e7eb'
@@ -340,6 +344,7 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
     context.fillStyle = '#111827'
     context.font = '20px Arial, sans-serif'
     drawCanvasLines(context, itemLines, columns.items.x + 14, y + 30, 27)
+    drawCanvasLines(context, sourceLines, columns.source.x + 14, y + 30, 27)
 
     const statusLabel = dailyReportStatusLabel(row.status)
     context.fillStyle = row.status === 'paid' ? '#dcfce7' : '#fef3c7'
@@ -358,7 +363,7 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
   })
 
   context.strokeStyle = '#d1d5db'
-  ;[columns.items.x, columns.status.x, columns.handler.x, columns.amount.x].forEach(x => {
+  ;[columns.items.x, columns.source.x, columns.status.x, columns.handler.x, columns.amount.x].forEach(x => {
     context.beginPath()
     context.moveTo(x, headerHeight)
     context.lineTo(x, y)
@@ -997,11 +1002,12 @@ export function Dashboard() {
                   <div className="text-right text-xs text-slate-300"><p>{formatDisplayDate(dailyReport.reportDate)}</p><p>Prepared by {dailyReport.preparedBy}</p></div>
                 </div>
                 <div className="overflow-x-auto">
-                  <table className="w-full min-w-[820px] text-sm">
+                  <table className="w-full min-w-[980px] text-sm">
                     <thead className="bg-muted/70">
                       <tr>
                         <th className="px-4 py-3 text-left">Location / Order</th>
                         <th className="px-4 py-3 text-left">Item(s)</th>
+                        <th className="px-4 py-3 text-left">Supplier</th>
                         <th className="px-4 py-3 text-left">Status</th>
                         <th className="px-4 py-3 text-left">Rider / Courier</th>
                         <th className="px-4 py-3 text-right">Rider amount</th>
@@ -1012,6 +1018,7 @@ export function Dashboard() {
                         <tr key={row.orderId} className="border-t align-top">
                           <td className="px-4 py-3 font-medium">{row.location}<span className="mt-1 block text-xs font-normal text-muted-foreground">{row.orderNumber}</span></td>
                           <td className="max-w-md px-4 py-3">{row.productSummary}</td>
+                          <td className="px-4 py-3">{row.sourceSummary}</td>
                           <td className="px-4 py-3"><span className={`inline-flex whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium ${row.status === 'paid' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{dailyReportStatusLabel(row.status)}</span></td>
                           <td className="px-4 py-3">{row.handledBy}</td>
                           <td className="px-4 py-3 text-right">{row.riderAmount == null ? '-' : formatMoney(row.riderAmount)}</td>

@@ -62,8 +62,8 @@ async function openMockedDashboard(page: Page, role: 'admin' | 'attendant') {
         preparedBy: 'Ann Attendant',
         summary: { totalOrders: 2, paidOrders: 1, pendingSpeedafOrders: 1, totalRiderAmount: 200 },
         rows: [
-          { orderId: 'order-1', orderNumber: 'ORD-001', location: 'Westlands', productSummary: '1 x Perfume', status: 'paid', handledBy: 'Brian', riderAmount: 200 },
-          { orderId: 'order-2', orderNumber: 'ORD-002', location: 'Mombasa', productSummary: '2 x Perfume', status: 'pending_speedaf', handledBy: 'Speedaf', riderAmount: null }
+          { orderId: 'order-1', orderNumber: 'ORD-001', location: 'Westlands', productSummary: '1 x Perfume', sourceSummary: 'Shop stock', status: 'paid', handledBy: 'Brian', riderAmount: 200 },
+          { orderId: 'order-2', orderNumber: 'ORD-002', location: 'Mombasa', productSummary: '2 x Perfume', sourceSummary: 'Scent Supplier', status: 'pending_speedaf', handledBy: 'Speedaf', riderAmount: null }
         ]
       } })
     }
@@ -96,6 +96,9 @@ test('keeps the attendant dashboard compact while leaving reports obvious', asyn
   await expect(page.getByRole('columnheader', { name: 'Location / Order' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Preview' }).click()
   await expect(page.getByRole('columnheader', { name: 'Location / Order' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Supplier' })).toBeVisible()
+  await expect(page.getByText('Shop stock', { exact: true })).toBeVisible()
+  await expect(page.getByText('Scent Supplier', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: /Hide preview/ }).click()
   await expect(page.getByRole('columnheader', { name: 'Location / Order' })).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)

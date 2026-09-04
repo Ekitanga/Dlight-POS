@@ -489,6 +489,7 @@ router.get('/daily-whatsapp-report', requirePermission('dashboard', 'personal_or
                 CASE WHEN o.delivery_type = 'walk_in' THEN 'Shop collection'
                   ELSE COALESCE(NULLIF(o.delivery_address, ''), NULLIF(customer.address, ''), 'Location not recorded') END AS location,
                 COALESCE(items.product_summary, 'Items not recorded') AS product_summary,
+                COALESCE(items.source_summary, 'Shop stock') AS source_summary,
                 CASE WHEN ${commissionCompletedStatusSql('o')} THEN 'paid' ELSE 'pending_speedaf' END AS report_status,
                 CASE WHEN o.delivery_type = 'rider' THEN COALESCE(rider.name, 'Rider not recorded')
                   WHEN o.delivery_type = 'courier' THEN COALESCE(courier.name, 'Speedaf')
@@ -499,9 +500,17 @@ router.get('/daily-whatsapp-report', requirePermission('dashboard', 'personal_or
            LEFT JOIN riders rider ON rider.id = o.rider_id
            LEFT JOIN couriers courier ON courier.id = o.courier_id
            LEFT JOIN LATERAL (
-             SELECT string_agg(oi.quantity::text || ' x ' || product.name, ', ' ORDER BY product.name) AS product_summary
+             SELECT string_agg(oi.quantity::text || ' x ' || product.name, ', ' ORDER BY product.name) AS product_summary,
+                    string_agg(DISTINCT CASE
+                      WHEN oi.fulfillment_type = 'hybrid' OR (oi.internal_quantity > 0 AND oi.supplier_quantity > 0)
+                        THEN 'Shop stock + ' || COALESCE(item_supplier.name, 'Supplier not recorded')
+                      WHEN oi.fulfillment_type = 'supplier' OR oi.supplier_quantity > 0
+                        THEN COALESCE(item_supplier.name, 'Supplier not recorded')
+                      ELSE 'Shop stock'
+                    END, ', ') AS source_summary
                FROM order_items oi
                JOIN products product ON product.id = oi.product_id
+               LEFT JOIN suppliers item_supplier ON item_supplier.id = oi.supplier_id
               WHERE oi.order_id = o.id
            ) items ON TRUE
           WHERE o.created_by = $1
@@ -522,6 +531,7 @@ router.get('/daily-whatsapp-report', requirePermission('dashboard', 'personal_or
       orderNumber: row.order_number,
       location: row.location,
       productSummary: row.product_summary,
+      sourceSummary: row.source_summary,
       status: row.report_status,
       handledBy: row.handled_by,
       riderAmount: row.rider_amount == null ? null : asNumber(row.rider_amount)
