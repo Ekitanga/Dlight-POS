@@ -21,6 +21,7 @@ import {
   CheckCircle2,
   FileText,
   History,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Download,
@@ -392,12 +393,12 @@ function commissionStatusClass(status: string | null | undefined): string {
 function StatsCard({ title, subtitle, description, value, icon, trend, urgent, onClick }: StatsCardProps) {
   const content = (
     <>
-      <div className="flex items-start justify-between">
-        <div className="flex-1">
-          <p className="text-xs text-muted-foreground sm:text-sm">{title}</p>
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-[11px] leading-snug text-muted-foreground sm:text-sm">{title}</p>
           {subtitle && <p className="mt-1 hidden text-xs text-muted-foreground sm:block">{subtitle}</p>}
           {description && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>}
-          <p className={`mt-1 break-words text-lg font-bold sm:text-2xl ${urgent ? 'text-destructive' : ''}`}>{value}</p>
+          <p className={`mt-1 break-words text-base font-bold leading-tight sm:text-xl lg:text-2xl ${urgent ? 'text-destructive' : ''}`}>{value}</p>
           {trend && (
             <div className="flex items-center gap-1 mt-2">
               {trend.positive ? (
@@ -410,7 +411,7 @@ function StatsCard({ title, subtitle, description, value, icon, trend, urgent, o
               </span>
             </div>
           )}
-          {onClick && <span className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-primary">View details <ChevronRight className="h-3 w-3" /></span>}
+          {onClick && <span className="mt-2 inline-flex items-center gap-0.5 text-[11px] font-medium text-primary sm:text-xs">View details <ChevronRight className="h-3 w-3" /></span>}
         </div>
         <div className={`hidden h-12 w-12 rounded-lg sm:flex items-center justify-center ${
           urgent ? 'bg-destructive/10 text-destructive' : 'bg-primary/10 text-primary'
@@ -421,8 +422,8 @@ function StatsCard({ title, subtitle, description, value, icon, trend, urgent, o
     </>
   )
   return onClick
-    ? <button type="button" onClick={onClick} title={`View ${title}`} className="h-full w-full rounded-lg border bg-card p-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:p-5">{content}</button>
-    : <div className="h-full rounded-lg border bg-card p-3 sm:p-5">{content}</div>
+    ? <button type="button" onClick={onClick} title={`View ${title}`} className="h-full min-w-0 w-full rounded-lg border bg-card p-3 text-left transition-all hover:border-primary/50 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary sm:p-4">{content}</button>
+    : <div className="h-full min-w-0 rounded-lg border bg-card p-3 sm:p-4">{content}</div>
 }
 
 function MobileDetail({ label, children, full = false }: { label: string; children: React.ReactNode; full?: boolean }) {
@@ -697,6 +698,7 @@ export function Dashboard() {
   const [commissionHistoryTo, setCommissionHistoryTo] = useState(() => today.slice(0, 7))
   const [dailyReportDate, setDailyReportDate] = useState(today)
   const [dailyReportDownloading, setDailyReportDownloading] = useState(false)
+  const [dailyReportPreviewOpen, setDailyReportPreviewOpen] = useState(false)
   const [drilldownSelection, setDrilldownSelection] = useState<DrilldownSelection | null>(null)
   const [drilldownDateFrom, setDrilldownDateFrom] = useState(today)
   const [drilldownDateTo, setDrilldownDateTo] = useState(today)
@@ -907,7 +909,7 @@ export function Dashboard() {
   }
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-6 sm:space-y-8">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
         <div>
           <h1 className="text-2xl font-bold">Dashboard</h1>
@@ -927,7 +929,7 @@ export function Dashboard() {
       {!isAdministrativeRole && (canPersonalSales || canPersonalOrders || canPersonalSpeedaf) && (
         <section className="space-y-3">
           <div><h2 className="text-lg font-semibold">My activity</h2><p className="text-sm text-muted-foreground">Sales and orders attributed to your account</p></div>
-          <div className="grid grid-cols-1 gap-3 min-[430px]:grid-cols-2 sm:gap-4 lg:grid-cols-4">
+          <div data-testid="personal-stats-grid" className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4 lg:gap-4">
             {canPersonalSales && <StatsCard title="My sales today" value={formatMoney(stats?.myTodaySales)} icon={<DollarSign className="h-6 w-6" />} onClick={() => openDrilldown('my_sales_today', 'My completed sales today')} />}
             {canPersonalSales && <StatsCard title="My sales — selected period" value={formatMoney(stats?.myPeriodSales)} icon={<TrendingUp className="h-6 w-6" />} onClick={() => openDrilldown('my_sales_period', 'My completed sales for the selected period')} />}
             {canPersonalOrders && <StatsCard title="My orders — selected period" value={stats?.myPeriodOrders || 0} icon={<Package className="h-6 w-6" />} onClick={() => openDrilldown('my_orders_period', 'My orders for the selected period')} />}
@@ -940,49 +942,59 @@ export function Dashboard() {
 
       {!isAdministrativeRole && canPersonalOrders && (
         <section className="space-y-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <h2 className="text-lg font-semibold">Daily WhatsApp report</h2>
-              <p className="text-sm text-muted-foreground">A simple image of your completed orders and Speedaf COD orders for one sale date.</p>
-            </div>
-            <div className="flex flex-col gap-2 min-[430px]:flex-row min-[430px]:items-end">
-              <label className="text-xs font-medium text-muted-foreground">
-                Report date
-                <input type="date" value={dailyReportDate} max={today} onChange={event => setDailyReportDate(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground" />
-              </label>
-              <button
-                type="button"
-                onClick={downloadDailyReport}
-                disabled={dailyReportDownloading || dailyReportLoading || !dailyReport?.rows.length}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Download className="h-4 w-4" />
-                {dailyReportDownloading ? 'Preparing image...' : 'Download image'}
-              </button>
-            </div>
+          <div>
+            <h2 className="text-lg font-semibold">Daily WhatsApp report</h2>
+            <p className="text-sm text-muted-foreground">Download a simple dated image of completed and pending Speedaf orders.</p>
           </div>
-
           <div className="overflow-hidden rounded-lg border bg-card">
-            <div className="border-b bg-slate-950 px-4 py-4 text-white">
-              <p className="text-xs font-semibold tracking-wider text-primary">DLIGHT GIFTSHOP</p>
-              <div className="mt-1 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-                <div><h3 className="text-lg font-semibold">Daily Order Report</h3><p className="text-sm text-slate-300">{formatDisplayDate(dailyReport?.reportDate || dailyReportDate)}</p></div>
-                {dailyReport && <p className="text-xs text-slate-300">Prepared by {dailyReport.preparedBy}</p>}
+            <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-end sm:justify-between sm:p-4">
+              <div className="flex flex-col gap-2 min-[430px]:flex-row min-[430px]:items-end">
+                <label className="text-xs font-medium text-muted-foreground">
+                  Report date
+                  <input type="date" value={dailyReportDate} max={today} onChange={event => { setDailyReportDate(event.target.value); setDailyReportPreviewOpen(false) }} className="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground" />
+                </label>
+                {dailyReport?.rows.length ? (
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 pb-1 text-xs text-muted-foreground">
+                    <span><strong className="text-foreground">{dailyReport.summary.totalOrders}</strong> orders</span>
+                    <span><strong className="text-emerald-700">{dailyReport.summary.paidOrders}</strong> Paid</span>
+                    <span><strong className="text-amber-700">{dailyReport.summary.pendingSpeedafOrders}</strong> Pending Speedaf</span>
+                    <span>Riders <strong className="text-foreground">{formatMoney(dailyReport.summary.totalRiderAmount)}</strong></span>
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDailyReportPreviewOpen(open => !open)}
+                  disabled={dailyReportLoading || !dailyReport?.rows.length}
+                  aria-expanded={dailyReportPreviewOpen}
+                  className="inline-flex flex-1 items-center justify-center gap-1 rounded-lg border px-3 py-2 text-sm font-medium disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
+                >
+                  {dailyReportPreviewOpen ? 'Hide preview' : 'Preview'}
+                  <ChevronDown className={`h-4 w-4 transition-transform ${dailyReportPreviewOpen ? 'rotate-180' : ''}`} />
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadDailyReport}
+                  disabled={dailyReportDownloading || dailyReportLoading || !dailyReport?.rows.length}
+                  className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
+                >
+                  <Download className="h-4 w-4" />
+                  {dailyReportDownloading ? 'Preparing image...' : 'Download image'}
+                </button>
               </div>
             </div>
             {dailyReportError ? (
-              <div className="p-5 text-sm text-destructive">The daily report could not be loaded. Please try again.</div>
+              <div className="border-t p-4 text-sm text-destructive">The daily report could not be loaded. Please try again.</div>
             ) : dailyReportLoading ? (
-              <div className="p-6 text-center text-sm text-muted-foreground">Loading daily report...</div>
+              <div className="border-t p-4 text-center text-sm text-muted-foreground">Loading daily report...</div>
             ) : !dailyReport?.rows.length ? (
-              <div className="p-6 text-center text-sm text-muted-foreground">No completed or pending Speedaf orders were found for this date.</div>
-            ) : (
+              <div className="border-t p-4 text-center text-sm text-muted-foreground">No completed or pending Speedaf orders were found for this date.</div>
+            ) : dailyReportPreviewOpen ? (
               <>
-                <div className="flex flex-wrap gap-x-5 gap-y-1 border-b bg-primary/5 px-4 py-2 text-xs font-medium text-muted-foreground">
-                  <span>{dailyReport.summary.totalOrders} orders</span>
-                  <span>{dailyReport.summary.paidOrders} Paid</span>
-                  <span>{dailyReport.summary.pendingSpeedafOrders} Pending Speedaf</span>
-                  <span>Rider amount {formatMoney(dailyReport.summary.totalRiderAmount)}</span>
+                <div className="flex items-center justify-between gap-3 border-t bg-slate-950 px-4 py-3 text-white">
+                  <div><p className="text-xs font-semibold tracking-wider text-primary">DLIGHT GIFTSHOP</p><h3 className="font-semibold">Daily Order Report</h3></div>
+                  <div className="text-right text-xs text-slate-300"><p>{formatDisplayDate(dailyReport.reportDate)}</p><p>Prepared by {dailyReport.preparedBy}</p></div>
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[820px] text-sm">
@@ -1010,7 +1022,7 @@ export function Dashboard() {
                 </div>
                 {dailyReport.rows.length > DAILY_REPORT_ROWS_PER_IMAGE && <p className="border-t px-4 py-2 text-xs text-muted-foreground">The download will be split into {Math.ceil(dailyReport.rows.length / DAILY_REPORT_ROWS_PER_IMAGE)} readable images.</p>}
               </>
-            )}
+            ) : null}
           </div>
         </section>
       )}
@@ -1018,7 +1030,7 @@ export function Dashboard() {
       {(canManagementSales || canManagementProfit || canManagementExpenses || canManagementSuppliers || canManagementRiders || canManagementInventory) && (
         <section className="space-y-3">
         <div><h2 className="text-lg font-semibold">Business overview</h2><p className="text-sm text-muted-foreground">Company-wide figures available to management</p></div>
-      <div className="grid grid-cols-1 gap-3 min-[430px]:grid-cols-2 sm:gap-4 lg:grid-cols-4">
+      <div data-testid="business-stats-grid" className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4 lg:gap-4">
         {canManagementInventory && (
         <StatsCard
           title="Shop Stock Value"
@@ -1218,7 +1230,7 @@ export function Dashboard() {
                 <h3 className="text-sm font-semibold">My commission — selected period</h3>
                 <p className="mt-1 text-xs text-muted-foreground">{formatDisplayDate(commissionSummary.dateFrom || dateFrom)} to {formatDisplayDate(commissionSummary.dateTo || dateTo)}</p>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div data-testid="personal-commission-grid" className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
                 <StatsCard title="Recorded" value={formatMoney(commissionSummary.grossEarned)} icon={<Wallet className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_recorded', 'My recorded commission sales')} />
                 <StatsCard title="Reversals" value={formatMoney(commissionSummary.reversals)} icon={<TrendingDown className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_reversals', 'My commission reversals')} />
                 <StatsCard title="Balance" subtitle={Number(commissionSummary.carryForwardCredits || 0) > 0 ? `${formatMoney(commissionSummary.carryForwardCredits)} relates to an earlier earning period` : 'Commission recorded for this earning period'} value={formatMoney(commissionSummary.netCommission)} icon={<TrendingUp className="h-5 w-5" />} onClick={() => openDrilldown('my_commission_balance', 'My commission balance breakdown')} />
@@ -1336,7 +1348,7 @@ export function Dashboard() {
                   {formatDisplayDate(commissionRange.dateFrom)} to {formatDisplayDate(commissionRange.dateTo)} · {managementCommission.orderCount.toLocaleString()} order{managementCommission.orderCount === 1 ? '' : 's'} · {managementCommission.itemCount.toLocaleString()} eligible item{managementCommission.itemCount === 1 ? '' : 's'}
                 </p>
               </div>
-              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div data-testid="company-commission-grid" className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
                 <StatsCard title="Recorded" subtitle="Commission earned in this period" value={formatMoney(managementCommission.totalEarned)} icon={<Wallet className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_recorded', 'Company recorded commission sales')} />
                 <StatsCard title="Pending approval" subtitle="Recorded and awaiting approval" value={formatMoney(Math.max(0, managementCommission.pendingAmount || 0))} icon={<History className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_pending', 'Commission pending approval')} />
                 <StatsCard title="Approved for settlement" subtitle="Approved but not yet settled" value={formatMoney(managementCommission.approvedPayable ?? managementCommission.approvedUnpaid ?? 0)} icon={<CheckCircle2 className="h-5 w-5" />} onClick={() => openManagementCommissionDrilldown('company_commission_approved', 'Commission approved for settlement')} />
@@ -1413,9 +1425,9 @@ export function Dashboard() {
             Selected-period performance
           </h2>
           {(stats?.periodSales || 0) === 0 && (stats?.periodExpenses || 0) === 0 ? (
-            <div className="h-64 flex items-center justify-center text-muted-foreground bg-muted/30 rounded-lg">No data available</div>
+            <div className="flex h-40 items-center justify-center rounded-lg bg-muted/30 text-muted-foreground sm:h-52 lg:h-64">No data available</div>
           ) : (
-            <div className="flex h-64 flex-col justify-center gap-6 rounded-lg bg-muted/20 p-5" aria-label="Sales and expenses chart">
+            <div className="flex h-40 flex-col justify-center gap-4 rounded-lg bg-muted/20 p-4 sm:h-52 lg:h-64 lg:gap-6 lg:p-5" aria-label="Sales and expenses chart">
               {[
                 ...(canManagementSales ? [['Sales', stats?.periodSales || 0, 'bg-primary']] : []),
                 ...(canManagementExpenses ? [['Expenses', stats?.periodExpenses || 0, 'bg-destructive']] : [])
@@ -1435,9 +1447,9 @@ export function Dashboard() {
             Order Status Distribution
           </h2>
           {(stats?.periodOrders || 0) === 0 ? (
-            <div className="h-64 flex items-center justify-center text-muted-foreground bg-muted/30 rounded-lg">No data available</div>
+            <div className="flex h-40 items-center justify-center rounded-lg bg-muted/30 text-muted-foreground sm:h-52 lg:h-64">No data available</div>
           ) : (
-            <div className="flex h-64 flex-col justify-center gap-6 rounded-lg bg-muted/20 p-5" aria-label="Order activity chart">
+            <div className="flex h-40 flex-col justify-center gap-4 rounded-lg bg-muted/20 p-4 sm:h-52 lg:h-64 lg:gap-6 lg:p-5" aria-label="Order activity chart">
               {[['Selected period', stats?.periodOrders || 0, 'bg-primary'], ['All active orders', stats?.totalOrders || 0, 'bg-green-600']].map(([label, value, color]) => (
                 <div key={String(label)}>
                   <div className="mb-2 flex justify-between text-sm"><span>{label}</span><strong>{Number(value).toLocaleString()}</strong></div>
