@@ -574,22 +574,27 @@ export function Deliveries() {
           <h1 className="text-2xl font-bold">Deliveries</h1>
           <p className="text-muted-foreground">Track deliveries created from orders</p>
         </div>
-        {hasPermission('cod.remit') && (
-          <button
-            type="button"
-            onClick={() => {
-              setShowBulkPayment(value => !value)
-              setSelectedWorkflowStatus('pending_payment')
-              setSelectedStatus('')
-              setPage(1)
-              setBulkMessage(null)
-            }}
-            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground"
-          >
-            <Banknote className="h-4 w-4" />
-            {showBulkPayment ? 'Close Payment' : 'Record Speedaf Payment'}
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {isManager && hasPermission('cod.view') && (
+            <a href="#speedaf-payment-history" className="rounded-lg border px-4 py-2 text-sm hover:bg-muted/40">Payment history</a>
+          )}
+          {hasPermission('cod.remit') && (
+            <button
+              type="button"
+              onClick={() => {
+                setShowBulkPayment(value => !value)
+                setSelectedWorkflowStatus('pending_payment')
+                setSelectedStatus('')
+                setPage(1)
+                setBulkMessage(null)
+              }}
+              className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground"
+            >
+              <Banknote className="h-4 w-4" />
+              {showBulkPayment ? 'Close Payment' : 'Record Speedaf Payment'}
+            </button>
+          )}
+        </div>
       </div>
 
       {showBulkPayment && hasPermission('cod.remit') && (
@@ -675,115 +680,6 @@ export function Deliveries() {
                   </div>
                 ))}
               </div>
-            </div>
-          )}
-        </section>
-      )}
-
-      {isManager && hasPermission('cod.view') && (
-        <section className="rounded-xl border bg-card">
-          <div className="border-b p-4 sm:p-5">
-            <h2 className="text-lg font-semibold">Recent Speedaf Payments</h2>
-            <p className="text-sm text-muted-foreground">Review recorded bank receipts, Speedaf deductions and every order included in each payment.</p>
-          </div>
-
-          <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5 lg:grid-cols-5">
-            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
-              <div className="text-xs text-muted-foreground">Payments received</div>
-              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.received)}</strong>
-            </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
-              <div className="text-xs text-muted-foreground">Expected from Speedaf</div>
-              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.expected)}</strong>
-            </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
-              <div className="text-xs text-muted-foreground">Speedaf fees</div>
-              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.fees)}</strong>
-            </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
-              <div className="text-xs text-muted-foreground">Orders reconciled</div>
-              <strong className="mt-1 block text-lg">{paymentHistorySummary.orders}</strong>
-            </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('reverted')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
-              <div className="text-xs text-muted-foreground">Reverted payments</div>
-              <strong className="mt-1 block text-lg">{paymentHistorySummary.reverted}</strong>
-            </button>
-          </div>
-
-          <div className="grid gap-3 border-y bg-muted/20 p-4 sm:grid-cols-2 lg:grid-cols-[minmax(220px,1fr)_180px_160px_160px_auto]">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <input
-                value={paymentHistorySearch}
-                onChange={event => setPaymentHistorySearch(event.target.value)}
-                placeholder="Payment, order or tracking number"
-                className="w-full rounded-lg border bg-background py-2 pl-10 pr-3"
-              />
-            </div>
-            <select value={paymentHistoryStatus} onChange={event => setPaymentHistoryStatus(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Filter Speedaf payments by status">
-              <option value="">All payment statuses</option>
-              <option value="approved">Recorded</option>
-              <option value="reverted">Reverted</option>
-              <option value="pending_approval">Earlier uncompleted</option>
-              <option value="rejected">Discarded</option>
-            </select>
-            <input type="date" value={paymentHistoryDateFrom} onChange={event => setPaymentHistoryDateFrom(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date from" />
-            <input type="date" value={paymentHistoryDateTo} onChange={event => setPaymentHistoryDateTo(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date to" />
-            <button type="button" onClick={() => { setPaymentHistorySearch(''); setPaymentHistoryStatus(''); setPaymentHistoryDateFrom(''); setPaymentHistoryDateTo('') }} className="rounded-lg border bg-background px-3 py-2 text-sm">
-              Clear
-            </button>
-          </div>
-
-          {paymentHistoryLoading ? (
-            <div className="p-8 text-center text-sm text-muted-foreground">Loading Speedaf payments...</div>
-          ) : filteredPaymentHistory.length === 0 ? (
-            <div className="p-8 text-center text-sm text-muted-foreground">No Speedaf payments match these filters.</div>
-          ) : (
-            <div className="mobile-scroll-table overflow-x-auto">
-              <table className="w-full min-w-[980px]">
-                <thead className="bg-muted/50">
-                  <tr>
-                    <th className="px-4 py-3 text-left font-medium">Payment</th>
-                    <th className="px-4 py-3 text-left font-medium">Date</th>
-                    <th className="px-4 py-3 text-left font-medium">Received</th>
-                    <th className="px-4 py-3 text-left font-medium">Expected</th>
-                    <th className="px-4 py-3 text-left font-medium">Fee</th>
-                    <th className="px-4 py-3 text-left font-medium">Orders</th>
-                    <th className="px-4 py-3 text-left font-medium">Status</th>
-                    <th className="px-4 py-3 text-left font-medium">Recorded by</th>
-                    <th className="px-4 py-3 text-right font-medium">Details</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredPaymentHistory.map(payment => (
-                    <tr
-                      key={`${payment.source || 'batch'}-${payment.id}`}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setSelectedPayment(payment)}
-                      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setSelectedPayment(payment) }}
-                      className="cursor-pointer border-t hover:bg-muted/40"
-                    >
-                      <td className="px-4 py-3">
-                        <strong>{payment.payment_number || payment.batch_number}</strong>
-                        <span className="mt-0.5 block text-xs text-muted-foreground">{paymentMethodLabel(payment.payment_method)}{payment.external_reference ? ` · ${payment.external_reference}` : ''}</span>
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-3">{displayPaymentDate(payment.payment_date)}</td>
-                      <td className="whitespace-nowrap px-4 py-3 font-medium">{formatMoney(payment.net_amount)}</td>
-                      <td className="whitespace-nowrap px-4 py-3">{formatMoney(payment.gross_amount)}</td>
-                      <td className="whitespace-nowrap px-4 py-3">{formatMoney(payment.fee_amount)}</td>
-                      <td className="px-4 py-3">{payment.allocations.length}</td>
-                      <td className="px-4 py-3">
-                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${payment.status === 'approved' ? 'bg-emerald-100 text-emerald-900' : payment.status === 'reverted' || payment.status === 'rejected' ? 'bg-rose-100 text-rose-900' : 'bg-amber-100 text-amber-900'}`}>
-                          {paymentStatusLabel(payment.status)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3">{payment.created_by_name || '-'}</td>
-                      <td className="px-4 py-3 text-right"><Eye className="ml-auto h-4 w-4 text-primary" /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
             </div>
           )}
         </section>
@@ -1226,6 +1122,114 @@ export function Deliveries() {
           </table>
           {deliveryPage && <Pagination meta={deliveryPage.pagination} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1) }} />}
         </div>
+      )}
+      {isManager && hasPermission('cod.view') && (
+        <section id="speedaf-payment-history" className="rounded-xl border bg-card">
+          <div className="border-b p-4 sm:p-5">
+            <h2 className="text-lg font-semibold">Recent Speedaf Payments</h2>
+            <p className="text-sm text-muted-foreground">Review recorded bank receipts, Speedaf deductions and every order included in each payment.</p>
+          </div>
+
+          <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5 lg:grid-cols-5">
+            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Payments received</div>
+              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.received)}</strong>
+            </button>
+            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Expected from Speedaf</div>
+              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.expected)}</strong>
+            </button>
+            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Speedaf fees</div>
+              <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.fees)}</strong>
+            </button>
+            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Orders reconciled</div>
+              <strong className="mt-1 block text-lg">{paymentHistorySummary.orders}</strong>
+            </button>
+            <button type="button" onClick={() => setPaymentHistoryStatus('reverted')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+              <div className="text-xs text-muted-foreground">Reverted payments</div>
+              <strong className="mt-1 block text-lg">{paymentHistorySummary.reverted}</strong>
+            </button>
+          </div>
+
+          <div className="grid gap-3 border-y bg-muted/20 p-4 sm:grid-cols-2 lg:grid-cols-[minmax(220px,1fr)_180px_160px_160px_auto]">
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={paymentHistorySearch}
+                onChange={event => setPaymentHistorySearch(event.target.value)}
+                placeholder="Payment, order or tracking number"
+                className="w-full rounded-lg border bg-background py-2 pl-10 pr-3"
+              />
+            </div>
+            <select value={paymentHistoryStatus} onChange={event => setPaymentHistoryStatus(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Filter Speedaf payments by status">
+              <option value="">All payment statuses</option>
+              <option value="approved">Recorded</option>
+              <option value="reverted">Reverted</option>
+              <option value="pending_approval">Earlier uncompleted</option>
+              <option value="rejected">Discarded</option>
+            </select>
+            <input type="date" value={paymentHistoryDateFrom} onChange={event => setPaymentHistoryDateFrom(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date from" />
+            <input type="date" value={paymentHistoryDateTo} onChange={event => setPaymentHistoryDateTo(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date to" />
+            <button type="button" onClick={() => { setPaymentHistorySearch(''); setPaymentHistoryStatus(''); setPaymentHistoryDateFrom(''); setPaymentHistoryDateTo('') }} className="rounded-lg border bg-background px-3 py-2 text-sm">
+              Clear
+            </button>
+          </div>
+
+          {paymentHistoryLoading ? (
+            <div className="p-8 text-center text-sm text-muted-foreground">Loading Speedaf payments...</div>
+          ) : filteredPaymentHistory.length === 0 ? (
+            <div className="p-8 text-center text-sm text-muted-foreground">No Speedaf payments match these filters.</div>
+          ) : (
+            <div className="mobile-scroll-table overflow-x-auto">
+              <table className="w-full min-w-[980px]">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="px-4 py-3 text-left font-medium">Payment</th>
+                    <th className="px-4 py-3 text-left font-medium">Date</th>
+                    <th className="px-4 py-3 text-left font-medium">Received</th>
+                    <th className="px-4 py-3 text-left font-medium">Expected</th>
+                    <th className="px-4 py-3 text-left font-medium">Fee</th>
+                    <th className="px-4 py-3 text-left font-medium">Orders</th>
+                    <th className="px-4 py-3 text-left font-medium">Status</th>
+                    <th className="px-4 py-3 text-left font-medium">Recorded by</th>
+                    <th className="px-4 py-3 text-right font-medium">Details</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPaymentHistory.map(payment => (
+                    <tr
+                      key={`${payment.source || 'batch'}-${payment.id}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedPayment(payment)}
+                      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') setSelectedPayment(payment) }}
+                      className="cursor-pointer border-t hover:bg-muted/40"
+                    >
+                      <td className="px-4 py-3">
+                        <strong>{payment.payment_number || payment.batch_number}</strong>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">{paymentMethodLabel(payment.payment_method)}{payment.external_reference ? ` · ${payment.external_reference}` : ''}</span>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3">{displayPaymentDate(payment.payment_date)}</td>
+                      <td className="whitespace-nowrap px-4 py-3 font-medium">{formatMoney(payment.net_amount)}</td>
+                      <td className="whitespace-nowrap px-4 py-3">{formatMoney(payment.gross_amount)}</td>
+                      <td className="whitespace-nowrap px-4 py-3">{formatMoney(payment.fee_amount)}</td>
+                      <td className="px-4 py-3">{payment.allocations.length}</td>
+                      <td className="px-4 py-3">
+                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${payment.status === 'approved' ? 'bg-emerald-100 text-emerald-900' : payment.status === 'reverted' || payment.status === 'rejected' ? 'bg-rose-100 text-rose-900' : 'bg-amber-100 text-amber-900'}`}>
+                          {paymentStatusLabel(payment.status)}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3">{payment.created_by_name || '-'}</td>
+                      <td className="px-4 py-3 text-right"><Eye className="ml-auto h-4 w-4 text-primary" /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       )}
     </div>
   )
