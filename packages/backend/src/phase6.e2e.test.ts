@@ -826,7 +826,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
       delivery_fee_payment_method: 'paid_to_courier', customer_delivery_fee: 350,
       actual_courier_fee: 350, payment_method: 'cash',
       items: [supplierItem(1, 900, 300)]
-    })
+    }, attendant.accessToken)
     await advance(order.id, ['confirmed', 'in_transit'])
     const payable = await row('SELECT id FROM supplier_payables WHERE order_id=$1', [order.id])
     const supplierPayment = await request('POST', `/suppliers/${supplier.id}/payments`, admin.accessToken, {
@@ -835,6 +835,7 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     const customerPayment = await row('SELECT id, amount FROM order_payments WHERE order_id=$1', [order.id])
     const delivery = await row('SELECT id FROM deliveries WHERE order_id=$1', [order.id])
     const item = await row('SELECT id FROM order_items WHERE order_id=$1', [order.id])
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id]), 0)
     await request('PUT', `/orders/${order.id}/courier-cod-correction`, admin.accessToken, {
       reason: 'Customer payment was entered by mistake'
     }, 400)
@@ -856,7 +857,17 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(Number(cod.cod_amount), Number(customerPayment.amount))
     assert.equal(cod.status, 'in_transit')
     assert.equal(cod.tracking_number, 'SPD-P6-PREPAID')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id]), 0)
+    assert.equal((await row('SELECT created_by FROM orders WHERE id=$1', [order.id])).created_by, attendantUser.id)
     await waitForAudit('courier_cod_payment_corrected', order.id)
+    await advance(order.id, ['delivered'])
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id]), 0)
+    await request('POST', `/deliveries/orders/${order.id}/cod`, admin.accessToken, {
+      amount: 900, payment_method: 'bank_transfer', reference: 'COD-CORRECTION-REM-001'
+    }, 201)
+    assert.equal((await row('SELECT status, payment_status FROM orders WHERE id=$1', [order.id])).status, 'collected_paid')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id]), 1)
+    assert.equal((await row("SELECT salesperson_id FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned'", [order.id])).salesperson_id, attendantUser.id)
     await assertGlobalIntegrity()
   })
 
