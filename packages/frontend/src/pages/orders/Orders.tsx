@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
-import { useDeferredValue, useEffect, useState } from 'react'
+import { useDeferredValue, useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import { Check, ChevronDown, Plus, Search, Eye, Edit, Package, X, ExternalLink, RotateCcw, ShieldAlert } from 'lucide-react'
 import { useForm } from 'react-hook-form'
@@ -9,6 +9,7 @@ import { PaginatedResponse, Pagination } from '../../components/Pagination'
 import { DateRangeFilter } from '../../components/DateRangeFilter'
 import { formatMoney } from '../../lib/format'
 import { invalidateCommissionData } from '../../lib/commissionCache'
+import { trackingIsOnlyEdit } from '../../lib/orderEdit'
 
 interface Order {
   id: string
@@ -401,11 +402,9 @@ export function Orders() {
   const [dateTo, setDateTo] = useState(searchParams.get('date_to') || '')
   const [showCreateForm, setShowCreateForm] = useState(false)
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null)
+  const originalEditForm = useRef<OrderFormData | null>(null)
   const [formError, setFormError] = useState('')
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(searchParams.get('order_id'))
-  const [editingTrackingNumber, setEditingTrackingNumber] = useState(false)
-  const [trackingNumberDraft, setTrackingNumberDraft] = useState('')
-  const [trackingNumberError, setTrackingNumberError] = useState('')
   const [selectedStatus, setSelectedStatus] = useState('')
   const [speedafDeliveryConfirmed, setSpeedafDeliveryConfirmed] = useState(false)
   const [completionPaymentMethod, setCompletionPaymentMethod] = useState('cash')
@@ -499,7 +498,6 @@ export function Orders() {
 
   const watchedItems = watch('items') || []
   const deliveryType = watch('delivery_type')
-  const courierTrackingNumber = watch('courier_tracking_number')
   const paymentMethod = watch('payment_method')
   const courierPaymentType = watch('courier_payment_type')
   const deliveryFeePaymentMethod = watch('delivery_fee_payment_method')
@@ -533,6 +531,7 @@ export function Orders() {
 
   const resetOrderForm = () => {
     setEditingOrderId(null)
+    originalEditForm.current = null
     setFormError('')
     reset({
       sale_date: todayDate(),
@@ -595,7 +594,12 @@ export function Orders() {
     mutationFn: async (data: OrderFormData) => {
       if (!editingOrderId) throw new Error('No order selected for editing')
       setFormError('')
-      const response = await axios.put(`/api/orders/${editingOrderId}`, buildOrderPayload(data))
+      const original = originalEditForm.current
+      const response = original && trackingIsOnlyEdit(data, original)
+        ? await axios.put(`/api/orders/${editingOrderId}/tracking-number`, {
+            courier_tracking_number: data.courier_tracking_number.trim()
+          })
+        : await axios.put(`/api/orders/${editingOrderId}`, buildOrderPayload(data))
       return response.data
     },
     onSuccess: () => {
@@ -605,6 +609,7 @@ export function Orders() {
       queryClient.invalidateQueries({ queryKey: ['suppliers'] })
       queryClient.invalidateQueries({ queryKey: ['riders'] })
       queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+      queryClient.invalidateQueries({ queryKey: ['couriers'] })
       queryClient.invalidateQueries({ queryKey: ['receipts'] })
       queryClient.invalidateQueries({ queryKey: ['inventory'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
@@ -614,53 +619,7 @@ export function Orders() {
       resetOrderForm()
     },
     onError: (error: any) => {
-      const message = error.response?.data?.error?.message || error.message || 'Failed to update order'
-      setFormError(message.includes('paid supplier payments')
-        ? `${message} To update tracking, use Save tracking number beside the tracking field.`
-        : message)
-    }
-  })
-
-  const updateTrackingFromEdit = useMutation({
-    mutationFn: async () => {
-      if (!editingOrderId) throw new Error('No order selected for editing')
-      setFormError('')
-      const response = await axios.put(`/api/orders/${editingOrderId}/tracking-number`, {
-        courier_tracking_number: getValues('courier_tracking_number').trim()
-      })
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['orders'] })
-      queryClient.invalidateQueries({ queryKey: ['order-detail', editingOrderId] })
-      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-      queryClient.invalidateQueries({ queryKey: ['couriers'] })
-      setShowCreateForm(false)
-      resetOrderForm()
-    },
-    onError: (error: any) => {
-      setFormError(error.response?.data?.error?.message || error.message || 'Failed to update tracking number')
-    }
-  })
-
-  const updateTrackingNumber = useMutation({
-    mutationFn: async () => {
-      if (!selectedOrderId) throw new Error('No order selected')
-      const response = await axios.put(`/api/orders/${selectedOrderId}/tracking-number`, {
-        courier_tracking_number: trackingNumberDraft.trim()
-      })
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['orders'] })
-      queryClient.invalidateQueries({ queryKey: ['order-detail', selectedOrderId] })
-      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
-      queryClient.invalidateQueries({ queryKey: ['couriers'] })
-      setEditingTrackingNumber(false)
-      setTrackingNumberError('')
-    },
-    onError: (error: any) => {
-      setTrackingNumberError(error.response?.data?.error?.message || error.message || 'Failed to update tracking number')
+      setFormError(error.response?.data?.error?.message || error.message || 'Failed to update order')
     }
   })
 
@@ -837,7 +796,7 @@ export function Orders() {
 
   const canEditOrderDetails = (order: Order) => {
     const isManagement = user?.role === 'admin' || user?.role === 'owner'
-    return isManagement || ['pending', 'confirmed'].includes(simplifiedStatus(order.status, order))
+    return isManagement || ['pending', 'confirmed'].includes(simplifiedStatus(order.status, order)) || order.delivery_type === 'courier'
   }
   const canUpdateOrderStatus = () => hasPermission('orders.status')
 
@@ -870,15 +829,18 @@ export function Orders() {
   const openOrderEdit = (detail: OrderDetail) => {
     const order = detail.order
     const deliveryTypeValue = (order.delivery_type || 'walk_in') as OrderFormData['delivery_type']
-    const paymentMethodValue = order.courier_payment_type === 'cod'
+    const recordedPaymentMethod = order.courier_payment_type === 'cod'
       ? 'pay_on_delivery'
       : ((order.last_payment_method || (order.payment_status === 'pending' ? 'pay_on_delivery' : 'cash')) as OrderFormData['payment_method'])
+    const paymentMethodValue = deliveryTypeValue === 'rider' || (deliveryTypeValue === 'courier' && order.courier_payment_type === 'cod')
+      ? 'pay_on_delivery'
+      : recordedPaymentMethod === 'pay_on_delivery' ? 'cash' : recordedPaymentMethod
 
     setEditingOrderId(order.id)
     setSelectedOrderId(null)
     setShowCreateForm(true)
     setFormError('')
-    reset({
+    const editValues: OrderFormData = {
       sale_date: editableDate(order.sale_date || order.created_at),
       customer_name: order.customer_name || '',
       customer_phone: order.customer_phone || '',
@@ -910,7 +872,9 @@ export function Orders() {
         supplier_id: item.supplier_id || '',
         supplier_cost: Number(item.supplier_cost || 0) || undefined
       }))
-    })
+    }
+    originalEditForm.current = editValues
+    reset(editValues)
   }
 
   const filteredOrders = orders
@@ -972,7 +936,16 @@ export function Orders() {
             </button>
           </div>
 
-          <form onSubmit={handleSubmit(data => editingOrderId ? updateOrder.mutate(data) : createOrder.mutate(data))} className="space-y-6">
+          <form onSubmit={event => {
+            const current = getValues()
+            const original = originalEditForm.current
+            if (editingOrderId && original && trackingIsOnlyEdit(current, original)) {
+              event.preventDefault()
+              updateOrder.mutate(current)
+              return
+            }
+            void handleSubmit(data => editingOrderId ? updateOrder.mutate(data) : createOrder.mutate(data))(event)
+          }} className="space-y-6">
             <section>
               <h3 className="font-medium mb-3">A. Customer Details</h3>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -1085,22 +1058,7 @@ export function Orders() {
                       <option value="">Select courier</option>
                       {couriers.map(courier => <option key={courier.id} value={courier.id}>{courier.name}</option>)}
                     </select>
-                    <div className="space-y-2">
-                      <input {...register('courier_tracking_number')} maxLength={100} className="w-full px-3 py-2 border rounded-lg" placeholder="Tracking number" />
-                      {editingOrderId && (
-                        <div className="space-y-1">
-                          <button
-                            type="button"
-                            onClick={() => updateTrackingFromEdit.mutate()}
-                            disabled={updateTrackingFromEdit.isPending || !courierTrackingNumber?.trim()}
-                            className="rounded-lg border border-primary px-3 py-2 text-sm text-primary disabled:opacity-50"
-                          >
-                            {updateTrackingFromEdit.isPending ? 'Saving tracking...' : 'Save tracking number'}
-                          </button>
-                          <p className="text-xs text-muted-foreground">Saves only the tracking number.</p>
-                        </div>
-                      )}
-                    </div>
+                    <input {...register('courier_tracking_number')} maxLength={100} className="px-3 py-2 border rounded-lg" placeholder="Tracking number" />
                     <label className="text-sm">
                       Actual Courier Fee
                       <input type="number" step="0.01" {...register('actual_courier_fee', { valueAsNumber: true })} className="mt-1 w-full px-3 py-2 border rounded-lg" placeholder="Amount charged by courier" />
@@ -1581,41 +1539,6 @@ export function Orders() {
                       {selectedOrderDetail.order.rider_name || selectedOrderDetail.order.courier_name || 'Walk-in'}
                     </p>
                     <OrderTrackingLink order={selectedOrderDetail.order} />
-                    {selectedOrderDetail.order.delivery_type === 'courier' && (isAdminOrOwner || hasPermission('orders.edit')) && (
-                      editingTrackingNumber ? (
-                        <form
-                          className="mt-2 space-y-2"
-                          onSubmit={event => { event.preventDefault(); setTrackingNumberError(''); updateTrackingNumber.mutate() }}
-                        >
-                          <label className="block text-xs" htmlFor="order-tracking-number">Courier tracking number</label>
-                          <input
-                            id="order-tracking-number"
-                            value={trackingNumberDraft}
-                            onChange={event => setTrackingNumberDraft(event.target.value)}
-                            maxLength={100}
-                            className="w-full rounded-lg border bg-background px-2 py-1 text-sm"
-                            placeholder="Tracking number"
-                          />
-                          {trackingNumberError && <p className="text-xs text-destructive">{trackingNumberError}</p>}
-                          <div className="flex gap-2">
-                            <button type="submit" disabled={updateTrackingNumber.isPending || !trackingNumberDraft.trim()} className="rounded-lg bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50">Save tracking</button>
-                            <button type="button" onClick={() => { setEditingTrackingNumber(false); setTrackingNumberError('') }} className="rounded-lg border px-2 py-1 text-xs">Cancel</button>
-                          </div>
-                        </form>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setTrackingNumberDraft(selectedOrderDetail.order.courier_tracking_number || '')
-                            setTrackingNumberError('')
-                            setEditingTrackingNumber(true)
-                          }}
-                          className="mt-2 text-xs text-primary hover:underline"
-                        >
-                          Update tracking number
-                        </button>
-                      )
-                    )}
                   </div>
                 </div>
 
