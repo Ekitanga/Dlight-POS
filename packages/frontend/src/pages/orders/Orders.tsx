@@ -9,7 +9,7 @@ import { PaginatedResponse, Pagination } from '../../components/Pagination'
 import { DateRangeFilter } from '../../components/DateRangeFilter'
 import { formatMoney } from '../../lib/format'
 import { invalidateCommissionData } from '../../lib/commissionCache'
-import { orderEditHasChanges, trackingIsOnlyEdit } from '../../lib/orderEdit'
+import { courierCodCorrectionIsOnlyEdit, orderEditHasChanges, trackingIsOnlyEdit } from '../../lib/orderEdit'
 
 interface Order {
   id: string
@@ -595,11 +595,25 @@ export function Orders() {
       if (!editingOrderId) throw new Error('No order selected for editing')
       setFormError('')
       const original = originalEditForm.current
-      const response = original && trackingIsOnlyEdit(data, original)
-        ? await axios.put(`/api/orders/${editingOrderId}/tracking-number`, {
-            courier_tracking_number: data.courier_tracking_number.trim()
-          })
-        : await axios.put(`/api/orders/${editingOrderId}`, buildOrderPayload(data))
+      let response
+      if (original && trackingIsOnlyEdit(data, original)) {
+        response = await axios.put(`/api/orders/${editingOrderId}/tracking-number`, {
+          courier_tracking_number: data.courier_tracking_number.trim()
+        })
+      } else if (original && courierCodCorrectionIsOnlyEdit(data, original)) {
+        if (!isAdminOrOwner) throw new Error('An admin or owner must correct a recorded customer payment before changing this order to Speedaf COD')
+        const reason = window.prompt('Why was the customer payment recorded when no payment was received? This reason will be saved in the audit log.')?.trim()
+        if (!reason) throw new Error('COD correction cancelled: a reason is required')
+        if (reason.length < 10) throw new Error('Give a correction reason of at least 10 characters')
+        const confirmed = window.confirm('Confirm that the shop did not receive the recorded item payment. This will reverse that customer payment record and make Speedaf collect the item amount on delivery. The supplier payment will stay intact. Continue?')
+        if (!confirmed) throw new Error('COD correction cancelled')
+        response = await axios.put(`/api/orders/${editingOrderId}/courier-cod-correction`, {
+          reason,
+          confirm_customer_payment_not_received: true
+        })
+      } else {
+        response = await axios.put(`/api/orders/${editingOrderId}`, buildOrderPayload(data))
+      }
       return response.data
     },
     onSuccess: () => {
@@ -944,7 +958,7 @@ export function Orders() {
               setFormError('No changes to save')
               return
             }
-            if (editingOrderId && original && trackingIsOnlyEdit(current, original)) {
+            if (editingOrderId && original && (trackingIsOnlyEdit(current, original) || courierCodCorrectionIsOnlyEdit(current, original))) {
               event.preventDefault()
               updateOrder.mutate(current)
               return

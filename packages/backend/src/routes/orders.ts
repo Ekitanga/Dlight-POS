@@ -951,6 +951,92 @@ router.put('/:id/tracking-number', async (req, res) => {
   }
 })
 
+router.put('/:id/courier-cod-correction', requireAdmin, async (req, res) => {
+  try {
+    const reason = String(req.body?.reason || '').trim()
+    if (req.body?.confirm_customer_payment_not_received !== true) {
+      return res.status(400).json({ error: { message: 'Confirm that the recorded customer payment was not actually received' } })
+    }
+    if (reason.length < 10 || reason.length > 1000) {
+      return res.status(400).json({ error: { message: 'Give a correction reason between 10 and 1000 characters' } })
+    }
+
+    const correctedOrder = await transaction(async (client) => {
+      const orderResult = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [req.params.id])
+      const order = orderResult.rows[0]
+      if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 })
+      if (order.delivery_type !== 'courier' || order.courier_payment_type !== 'prepaid') {
+        throw Object.assign(new Error('Only a prepaid courier order can be corrected to courier COD'), { statusCode: 409 })
+      }
+      if (!['pending', 'confirmed', 'in_transit'].includes(normalizedWorkflowStatus(order.status))) {
+        throw Object.assign(new Error('Only an active order before delivery can be corrected to courier COD'), { statusCode: 409 })
+      }
+      if (!isSpeedafPassThroughFee(order.delivery_fee_payment_method) || toNumber(order.delivery_fee_paid_amount) !== 0) {
+        throw Object.assign(new Error('This order has a shop-handled delivery fee; review that payment separately before changing item COD'), { statusCode: 409 })
+      }
+
+      const payments = await client.query('SELECT * FROM order_payments WHERE order_id = $1 FOR UPDATE', [order.id])
+      if (
+        payments.rows.length !== 1 ||
+        String(payments.rows[0].reference || '').trim() ||
+        Math.abs(toNumber(payments.rows[0].amount) - toNumber(order.subtotal)) > 0.005 ||
+        Math.abs(toNumber(order.paid_amount) - toNumber(order.subtotal)) > 0.005 ||
+        order.payment_status !== 'paid'
+      ) {
+        throw Object.assign(new Error('This order has customer payment records that require individual review before changing item COD'), { statusCode: 409 })
+      }
+      const payment = payments.rows[0]
+      const linkedRecords = await client.query(
+        `SELECT
+           (SELECT COUNT(*)::int FROM customer_credits WHERE order_id = $1) AS credits,
+           (SELECT COUNT(*)::int FROM order_refunds WHERE order_id = $1) AS refunds,
+           (SELECT COUNT(*)::int FROM cod_collections WHERE order_id = $1) AS cod,
+           (SELECT COUNT(*)::int FROM commission_transactions WHERE order_id = $1 AND transaction_status <> 'reversed') AS commissions`,
+        [order.id]
+      )
+      if (Object.values(linkedRecords.rows[0]).some(count => Number(count) > 0)) {
+        throw Object.assign(new Error('This order has linked customer, COD, refund, or commission records that require review before changing item COD'), { statusCode: 409 })
+      }
+      const deliveryResult = await client.query('SELECT * FROM deliveries WHERE order_id = $1 FOR UPDATE', [order.id])
+      const delivery = deliveryResult.rows[0]
+      if (!delivery || delivery.courier_id !== order.courier_id) {
+        throw Object.assign(new Error('Courier delivery record needs review before changing item COD'), { statusCode: 409 })
+      }
+
+      await client.query('DELETE FROM order_payments WHERE id = $1', [payment.id])
+      const updatedOrder = await client.query(
+        `UPDATE orders SET courier_payment_type = 'cod', paid_amount = 0,
+           payment_status = 'pending', updated_at = NOW() WHERE id = $1 RETURNING *`,
+        [order.id]
+      )
+      await client.query("UPDATE deliveries SET courier_payment_type = 'cod' WHERE id = $1", [delivery.id])
+      const cod = await client.query(
+        `INSERT INTO cod_collections (order_id, courier_id, tracking_number, cod_amount, status, notes, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [order.id, order.courier_id, order.courier_tracking_number, order.subtotal,
+          codStatusForOrder(order.status) || 'assigned_to_courier', `Corrected from prepaid: ${reason}`, req.user?.userId]
+      )
+      await logAudit({
+        req,
+        client,
+        action: 'courier_cod_payment_corrected',
+        entityType: 'order',
+        entityId: order.id,
+        oldValues: { courier_payment_type: order.courier_payment_type, payment_status: order.payment_status, paid_amount: order.paid_amount, customer_payment: payment },
+        newValues: { courier_payment_type: 'cod', payment_status: 'pending', paid_amount: 0, cod_collection_id: cod.rows[0].id },
+        metadata: { order_number: order.order_number, reason, reversed_customer_payment_id: payment.id, reversed_customer_payment_amount: payment.amount }
+      })
+      const items = await client.query('SELECT * FROM order_items WHERE order_id = $1', [order.id])
+      return { ...updatedOrder.rows[0], items: items.rows }
+    })
+    res.json(correctedOrder)
+  } catch (err) {
+    const statusCode = (err as any).statusCode || 500
+    if (statusCode === 500) console.error('Courier COD payment correction error:', err)
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (err as Error).message } })
+  }
+})
+
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params

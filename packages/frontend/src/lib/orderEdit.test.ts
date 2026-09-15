@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { orderEditHasChanges, trackingIsOnlyEdit } from './orderEdit.js'
+import { courierCodCorrectionIsOnlyEdit, orderEditHasChanges, trackingIsOnlyEdit } from './orderEdit.js'
 
 const original = {
   delivery_type: 'courier',
@@ -28,4 +28,11 @@ test('an unchanged form does not call the full order edit', () => {
   assert.equal(orderEditHasChanges({ ...original, courier_tracking_number: ' SPD-OLD ' }, original), false)
   assert.equal(orderEditHasChanges({ ...original, actual_courier_fee: Number.NaN }, { ...original, actual_courier_fee: undefined }), false)
   assert.equal(orderEditHasChanges({ ...original, items: [{ ...original.items[0], quantity: 2 }] }, original), true)
+})
+
+test('changing only a prepaid courier item to COD uses the reviewed correction', () => {
+  const prepaid = { ...original, courier_payment_type: 'prepaid', payment_method: 'cash' }
+  assert.equal(courierCodCorrectionIsOnlyEdit({ ...prepaid, courier_payment_type: 'cod', payment_method: 'pay_on_delivery' }, prepaid), true)
+  assert.equal(courierCodCorrectionIsOnlyEdit({ ...prepaid, courier_payment_type: 'cod', payment_method: 'pay_on_delivery', items: [{ ...prepaid.items[0], quantity: 2 }] }, prepaid), false)
+  assert.equal(courierCodCorrectionIsOnlyEdit(prepaid, prepaid), false)
 })

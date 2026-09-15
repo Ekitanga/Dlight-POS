@@ -26,3 +26,11 @@ export function trackingIsOnlyEdit<T extends { delivery_type: string; courier_tr
     key === 'courier_tracking_number' || sameValue(current[key], original[key])
   )
 }
+
+export function courierCodCorrectionIsOnlyEdit<T extends { delivery_type: string; courier_payment_type: string; payment_method: string }>(current: T, original: T): boolean {
+  if (current.delivery_type !== 'courier' || original.courier_payment_type !== 'prepaid' || current.courier_payment_type !== 'cod') return false
+  if (original.payment_method === 'pay_on_delivery' || current.payment_method !== 'pay_on_delivery') return false
+  return (Object.keys(original) as Array<keyof T>).every(key =>
+    key === 'courier_payment_type' || key === 'payment_method' || sameValue(current[key], original[key])
+  )
+}

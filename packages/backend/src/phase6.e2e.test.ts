@@ -819,6 +819,47 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await assertGlobalIntegrity()
   })
 
+  await t.test('5bc. incorrect prepaid customer payment can become courier COD without reversing a paid supplier', async () => {
+    const order = await createOrder({
+      ...customer('Prepaid COD Correction'), delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-PREPAID', courier_payment_type: 'prepaid',
+      delivery_fee_payment_method: 'paid_to_courier', customer_delivery_fee: 350,
+      actual_courier_fee: 350, payment_method: 'cash',
+      items: [supplierItem(1, 900, 300)]
+    })
+    await advance(order.id, ['confirmed', 'in_transit'])
+    const payable = await row('SELECT id FROM supplier_payables WHERE order_id=$1', [order.id])
+    const supplierPayment = await request('POST', `/suppliers/${supplier.id}/payments`, admin.accessToken, {
+      payable_id: payable.id, amount: 300, payment_method: 'mpesa', reference: 'COD-CORRECTION-SUPPLIER-P6'
+    }, 201)
+    const customerPayment = await row('SELECT id, amount FROM order_payments WHERE order_id=$1', [order.id])
+    const delivery = await row('SELECT id FROM deliveries WHERE order_id=$1', [order.id])
+    const item = await row('SELECT id FROM order_items WHERE order_id=$1', [order.id])
+    await request('PUT', `/orders/${order.id}/courier-cod-correction`, admin.accessToken, {
+      reason: 'Customer payment was entered by mistake'
+    }, 400)
+    assert.equal(await count('SELECT COUNT(*) FROM order_payments WHERE id=$1', [customerPayment.id]), 1)
+
+    const corrected = await request('PUT', `/orders/${order.id}/courier-cod-correction`, admin.accessToken, {
+      reason: 'Customer payment was entered by mistake', confirm_customer_payment_not_received: true
+    })
+    assert.equal(corrected.status, 'in_transit')
+    assert.equal(corrected.courier_payment_type, 'cod')
+    assert.equal(corrected.payment_status, 'pending')
+    assert.equal(Number(corrected.paid_amount), 0)
+    assert.equal(await count('SELECT COUNT(*) FROM order_payments WHERE order_id=$1', [order.id]), 0)
+    assert.equal((await row('SELECT id, courier_payment_type FROM deliveries WHERE order_id=$1', [order.id])).id, delivery.id)
+    assert.equal((await row('SELECT courier_payment_type FROM deliveries WHERE order_id=$1', [order.id])).courier_payment_type, 'cod')
+    assert.equal((await row('SELECT id FROM order_items WHERE order_id=$1', [order.id])).id, item.id)
+    assert.equal(await count('SELECT COUNT(*) FROM supplier_payments WHERE id=$1 AND payable_id=$2', [supplierPayment.id, payable.id]), 1)
+    const cod = await row('SELECT cod_amount, status, tracking_number FROM cod_collections WHERE order_id=$1', [order.id])
+    assert.equal(Number(cod.cod_amount), Number(customerPayment.amount))
+    assert.equal(cod.status, 'in_transit')
+    assert.equal(cod.tracking_number, 'SPD-P6-PREPAID')
+    await waitForAudit('courier_cod_payment_corrected', order.id)
+    await assertGlobalIntegrity()
+  })
+
   await t.test('5c. Speedaf item COD with delivery fee collected by Speedaf', async () => {
     const order = await createOrder({
       ...customer('COD Speedaf Fee'), delivery_type: 'courier', courier_id: courier.id,
