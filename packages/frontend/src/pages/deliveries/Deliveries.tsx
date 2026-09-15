@@ -282,9 +282,11 @@ export function Deliveries() {
   const [paymentHistoryStatus, setPaymentHistoryStatus] = useState('')
   const [paymentHistoryDateFrom, setPaymentHistoryDateFrom] = useState('')
   const [paymentHistoryDateTo, setPaymentHistoryDateTo] = useState('')
+  const [paymentHistoryPage, setPaymentHistoryPage] = useState(1)
+  const [paymentHistoryPageSize, setPaymentHistoryPageSize] = useState(10)
   const [selectedPayment, setSelectedPayment] = useState<SpeedafPaymentBatch | null>(null)
   const [page, setPage] = useState(1)
-  const [pageSize, setPageSize] = useState(25)
+  const [pageSize, setPageSize] = useState(showBulkPayment ? 25 : 10)
   const queryClient = useQueryClient()
 
   const { data: deliveryPage, isLoading, error } = useQuery<PaginatedResponse<Delivery>>({
@@ -414,6 +416,12 @@ export function Deliveries() {
     ].filter(Boolean).join(' ').toLowerCase()
     return searchable.includes(needle)
   })
+  const paymentHistoryTotalPages = Math.max(1, Math.ceil(filteredPaymentHistory.length / paymentHistoryPageSize))
+  const currentPaymentHistoryPage = Math.min(paymentHistoryPage, paymentHistoryTotalPages)
+  const pagedPaymentHistory = filteredPaymentHistory.slice(
+    (currentPaymentHistoryPage - 1) * paymentHistoryPageSize,
+    currentPaymentHistoryPage * paymentHistoryPageSize
+  )
   const approvedPayments = speedafPaymentHistory.filter(payment => payment.status === 'approved')
   const paymentHistorySummary = {
     received: approvedPayments.reduce((sum, payment) => sum + Number(payment.net_amount || 0), 0),
@@ -583,6 +591,7 @@ export function Deliveries() {
               type="button"
               onClick={() => {
                 setShowBulkPayment(value => !value)
+                setPageSize(showBulkPayment ? 10 : 25)
                 setSelectedWorkflowStatus('pending_payment')
                 setSelectedStatus('')
                 setPage(1)
@@ -878,6 +887,7 @@ export function Deliveries() {
                   type="button"
                   onClick={() => {
                     setShowBulkPayment(true)
+                    setPageSize(25)
                     setSelectedWorkflowStatus('pending_payment')
                     setSelectedStatus('')
                     setSearch(selectedDelivery.order_number || '')
@@ -1120,7 +1130,7 @@ export function Deliveries() {
               })}
             </tbody>
           </table>
-          {deliveryPage && <Pagination meta={deliveryPage.pagination} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1) }} />}
+          {deliveryPage && <Pagination meta={deliveryPage.pagination} onPageChange={setPage} onPageSizeChange={size => { setPageSize(size); setPage(1) }} pageSizeOptions={[10, 25, 50, 100]} />}
         </div>
       )}
       {isManager && hasPermission('cod.view') && (
@@ -1131,23 +1141,23 @@ export function Deliveries() {
           </div>
 
           <div className="grid gap-3 p-4 sm:grid-cols-2 sm:p-5 lg:grid-cols-5">
-            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+            <button type="button" onClick={() => { setPaymentHistoryStatus('approved'); setPaymentHistoryPage(1) }} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
               <div className="text-xs text-muted-foreground">Payments received</div>
               <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.received)}</strong>
             </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+            <button type="button" onClick={() => { setPaymentHistoryStatus('approved'); setPaymentHistoryPage(1) }} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
               <div className="text-xs text-muted-foreground">Expected from Speedaf</div>
               <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.expected)}</strong>
             </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+            <button type="button" onClick={() => { setPaymentHistoryStatus('approved'); setPaymentHistoryPage(1) }} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
               <div className="text-xs text-muted-foreground">Speedaf fees</div>
               <strong className="mt-1 block text-lg">{formatMoney(paymentHistorySummary.fees)}</strong>
             </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('approved')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+            <button type="button" onClick={() => { setPaymentHistoryStatus('approved'); setPaymentHistoryPage(1) }} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
               <div className="text-xs text-muted-foreground">Orders reconciled</div>
               <strong className="mt-1 block text-lg">{paymentHistorySummary.orders}</strong>
             </button>
-            <button type="button" onClick={() => setPaymentHistoryStatus('reverted')} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
+            <button type="button" onClick={() => { setPaymentHistoryStatus('reverted'); setPaymentHistoryPage(1) }} className="rounded-lg border p-3 text-left hover:border-primary/50 hover:bg-muted/40">
               <div className="text-xs text-muted-foreground">Reverted payments</div>
               <strong className="mt-1 block text-lg">{paymentHistorySummary.reverted}</strong>
             </button>
@@ -1158,21 +1168,21 @@ export function Deliveries() {
               <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <input
                 value={paymentHistorySearch}
-                onChange={event => setPaymentHistorySearch(event.target.value)}
+                onChange={event => { setPaymentHistorySearch(event.target.value); setPaymentHistoryPage(1) }}
                 placeholder="Payment, order or tracking number"
                 className="w-full rounded-lg border bg-background py-2 pl-10 pr-3"
               />
             </div>
-            <select value={paymentHistoryStatus} onChange={event => setPaymentHistoryStatus(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Filter Speedaf payments by status">
+            <select value={paymentHistoryStatus} onChange={event => { setPaymentHistoryStatus(event.target.value); setPaymentHistoryPage(1) }} className="rounded-lg border bg-background px-3 py-2" aria-label="Filter Speedaf payments by status">
               <option value="">All payment statuses</option>
               <option value="approved">Recorded</option>
               <option value="reverted">Reverted</option>
               <option value="pending_approval">Earlier uncompleted</option>
               <option value="rejected">Discarded</option>
             </select>
-            <input type="date" value={paymentHistoryDateFrom} onChange={event => setPaymentHistoryDateFrom(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date from" />
-            <input type="date" value={paymentHistoryDateTo} onChange={event => setPaymentHistoryDateTo(event.target.value)} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date to" />
-            <button type="button" onClick={() => { setPaymentHistorySearch(''); setPaymentHistoryStatus(''); setPaymentHistoryDateFrom(''); setPaymentHistoryDateTo('') }} className="rounded-lg border bg-background px-3 py-2 text-sm">
+            <input type="date" value={paymentHistoryDateFrom} onChange={event => { setPaymentHistoryDateFrom(event.target.value); setPaymentHistoryPage(1) }} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date from" />
+            <input type="date" value={paymentHistoryDateTo} onChange={event => { setPaymentHistoryDateTo(event.target.value); setPaymentHistoryPage(1) }} className="rounded-lg border bg-background px-3 py-2" aria-label="Payment date to" />
+            <button type="button" onClick={() => { setPaymentHistorySearch(''); setPaymentHistoryStatus(''); setPaymentHistoryDateFrom(''); setPaymentHistoryDateTo(''); setPaymentHistoryPage(1) }} className="rounded-lg border bg-background px-3 py-2 text-sm">
               Clear
             </button>
           </div>
@@ -1198,7 +1208,7 @@ export function Deliveries() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredPaymentHistory.map(payment => (
+                  {pagedPaymentHistory.map(payment => (
                     <tr
                       key={`${payment.source || 'batch'}-${payment.id}`}
                       role="button"
@@ -1227,6 +1237,12 @@ export function Deliveries() {
                   ))}
                 </tbody>
               </table>
+              <Pagination
+                meta={{ page: currentPaymentHistoryPage, pageSize: paymentHistoryPageSize, total: filteredPaymentHistory.length, totalPages: paymentHistoryTotalPages }}
+                onPageChange={setPaymentHistoryPage}
+                onPageSizeChange={size => { setPaymentHistoryPageSize(size); setPaymentHistoryPage(1) }}
+                pageSizeOptions={[10, 25, 50, 100]}
+              />
             </div>
           )}
         </section>

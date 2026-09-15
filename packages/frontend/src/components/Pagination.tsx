@@ -16,9 +16,10 @@ interface PaginationProps {
   meta: PaginationMeta
   onPageChange: (page: number) => void
   onPageSizeChange: (pageSize: number) => void
+  pageSizeOptions?: number[]
 }
 
-export function Pagination({ meta, onPageChange, onPageSizeChange }: PaginationProps) {
+export function Pagination({ meta, onPageChange, onPageSizeChange, pageSizeOptions = [25, 50, 100] }: PaginationProps) {
   const first = meta.total === 0 ? 0 : (meta.page - 1) * meta.pageSize + 1
   const last = Math.min(meta.page * meta.pageSize, meta.total)
 
@@ -33,7 +34,7 @@ export function Pagination({ meta, onPageChange, onPageSizeChange }: PaginationP
             onChange={event => onPageSizeChange(Number(event.target.value))}
             className="rounded-lg border bg-background px-2 py-1.5 text-foreground"
           >
-            {[25, 50, 100].map(size => <option key={size} value={size}>{size}</option>)}
+            {pageSizeOptions.map(size => <option key={size} value={size}>{size}</option>)}
           </select>
         </label>
         <button
