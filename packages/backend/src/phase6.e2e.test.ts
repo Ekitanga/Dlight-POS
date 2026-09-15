@@ -981,6 +981,12 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
   await t.test('9. rider settlement', async () => {
     const balanceBefore = Number((await row('SELECT balance FROM riders WHERE id=$1', [rider.id])).balance)
     assert.equal(balanceBefore, 500)
+    const breakdownBefore = await request('GET', `/riders/${rider.id}/deliveries`, admin.accessToken)
+    const earningDelivery = breakdownBefore.data.find((delivery: any) => Number(delivery.rider_fee) === 500)
+    assert.ok(earningDelivery)
+    assert.equal(Number(earningDelivery.recorded_earning), 500)
+    assert.equal(Number(breakdownBefore.summary.balance), 500)
+    assert.equal(Number(breakdownBefore.summary.total_payments), 0)
     const settlement = await request('POST', `/riders/${rider.id}/settlements`, admin.accessToken, {
       settled_amount: 500, period_start: '2026-06-01', period_end: '2026-06-30',
       total_deliveries: 1, payment_method: 'cash', reference: 'RIDER-P6-001'
@@ -988,6 +994,11 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     assert.equal(Number(settlement.balance), 0)
     assert.equal(Number((await row('SELECT balance FROM riders WHERE id=$1', [rider.id])).balance), 0)
     assert.equal(await count('SELECT COUNT(*) FROM rider_payments WHERE rider_id=$1 AND reference=$2', [rider.id, 'RIDER-P6-001']), 1)
+    const breakdownAfter = await request('GET', `/riders/${rider.id}/deliveries`, admin.accessToken)
+    assert.equal(Number(breakdownAfter.summary.total_earnings), 500)
+    assert.equal(Number(breakdownAfter.summary.total_payments), 500)
+    assert.equal(Number(breakdownAfter.summary.balance), 0)
+    assert.equal(Number(breakdownAfter.data.find((delivery: any) => delivery.id === earningDelivery.id).recorded_earning), 500)
     await waitForAudit('rider_settlement_recorded', rider.id)
     await assertGlobalIntegrity()
   })

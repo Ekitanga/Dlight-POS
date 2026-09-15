@@ -1,11 +1,12 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import { Plus, Search, Edit, Eye, Truck, Trash2, CreditCard, X } from 'lucide-react'
 import { useForm } from 'react-hook-form'
 import { useAuthStore } from '../../stores/authStore'
 import { formatMoney } from '../../lib/format'
+import { Pagination } from '../../components/Pagination'
 
 interface Rider {
   id: string
@@ -27,6 +28,100 @@ interface PaymentFormData {
   payment_method: string
   reference: string
   notes: string
+}
+
+interface RiderDelivery {
+  id: string
+  order_id: string
+  order_number: string
+  order_status: string
+  delivery_status: string
+  created_at: string
+  customer_name: string | null
+  rider_fee: number
+  recorded_earning: number
+}
+
+interface RiderDeliveryResponse {
+  data: RiderDelivery[]
+  summary: {
+    total_earnings: number
+    total_payments: number
+    balance: number
+  }
+}
+
+function RiderDeliveryBreakdown({ riderId }: { riderId: string }) {
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(10)
+  const { data, isLoading, error } = useQuery<RiderDeliveryResponse>({
+    queryKey: ['rider-deliveries', riderId],
+    queryFn: async () => (await axios.get(`/api/riders/${riderId}/deliveries`)).data
+  })
+
+  if (isLoading) return <p className="p-4 text-sm text-muted-foreground">Loading rider deliveries...</p>
+  if (error || !data) return <p className="p-4 text-sm text-destructive">Unable to load rider deliveries.</p>
+
+  const totalPages = Math.max(1, Math.ceil(data.data.length / pageSize))
+  const currentPage = Math.min(page, totalPages)
+  const visibleDeliveries = data.data.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+  const deliveryEarnings = data.data.reduce((sum, delivery) => sum + Number(delivery.recorded_earning || 0), 0)
+  const otherEarnings = Number(data.summary.total_earnings || 0) - deliveryEarnings
+
+  return (
+    <section className="space-y-3">
+      <div>
+        <h3 className="font-semibold">Rider deliveries</h3>
+        <p className="text-sm text-muted-foreground">Each delivery shows its rider fee and the earning recorded toward the rider balance.</p>
+      </div>
+      <div className="grid gap-2 text-sm sm:grid-cols-3">
+        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Earnings recorded</span><strong className="mt-1 block">{formatMoney(data.summary.total_earnings)}</strong></div>
+        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Payments recorded</span><strong className="mt-1 block">{formatMoney(data.summary.total_payments)}</strong></div>
+        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Balance owed</span><strong className="mt-1 block">{formatMoney(data.summary.balance)}</strong></div>
+      </div>
+      {otherEarnings > 0.005 && <p className="text-sm text-muted-foreground">{formatMoney(otherEarnings)} of the earnings total is not linked to a delivery.</p>}
+      <p className="text-xs text-muted-foreground">Rider payments reduce the overall balance; they are not assigned to individual deliveries.</p>
+      {data.data.length === 0 ? (
+        <p className="rounded-lg border p-4 text-sm text-muted-foreground">No deliveries recorded for this rider.</p>
+      ) : (
+        <div className="mobile-scroll-table overflow-x-auto rounded-lg border">
+          <table className="w-full min-w-[720px] text-sm">
+            <thead className="bg-muted/50">
+              <tr>
+                <th className="px-3 py-2 text-left font-medium">Order</th>
+                <th className="px-3 py-2 text-left font-medium">Customer</th>
+                <th className="px-3 py-2 text-left font-medium">Delivery date</th>
+                <th className="px-3 py-2 text-left font-medium">Status</th>
+                <th className="px-3 py-2 text-right font-medium">Rider fee</th>
+                <th className="px-3 py-2 text-right font-medium">Recorded earning</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleDeliveries.map(delivery => (
+                <tr key={delivery.id} className="border-t">
+                  <td className="px-3 py-2"><Link to={`/orders?order_id=${delivery.order_id}`} className="font-medium text-primary hover:underline">{delivery.order_number}</Link></td>
+                  <td className="px-3 py-2">{delivery.customer_name || '-'}</td>
+                  <td className="whitespace-nowrap px-3 py-2">{new Date(delivery.created_at).toLocaleDateString('en-KE')}</td>
+                  <td className="px-3 py-2 capitalize">
+                    {delivery.order_status.replaceAll('_', ' ')}
+                    <span className="block text-xs text-muted-foreground">Delivery: {delivery.delivery_status.replaceAll('_', ' ')}</span>
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2 text-right">{formatMoney(delivery.rider_fee)}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-right font-medium">{formatMoney(delivery.recorded_earning)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Pagination
+            meta={{ page: currentPage, pageSize, total: data.data.length, totalPages }}
+            onPageChange={setPage}
+            onPageSizeChange={size => { setPageSize(size); setPage(1) }}
+            pageSizeOptions={[10, 25, 50, 100]}
+          />
+        </div>
+      )}
+    </section>
+  )
 }
 
 export function Riders() {
@@ -96,6 +191,7 @@ export function Riders() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['riders'] })
+      queryClient.invalidateQueries({ queryKey: ['rider-deliveries'] })
       queryClient.invalidateQueries({ queryKey: ['dashboard-stats'] })
       setPayingRider(null)
       setPaymentError('')
@@ -275,7 +371,8 @@ export function Riders() {
                         type="button"
                         onClick={() => setViewingRider(rider)}
                         className="p-1.5 text-muted-foreground hover:text-primary rounded"
-                        title="View rider"
+                        title="View rider deliveries and earnings"
+                        aria-label={`View deliveries for ${rider.name}`}
                       >
                         <Eye className="h-4 w-4" />
                       </button>
@@ -310,7 +407,7 @@ export function Riders() {
 
       {viewingRider && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-lg bg-background shadow-xl">
+          <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg bg-background shadow-xl">
             <div className="flex items-center justify-between border-b px-6 py-4">
               <div>
                 <h2 className="text-lg font-semibold">{viewingRider.name}</h2>
@@ -320,10 +417,12 @@ export function Riders() {
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <div className="grid grid-cols-1 gap-4 p-6 text-sm">
-              <div><span className="text-muted-foreground">Phone:</span> {viewingRider.phone || '-'}</div>
-              <div><span className="text-muted-foreground">National ID:</span> {viewingRider.national_id || '-'}</div>
-              <div className="text-base font-semibold">Balance: {formatMoney(viewingRider.balance)}</div>
+            <div className="space-y-5 overflow-y-auto p-6 text-sm">
+              <div className="flex flex-wrap gap-x-6 gap-y-2">
+                <div><span className="text-muted-foreground">Phone:</span> {viewingRider.phone || '-'}</div>
+                <div><span className="text-muted-foreground">National ID:</span> {viewingRider.national_id || '-'}</div>
+              </div>
+              <RiderDeliveryBreakdown key={viewingRider.id} riderId={viewingRider.id} />
             </div>
           </div>
         </div>
@@ -331,39 +430,42 @@ export function Riders() {
 
       {payingRider && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-lg bg-background shadow-xl">
+          <div className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg bg-background shadow-xl">
             <div className="flex items-center justify-between border-b px-6 py-4">
               <div>
                 <h2 className="text-lg font-semibold">Record Rider Payment</h2>
-                <p className="text-sm text-muted-foreground">{payingRider.name} is owed {formatMoney(payingRider.balance)}</p>
+                <p className="text-sm text-muted-foreground">Review {payingRider.name}'s deliveries and balance before paying.</p>
               </div>
               <button type="button" onClick={() => setPayingRider(null)} className="rounded p-1.5 text-muted-foreground hover:text-foreground" title="Close">
                 <X className="h-5 w-5" />
               </button>
             </div>
-            <form onSubmit={paymentForm.handleSubmit(data => recordPayment.mutate(data))} className="space-y-4 p-6">
-              <div>
-                <label className="block text-sm font-medium mb-1">Amount Paid</label>
-                <input type="number" step="0.01" {...paymentForm.register('amount', { required: true, valueAsNumber: true, min: 0.01 })} className="w-full px-3 py-2 border rounded-lg" placeholder="Amount paid" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Payment Method</label>
-                <select {...paymentForm.register('payment_method')} className="w-full px-3 py-2 border rounded-lg">
-                  <option value="cash">Cash</option>
-                  <option value="mpesa">M-PESA</option>
-                  <option value="bank_transfer">Bank</option>
-                </select>
-              </div>
-              <input {...paymentForm.register('reference')} className="w-full px-3 py-2 border rounded-lg" placeholder="Reference number" />
-              <textarea {...paymentForm.register('notes')} className="w-full px-3 py-2 border rounded-lg" placeholder="Payment notes" rows={2} />
-              {paymentError && <div className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{paymentError}</div>}
-              <div className="flex justify-end gap-2">
-                <button type="button" onClick={() => setPayingRider(null)} className="px-4 py-2 border rounded-lg">Cancel</button>
-                <button type="submit" disabled={recordPayment.isPending} className="px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50">
-                  {recordPayment.isPending ? 'Recording...' : 'Record Payment'}
-                </button>
-              </div>
-            </form>
+            <div className="overflow-y-auto p-6">
+              <RiderDeliveryBreakdown key={payingRider.id} riderId={payingRider.id} />
+              <form onSubmit={paymentForm.handleSubmit(data => recordPayment.mutate(data))} className="mt-6 space-y-4 border-t pt-5">
+                <div>
+                  <label className="block text-sm font-medium mb-1">Amount Paid</label>
+                  <input type="number" step="0.01" {...paymentForm.register('amount', { required: true, valueAsNumber: true, min: 0.01 })} className="w-full px-3 py-2 border rounded-lg" placeholder="Amount paid" />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium mb-1">Payment Method</label>
+                  <select {...paymentForm.register('payment_method')} className="w-full px-3 py-2 border rounded-lg">
+                    <option value="cash">Cash</option>
+                    <option value="mpesa">M-PESA</option>
+                    <option value="bank_transfer">Bank</option>
+                  </select>
+                </div>
+                <input {...paymentForm.register('reference')} className="w-full px-3 py-2 border rounded-lg" placeholder="Reference number" />
+                <textarea {...paymentForm.register('notes')} className="w-full px-3 py-2 border rounded-lg" placeholder="Payment notes" rows={2} />
+                {paymentError && <div className="rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{paymentError}</div>}
+                <div className="flex justify-end gap-2">
+                  <button type="button" onClick={() => setPayingRider(null)} className="px-4 py-2 border rounded-lg">Cancel</button>
+                  <button type="submit" disabled={recordPayment.isPending} className="px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50">
+                    {recordPayment.isPending ? 'Recording...' : 'Record Payment'}
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}

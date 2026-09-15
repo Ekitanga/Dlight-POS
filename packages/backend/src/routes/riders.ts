@@ -129,6 +129,55 @@ router.get('/:id/earnings', async (req, res) => {
   }
 })
 
+router.get('/:id/deliveries', async (req, res) => {
+  try {
+    const { id } = req.params
+    const rider = await query('SELECT id, balance FROM riders WHERE id = $1', [id])
+    if (rider.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'Rider not found' } })
+    }
+
+    const [deliveries, totals] = await Promise.all([
+      query(
+        `SELECT d.id, d.order_id, o.order_number, o.status AS order_status,
+                d.delivery_status, d.created_at, c.name AS customer_name,
+                d.earned_amount AS rider_fee,
+                COALESCE(earnings.amount, 0) AS recorded_earning
+         FROM deliveries d
+         JOIN orders o ON o.id = d.order_id
+         LEFT JOIN customers c ON c.id = o.customer_id
+         LEFT JOIN LATERAL (
+           SELECT SUM(re.amount) AS amount
+           FROM rider_earnings re
+           WHERE re.rider_id = $1 AND re.delivery_id = d.id AND re.status <> 'reversed'
+         ) earnings ON TRUE
+         WHERE d.rider_id = $1
+         ORDER BY d.created_at DESC, d.id DESC`,
+        [id]
+      ),
+      query(
+        `SELECT
+           COALESCE((SELECT SUM(re.amount) FROM rider_earnings re
+                     WHERE re.rider_id = $1 AND re.status <> 'reversed'), 0) AS total_earnings,
+           COALESCE((SELECT SUM(rp.amount) FROM rider_payments rp
+                     WHERE rp.rider_id = $1), 0) AS total_payments`,
+        [id]
+      )
+    ])
+
+    res.json({
+      data: deliveries.rows,
+      summary: {
+        total_earnings: totals.rows[0].total_earnings,
+        total_payments: totals.rows[0].total_payments,
+        balance: rider.rows[0].balance
+      }
+    })
+  } catch {
+    res.status(500).json({ error: { message: 'Database error' } })
+  }
+})
+
 router.post('/:id/earnings', async (req, res) => {
   try {
     const { id } = req.params
