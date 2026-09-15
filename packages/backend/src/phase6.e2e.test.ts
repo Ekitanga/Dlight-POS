@@ -985,6 +985,9 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     const earningDelivery = breakdownBefore.data.find((delivery: any) => Number(delivery.rider_fee) === 500)
     assert.ok(earningDelivery)
     assert.equal(Number(earningDelivery.recorded_earning), 500)
+    assert.equal(earningDelivery.delivery_location, 'Nairobi')
+    assert.equal(earningDelivery.location_source, 'order')
+    assert.ok(earningDelivery.delivered_at)
     assert.equal(Number(breakdownBefore.summary.balance), 500)
     assert.equal(Number(breakdownBefore.summary.total_payments), 0)
     const settlement = await request('POST', `/riders/${rider.id}/settlements`, admin.accessToken, {

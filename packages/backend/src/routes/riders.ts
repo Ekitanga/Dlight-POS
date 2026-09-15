@@ -140,7 +140,11 @@ router.get('/:id/deliveries', async (req, res) => {
     const [deliveries, totals] = await Promise.all([
       query(
         `SELECT d.id, d.order_id, o.order_number, o.status AS order_status,
-                d.delivery_status, d.created_at, c.name AS customer_name,
+                d.delivery_status, d.created_at, d.delivered_at, c.name AS customer_name,
+                COALESCE(NULLIF(BTRIM(o.delivery_address), ''), NULLIF(BTRIM(c.address), '')) AS delivery_location,
+                CASE WHEN NULLIF(BTRIM(o.delivery_address), '') IS NOT NULL THEN 'order'
+                     WHEN NULLIF(BTRIM(c.address), '') IS NOT NULL THEN 'customer'
+                     ELSE 'missing' END AS location_source,
                 d.earned_amount AS rider_fee,
                 COALESCE(earnings.amount, 0) AS recorded_earning
          FROM deliveries d

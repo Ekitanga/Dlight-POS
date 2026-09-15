@@ -37,7 +37,10 @@ interface RiderDelivery {
   order_status: string
   delivery_status: string
   created_at: string
+  delivered_at: string | null
   customer_name: string | null
+  delivery_location: string | null
+  location_source: 'order' | 'customer' | 'missing'
   rider_fee: number
   recorded_earning: number
 }
@@ -84,17 +87,19 @@ function RiderDeliveryBreakdown({ riderId }: { riderId: string }) {
         <div className="rounded-lg border p-3"><span className="text-muted-foreground">Balance owed</span><strong className="mt-1 block">{formatRiderAmount(data.summary.balance)}</strong></div>
       </div>
       {otherEarnings > 0.005 && <p className="text-sm text-muted-foreground">{formatRiderAmount(otherEarnings)} of the earnings total is not linked to a delivery.</p>}
+      <p className="text-xs text-muted-foreground">Location comes from the order delivery address, or the customer address when the order has none. A separate confirmed drop-off location is not recorded.</p>
       <p className="text-xs text-muted-foreground">Rider payments reduce the overall balance; they are not assigned to individual deliveries.</p>
       {data.data.length === 0 ? (
         <p className="rounded-lg border p-4 text-sm text-muted-foreground">No deliveries recorded for this rider.</p>
       ) : (
         <div className="mobile-scroll-table overflow-x-auto rounded-lg border">
-          <table className="w-full min-w-[720px] text-sm">
+          <table className="w-full min-w-[920px] text-sm">
             <thead className="bg-muted/50">
               <tr>
                 <th className="px-3 py-2 text-left font-medium">Order</th>
                 <th className="px-3 py-2 text-left font-medium">Customer</th>
-                <th className="px-3 py-2 text-left font-medium">Delivery date</th>
+                <th className="px-3 py-2 text-left font-medium">Delivery location</th>
+                <th className="px-3 py-2 text-left font-medium">Recorded</th>
                 <th className="px-3 py-2 text-left font-medium">Status</th>
                 <th className="px-3 py-2 text-right font-medium">Rider fee</th>
                 <th className="px-3 py-2 text-right font-medium">Recorded earning</th>
@@ -105,7 +110,14 @@ function RiderDeliveryBreakdown({ riderId }: { riderId: string }) {
                 <tr key={delivery.id} className="border-t">
                   <td className="px-3 py-2"><Link to={`/orders?order_id=${delivery.order_id}`} className="font-medium text-primary hover:underline">{delivery.order_number}</Link></td>
                   <td className="px-3 py-2">{delivery.customer_name || '-'}</td>
-                  <td className="whitespace-nowrap px-3 py-2">{new Date(delivery.created_at).toLocaleDateString('en-KE')}</td>
+                  <td className="max-w-72 break-words px-3 py-2">
+                    {delivery.delivery_location || <span className="text-destructive">Location not recorded</span>}
+                    {delivery.delivery_location && <span className="mt-0.5 block text-xs text-muted-foreground">{delivery.location_source === 'order' ? 'Order address' : 'Customer address'}</span>}
+                  </td>
+                  <td className="whitespace-nowrap px-3 py-2">
+                    {new Date(delivery.created_at).toLocaleDateString('en-KE')}
+                    {delivery.delivered_at && <span className="mt-0.5 block text-xs text-muted-foreground">Delivered {new Date(delivery.delivered_at).toLocaleDateString('en-KE')}</span>}
+                  </td>
                   <td className="px-3 py-2 capitalize">
                     {delivery.order_status.replaceAll('_', ' ')}
                     <span className="block text-xs text-muted-foreground">Delivery: {delivery.delivery_status.replaceAll('_', ' ')}</span>
