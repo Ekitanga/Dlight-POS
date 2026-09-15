@@ -403,6 +403,9 @@ export function Orders() {
   const [editingOrderId, setEditingOrderId] = useState<string | null>(null)
   const [formError, setFormError] = useState('')
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(searchParams.get('order_id'))
+  const [editingTrackingNumber, setEditingTrackingNumber] = useState(false)
+  const [trackingNumberDraft, setTrackingNumberDraft] = useState('')
+  const [trackingNumberError, setTrackingNumberError] = useState('')
   const [selectedStatus, setSelectedStatus] = useState('')
   const [speedafDeliveryConfirmed, setSpeedafDeliveryConfirmed] = useState(false)
   const [completionPaymentMethod, setCompletionPaymentMethod] = useState('cash')
@@ -611,6 +614,27 @@ export function Orders() {
     },
     onError: (error: any) => {
       setFormError(error.response?.data?.error?.message || error.message || 'Failed to update order')
+    }
+  })
+
+  const updateTrackingNumber = useMutation({
+    mutationFn: async () => {
+      if (!selectedOrderId) throw new Error('No order selected')
+      const response = await axios.put(`/api/orders/${selectedOrderId}/tracking-number`, {
+        courier_tracking_number: trackingNumberDraft.trim()
+      })
+      return response.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['order-detail', selectedOrderId] })
+      queryClient.invalidateQueries({ queryKey: ['deliveries'] })
+      queryClient.invalidateQueries({ queryKey: ['couriers'] })
+      setEditingTrackingNumber(false)
+      setTrackingNumberError('')
+    },
+    onError: (error: any) => {
+      setTrackingNumberError(error.response?.data?.error?.message || error.message || 'Failed to update tracking number')
     }
   })
 
@@ -1516,6 +1540,41 @@ export function Orders() {
                       {selectedOrderDetail.order.rider_name || selectedOrderDetail.order.courier_name || 'Walk-in'}
                     </p>
                     <OrderTrackingLink order={selectedOrderDetail.order} />
+                    {selectedOrderDetail.order.delivery_type === 'courier' && (isAdminOrOwner || hasPermission('orders.edit')) && (
+                      editingTrackingNumber ? (
+                        <form
+                          className="mt-2 space-y-2"
+                          onSubmit={event => { event.preventDefault(); setTrackingNumberError(''); updateTrackingNumber.mutate() }}
+                        >
+                          <label className="block text-xs" htmlFor="order-tracking-number">Courier tracking number</label>
+                          <input
+                            id="order-tracking-number"
+                            value={trackingNumberDraft}
+                            onChange={event => setTrackingNumberDraft(event.target.value)}
+                            maxLength={100}
+                            className="w-full rounded-lg border bg-background px-2 py-1 text-sm"
+                            placeholder="Tracking number"
+                          />
+                          {trackingNumberError && <p className="text-xs text-destructive">{trackingNumberError}</p>}
+                          <div className="flex gap-2">
+                            <button type="submit" disabled={updateTrackingNumber.isPending || !trackingNumberDraft.trim()} className="rounded-lg bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50">Save tracking</button>
+                            <button type="button" onClick={() => { setEditingTrackingNumber(false); setTrackingNumberError('') }} className="rounded-lg border px-2 py-1 text-xs">Cancel</button>
+                          </div>
+                        </form>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTrackingNumberDraft(selectedOrderDetail.order.courier_tracking_number || '')
+                            setTrackingNumberError('')
+                            setEditingTrackingNumber(true)
+                          }}
+                          className="mt-2 text-xs text-primary hover:underline"
+                        >
+                          Update tracking number
+                        </button>
+                      )
+                    )}
                   </div>
                 </div>
 

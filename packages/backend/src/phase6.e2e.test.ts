@@ -789,6 +789,36 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await assertGlobalIntegrity()
   })
 
+  await t.test('5bb. tracking update preserves a paid supplier obligation', async () => {
+    const order = await createOrder({
+      ...customer('Paid Supplier Tracking'), delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-OLD', courier_payment_type: 'cod',
+      delivery_fee_payment_method: 'paid_to_courier', payment_method: 'pay_on_delivery',
+      items: [supplierItem(1, 900, 300)]
+    })
+    const payable = await row('SELECT id, amount FROM supplier_payables WHERE order_id=$1', [order.id])
+    const payment = await request('POST', `/suppliers/${supplier.id}/payments`, admin.accessToken, {
+      payable_id: payable.id, amount: 300, payment_method: 'mpesa', reference: 'TRACK-SUPPLIER-P6'
+    }, 201)
+    const deliveryBefore = await row('SELECT id FROM deliveries WHERE order_id=$1', [order.id])
+    await request('PUT', `/orders/${order.id}`, admin.accessToken, {
+      courier_tracking_number: 'SPD-P6-NEW'
+    }, 409)
+
+    await request('PUT', `/orders/${order.id}/tracking-number`, admin.accessToken, {
+      courier_tracking_number: 'SPD-P6-NEW'
+    })
+    assert.equal((await row('SELECT courier_tracking_number FROM orders WHERE id=$1', [order.id])).courier_tracking_number, 'SPD-P6-NEW')
+    assert.equal((await row('SELECT id, courier_tracking_number FROM deliveries WHERE order_id=$1', [order.id])).id, deliveryBefore.id)
+    assert.equal((await row('SELECT courier_tracking_number FROM deliveries WHERE order_id=$1', [order.id])).courier_tracking_number, 'SPD-P6-NEW')
+    assert.equal((await row('SELECT tracking_number FROM cod_collections WHERE order_id=$1', [order.id])).tracking_number, 'SPD-P6-NEW')
+    assert.equal(await count('SELECT COUNT(*) FROM supplier_payments WHERE id=$1 AND payable_id=$2 AND amount=300', [payment.id, payable.id]), 1)
+    assert.equal(Number((await row('SELECT paid_amount FROM supplier_payables WHERE id=$1', [payable.id])).paid_amount), 300)
+    assert.equal(await count('SELECT COUNT(*) FROM order_items WHERE order_id=$1', [order.id]), 1)
+    await waitForAudit('order_tracking_number_updated', order.id)
+    await assertGlobalIntegrity()
+  })
+
   await t.test('5c. Speedaf item COD with delivery fee collected by Speedaf', async () => {
     const order = await createOrder({
       ...customer('COD Speedaf Fee'), delivery_type: 'courier', courier_id: courier.id,

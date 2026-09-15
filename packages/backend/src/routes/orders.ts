@@ -905,6 +905,52 @@ router.get('/:id', async (req, res) => {
   }
 })
 
+router.put('/:id/tracking-number', async (req, res) => {
+  try {
+    const { courier_tracking_number: submittedNumber } = req.body || {}
+    const trackingNumber = typeof submittedNumber === 'string' ? submittedNumber.trim() : ''
+    if (Object.keys(req.body || {}).length !== 1 || !trackingNumber || trackingNumber.length > 100 || /^https?:\/\//i.test(trackingNumber)) {
+      return res.status(400).json({ error: { message: 'Enter a tracking number (up to 100 characters), not a tracking link.' } })
+    }
+
+    const updatedOrder = await transaction(async (client) => {
+      const orderResult = await client.query('SELECT * FROM orders WHERE id = $1 FOR UPDATE', [req.params.id])
+      const order = orderResult.rows[0]
+      if (!order) throw Object.assign(new Error('Order not found'), { statusCode: 404 })
+      if (order.delivery_type !== 'courier') {
+        throw Object.assign(new Error('Tracking numbers can only be updated for courier orders.'), { statusCode: 409 })
+      }
+      if (order.courier_tracking_number === trackingNumber) return order
+
+      const result = await client.query(
+        'UPDATE orders SET courier_tracking_number = $1, updated_at = NOW() WHERE id = $2 RETURNING *',
+        [trackingNumber, order.id]
+      )
+      await client.query(
+        `UPDATE deliveries SET courier_tracking_number = $1,
+           tracking_provider = NULL, tracking_provider_status = NULL, tracking_message = NULL,
+           tracking_event_at = NULL, tracking_checked_at = NULL, tracking_sync_error = NULL,
+           tracking_auto_updated_at = NULL
+         WHERE order_id = $2 AND courier_id IS NOT NULL`,
+        [trackingNumber, order.id]
+      )
+      await client.query('UPDATE cod_collections SET tracking_number = $1 WHERE order_id = $2', [trackingNumber, order.id])
+      await logAudit({
+        req, client, action: 'order_tracking_number_updated', entityType: 'order', entityId: order.id,
+        oldValues: { courier_tracking_number: order.courier_tracking_number },
+        newValues: { courier_tracking_number: trackingNumber },
+        metadata: { order_number: order.order_number }
+      })
+      return result.rows[0]
+    })
+    res.json(updatedOrder)
+  } catch (err) {
+    const statusCode = (err as any).statusCode || 500
+    if (statusCode === 500) console.error('Order tracking number update error:', err)
+    res.status(statusCode).json({ error: { message: statusCode === 500 ? 'Database error' : (err as Error).message } })
+  }
+})
+
 router.put('/:id', async (req, res) => {
   try {
     const { id } = req.params
