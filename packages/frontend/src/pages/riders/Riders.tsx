@@ -51,6 +51,10 @@ interface RiderDeliveryResponse {
   }
 }
 
+function formatRiderAmount(value: unknown) {
+  return `KES ${new Intl.NumberFormat('en-KE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(Number(value || 0))}`
+}
+
 function RiderDeliveryBreakdown({ riderId }: { riderId: string }) {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(10)
@@ -75,11 +79,11 @@ function RiderDeliveryBreakdown({ riderId }: { riderId: string }) {
         <p className="text-sm text-muted-foreground">Each delivery shows its rider fee and the earning recorded toward the rider balance.</p>
       </div>
       <div className="grid gap-2 text-sm sm:grid-cols-3">
-        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Earnings recorded</span><strong className="mt-1 block">{formatMoney(data.summary.total_earnings)}</strong></div>
-        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Payments recorded</span><strong className="mt-1 block">{formatMoney(data.summary.total_payments)}</strong></div>
-        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Balance owed</span><strong className="mt-1 block">{formatMoney(data.summary.balance)}</strong></div>
+        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Earnings recorded</span><strong className="mt-1 block">{formatRiderAmount(data.summary.total_earnings)}</strong></div>
+        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Payments recorded</span><strong className="mt-1 block">{formatRiderAmount(data.summary.total_payments)}</strong></div>
+        <div className="rounded-lg border p-3"><span className="text-muted-foreground">Balance owed</span><strong className="mt-1 block">{formatRiderAmount(data.summary.balance)}</strong></div>
       </div>
-      {otherEarnings > 0.005 && <p className="text-sm text-muted-foreground">{formatMoney(otherEarnings)} of the earnings total is not linked to a delivery.</p>}
+      {otherEarnings > 0.005 && <p className="text-sm text-muted-foreground">{formatRiderAmount(otherEarnings)} of the earnings total is not linked to a delivery.</p>}
       <p className="text-xs text-muted-foreground">Rider payments reduce the overall balance; they are not assigned to individual deliveries.</p>
       {data.data.length === 0 ? (
         <p className="rounded-lg border p-4 text-sm text-muted-foreground">No deliveries recorded for this rider.</p>
@@ -106,8 +110,8 @@ function RiderDeliveryBreakdown({ riderId }: { riderId: string }) {
                     {delivery.order_status.replaceAll('_', ' ')}
                     <span className="block text-xs text-muted-foreground">Delivery: {delivery.delivery_status.replaceAll('_', ' ')}</span>
                   </td>
-                  <td className="whitespace-nowrap px-3 py-2 text-right">{formatMoney(delivery.rider_fee)}</td>
-                  <td className="whitespace-nowrap px-3 py-2 text-right font-medium">{formatMoney(delivery.recorded_earning)}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-right">{formatRiderAmount(delivery.rider_fee)}</td>
+                  <td className="whitespace-nowrap px-3 py-2 text-right font-medium">{formatRiderAmount(delivery.recorded_earning)}</td>
                 </tr>
               ))}
             </tbody>
@@ -434,7 +438,7 @@ export function Riders() {
             <div className="flex items-center justify-between border-b px-6 py-4">
               <div>
                 <h2 className="text-lg font-semibold">Record Rider Payment</h2>
-                <p className="text-sm text-muted-foreground">Review {payingRider.name}'s deliveries and balance before paying.</p>
+                <p className="text-sm text-muted-foreground">Review deliveries and balance for {payingRider.name} before paying.</p>
               </div>
               <button type="button" onClick={() => setPayingRider(null)} className="rounded p-1.5 text-muted-foreground hover:text-foreground" title="Close">
                 <X className="h-5 w-5" />
