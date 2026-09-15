@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { trackingIsOnlyEdit } from './orderEdit.js'
+import { orderEditHasChanges, trackingIsOnlyEdit } from './orderEdit.js'
 
 const original = {
   delivery_type: 'courier',
@@ -21,4 +21,11 @@ test('a changed item or payment method must use the full order edit', () => {
 test('an unchanged or empty tracking number is not a tracking update', () => {
   assert.equal(trackingIsOnlyEdit(original, original), false)
   assert.equal(trackingIsOnlyEdit({ ...original, courier_tracking_number: ' ' }, original), false)
+})
+
+test('an unchanged form does not call the full order edit', () => {
+  assert.equal(orderEditHasChanges(original, original), false)
+  assert.equal(orderEditHasChanges({ ...original, courier_tracking_number: ' SPD-OLD ' }, original), false)
+  assert.equal(orderEditHasChanges({ ...original, actual_courier_fee: Number.NaN }, { ...original, actual_courier_fee: undefined }), false)
+  assert.equal(orderEditHasChanges({ ...original, items: [{ ...original.items[0], quantity: 2 }] }, original), true)
 })

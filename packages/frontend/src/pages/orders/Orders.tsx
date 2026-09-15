@@ -9,7 +9,7 @@ import { PaginatedResponse, Pagination } from '../../components/Pagination'
 import { DateRangeFilter } from '../../components/DateRangeFilter'
 import { formatMoney } from '../../lib/format'
 import { invalidateCommissionData } from '../../lib/commissionCache'
-import { trackingIsOnlyEdit } from '../../lib/orderEdit'
+import { orderEditHasChanges, trackingIsOnlyEdit } from '../../lib/orderEdit'
 
 interface Order {
   id: string
@@ -939,6 +939,11 @@ export function Orders() {
           <form onSubmit={event => {
             const current = getValues()
             const original = originalEditForm.current
+            if (editingOrderId && original && !orderEditHasChanges(current, original)) {
+              event.preventDefault()
+              setFormError('No changes to save')
+              return
+            }
             if (editingOrderId && original && trackingIsOnlyEdit(current, original)) {
               event.preventDefault()
               updateOrder.mutate(current)
