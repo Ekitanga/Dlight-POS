@@ -240,6 +240,47 @@ async function recalculateCustomerBalance(client: any, customerId: string) {
   )
 }
 
+async function reclassifyCompletedSaleToCourierCod(client: any, order: any, userId: string | null) {
+  const recognized = await client.query(
+    `SELECT id
+     FROM journal_entries
+     WHERE source_type = 'order' AND source_id = $1 AND source_event = 'sale_recognized'
+     LIMIT 1`,
+    [order.id]
+  )
+  if (!recognized.rows[0]) return false
+
+  await client.query(
+    `SELECT reverse_accounting_journal(
+       'order', $1, 'sale_recognized', 'sale_reclassified_to_courier_cod',
+       CURRENT_DATE, $2, $3
+     )`,
+    [order.id, `Reclassified ${order.order_number} to courier COD`, userId]
+  )
+  await client.query(
+    `WITH reclassified_lines AS (
+       SELECT jsonb_agg(jsonb_build_object(
+         'code', CASE WHEN a.code IN ('1100', '2200') AND jl.debit > 0 THEN '1120' ELSE a.code END,
+         'debit', jl.debit,
+         'credit', jl.credit,
+         'memo', COALESCE(jl.memo, '') || ' (courier COD correction)',
+         'entity_type', jl.entity_type,
+         'entity_id', jl.entity_id
+       ) ORDER BY jl.id) AS lines
+       FROM journal_lines jl
+       JOIN accounts a ON a.id = jl.account_id
+       WHERE jl.journal_entry_id = $1
+     )
+     SELECT post_accounting_journal(
+       CURRENT_DATE, $2, 'order', $3, 'sale_recognized_as_courier_cod', $4, lines
+     )
+     FROM reclassified_lines
+     WHERE lines IS NOT NULL`,
+    [recognized.rows[0].id, `Sale re-recognized as courier COD for ${order.order_number}`, order.id, userId]
+  )
+  return true
+}
+
 async function reverseOpenOrderRecords(client: any, req: any, order: any) {
   // 1. Reverse any recorded Speedaf remittance allocated to this order. This
   //    mirrors the per-allocation logic of a Speedaf batch revert, but scoped
@@ -968,8 +1009,9 @@ router.put('/:id/courier-cod-correction', requireAdmin, async (req, res) => {
       if (order.delivery_type !== 'courier' || order.courier_payment_type !== 'prepaid') {
         throw Object.assign(new Error('Only a prepaid courier order can be corrected to courier COD'), { statusCode: 409 })
       }
-      if (!['pending', 'confirmed', 'in_transit'].includes(normalizedWorkflowStatus(order.status))) {
-        throw Object.assign(new Error('Only an active order before delivery can be corrected to courier COD'), { statusCode: 409 })
+      const currentStatus = normalizedWorkflowStatus(order.status)
+      if (!['pending', 'confirmed', 'in_transit', 'delivered', 'collected_paid'].includes(currentStatus)) {
+        throw Object.assign(new Error('Returned or cancelled orders must first be restored through their dedicated recovery workflow'), { statusCode: 409 })
       }
       if (!isSpeedafPassThroughFee(order.delivery_fee_payment_method) || toNumber(order.delivery_fee_paid_amount) !== 0) {
         throw Object.assign(new Error('This order has a shop-handled delivery fee; review that payment separately before changing item COD'), { statusCode: 409 })
@@ -990,12 +1032,11 @@ router.put('/:id/courier-cod-correction', requireAdmin, async (req, res) => {
         `SELECT
            (SELECT COUNT(*)::int FROM customer_credits WHERE order_id = $1) AS credits,
            (SELECT COUNT(*)::int FROM order_refunds WHERE order_id = $1) AS refunds,
-           (SELECT COUNT(*)::int FROM cod_collections WHERE order_id = $1) AS cod,
-           (SELECT COUNT(*)::int FROM commission_transactions WHERE order_id = $1 AND transaction_status <> 'reversed') AS commissions`,
+           (SELECT COUNT(*)::int FROM cod_collections WHERE order_id = $1) AS cod`,
         [order.id]
       )
       if (Object.values(linkedRecords.rows[0]).some(count => Number(count) > 0)) {
-        throw Object.assign(new Error('This order has linked customer, COD, refund, or commission records that require review before changing item COD'), { statusCode: 409 })
+        throw Object.assign(new Error('This order has linked customer credit, COD, or refund records that require their dedicated correction workflow before changing item COD'), { statusCode: 409 })
       }
       const deliveryResult = await client.query('SELECT * FROM deliveries WHERE order_id = $1 FOR UPDATE', [order.id])
       const delivery = deliveryResult.rows[0]
@@ -1003,18 +1044,68 @@ router.put('/:id/courier-cod-correction', requireAdmin, async (req, res) => {
         throw Object.assign(new Error('Courier delivery record needs review before changing item COD'), { statusCode: 409 })
       }
 
+      const completedBeforeCorrection = isFinalCompletedStatus(order, order.status)
+      let commissionsReversed = 0
+      if (completedBeforeCorrection) {
+        const activeCommissions = await client.query(
+          `SELECT earned.id, earned.order_item_id,
+                  GREATEST(earned.eligible_quantity - COALESCE((
+                    SELECT SUM(reversal.eligible_quantity)
+                    FROM commission_transactions reversal
+                    WHERE reversal.original_transaction_id = earned.id
+                      AND reversal.transaction_type = 'reversal'
+                  ), 0), 0)::int AS remaining_quantity
+           FROM commission_transactions earned
+           WHERE earned.order_id = $1
+             AND earned.transaction_type = 'earned'
+             AND earned.transaction_status <> 'reversed'
+           ORDER BY earned.created_at
+           FOR UPDATE`,
+          [order.id]
+        )
+        for (const commission of activeCommissions.rows) {
+          const reversal = await reverseCommission(
+            commission.id,
+            order.id,
+            commission.order_item_id,
+            Number(commission.remaining_quantity),
+            `Admin corrected customer payment to courier COD: ${reason}`,
+            req.user?.userId || null,
+            client,
+            'courier_cod_payment_correction',
+            order.id
+          )
+          if (reversal) commissionsReversed += 1
+        }
+      }
+
       await client.query('DELETE FROM order_payments WHERE id = $1', [payment.id])
+      const accountingReclassified = completedBeforeCorrection
+        ? await reclassifyCompletedSaleToCourierCod(client, order, req.user?.userId || null)
+        : false
+      const correctedStatus = currentStatus === 'collected_paid' ? 'delivered' : currentStatus
       const updatedOrder = await client.query(
-        `UPDATE orders SET courier_payment_type = 'cod', paid_amount = 0,
-           payment_status = 'pending', updated_at = NOW() WHERE id = $1 RETURNING *`,
-        [order.id]
+        `UPDATE orders SET status = $2::order_status, courier_payment_type = 'cod', paid_amount = 0,
+           payment_status = 'pending',
+           commission_completion_by = CASE WHEN $3 THEN NULL ELSE commission_completion_by END,
+           commission_completion_at = CASE WHEN $3 THEN NULL ELSE commission_completion_at END,
+           commission_verified_by = CASE WHEN $3 THEN NULL ELSE commission_verified_by END,
+           commission_verified_at = CASE WHEN $3 THEN NULL ELSE commission_verified_at END,
+           commission_verification_reason = CASE WHEN $3 THEN NULL ELSE commission_verification_reason END,
+           updated_at = NOW() WHERE id = $1 RETURNING *`,
+        [order.id, correctedStatus, completedBeforeCorrection]
       )
-      await client.query("UPDATE deliveries SET courier_payment_type = 'cod' WHERE id = $1", [delivery.id])
+      await client.query(
+        `UPDATE deliveries SET courier_payment_type = 'cod', delivery_status = $2
+         WHERE id = $1`,
+        [delivery.id, deliveryStatusForOrder(correctedStatus, order.delivery_type)]
+      )
       const cod = await client.query(
-        `INSERT INTO cod_collections (order_id, courier_id, tracking_number, cod_amount, status, notes, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        `INSERT INTO cod_collections (order_id, courier_id, tracking_number, cod_amount, status, notes, created_by, delivered_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
         [order.id, order.courier_id, order.courier_tracking_number, order.subtotal,
-          codStatusForOrder(order.status) || 'assigned_to_courier', `Corrected from prepaid: ${reason}`, req.user?.userId]
+          codStatusForOrder(correctedStatus) || 'assigned_to_courier', `Corrected from prepaid: ${reason}`, req.user?.userId,
+          ['delivered', 'collected_paid'].includes(correctedStatus) ? (delivery.delivered_at || new Date()) : null]
       )
       await logAudit({
         req,
@@ -1023,8 +1114,15 @@ router.put('/:id/courier-cod-correction', requireAdmin, async (req, res) => {
         entityType: 'order',
         entityId: order.id,
         oldValues: { courier_payment_type: order.courier_payment_type, payment_status: order.payment_status, paid_amount: order.paid_amount, customer_payment: payment },
-        newValues: { courier_payment_type: 'cod', payment_status: 'pending', paid_amount: 0, cod_collection_id: cod.rows[0].id },
-        metadata: { order_number: order.order_number, reason, reversed_customer_payment_id: payment.id, reversed_customer_payment_amount: payment.amount }
+        newValues: { status: correctedStatus, courier_payment_type: 'cod', payment_status: 'pending', paid_amount: 0, cod_collection_id: cod.rows[0].id },
+        metadata: {
+          order_number: order.order_number,
+          reason,
+          reversed_customer_payment_id: payment.id,
+          reversed_customer_payment_amount: payment.amount,
+          commissions_reversed: commissionsReversed,
+          accounting_reclassified: accountingReclassified
+        }
       })
       const items = await client.query('SELECT * FROM order_items WHERE order_id = $1', [order.id])
       return { ...updatedOrder.rows[0], items: items.rows }

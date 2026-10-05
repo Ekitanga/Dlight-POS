@@ -605,7 +605,7 @@ export function Orders() {
         const reason = window.prompt('Why was the customer payment recorded when no payment was received? This reason will be saved in the audit log.')?.trim()
         if (!reason) throw new Error('COD correction cancelled: a reason is required')
         if (reason.length < 10) throw new Error('Give a correction reason of at least 10 characters')
-        const confirmed = window.confirm('Confirm that the shop did not receive the recorded item payment. This will reverse that customer payment record and make Speedaf collect the item amount on delivery. The supplier payment will stay intact. Continue?')
+        const confirmed = window.confirm('Confirm that the shop did not receive the recorded item payment. This will reverse that customer payment record and make Speedaf collect the item amount on delivery. The supplier payment will stay intact. If the order was completed, its commission will be reversed until the full Speedaf remittance is recorded. Continue?')
         if (!confirmed) throw new Error('COD correction cancelled')
         response = await axios.put(`/api/orders/${editingOrderId}/courier-cod-correction`, {
           reason,

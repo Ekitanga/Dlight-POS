@@ -871,6 +871,50 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await assertGlobalIntegrity()
   })
 
+  await t.test('5bd. admin corrects a completed prepaid order to COD without changing its paid supplier', async () => {
+    const order = await createOrder({
+      ...customer('Completed Prepaid COD Correction'), delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-COMPLETE-CORRECTION', courier_payment_type: 'prepaid',
+      delivery_fee_payment_method: 'paid_to_courier', customer_delivery_fee: 350,
+      actual_courier_fee: 350, payment_method: 'cash',
+      items: [supplierItem(1, 1100, 400)]
+    }, attendant.accessToken)
+    const payable = await row('SELECT id FROM supplier_payables WHERE order_id=$1', [order.id])
+    const supplierPayment = await request('POST', `/suppliers/${supplier.id}/payments`, admin.accessToken, {
+      payable_id: payable.id, amount: 400, payment_method: 'mpesa', reference: 'COMPLETED-COD-SUPPLIER-P6'
+    }, 201)
+    await advance(order.id, ['confirmed', 'in_transit', 'delivered'])
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned' AND transaction_status<>'reversed'", [order.id]), 1)
+    const delivery = await row('SELECT id, delivered_at FROM deliveries WHERE order_id=$1', [order.id])
+    const item = await row('SELECT id FROM order_items WHERE order_id=$1', [order.id])
+
+    const corrected = await request('PUT', `/orders/${order.id}/courier-cod-correction`, admin.accessToken, {
+      reason: 'Attendant incorrectly recorded customer payment before delivery',
+      confirm_customer_payment_not_received: true
+    })
+    assert.equal(corrected.status, 'delivered')
+    assert.equal(corrected.courier_payment_type, 'cod')
+    assert.equal(corrected.payment_status, 'pending')
+    assert.equal(Number(corrected.paid_amount), 0)
+    assert.equal(await count('SELECT COUNT(*) FROM order_payments WHERE order_id=$1', [order.id]), 0)
+    assert.equal((await row('SELECT id, courier_payment_type, delivery_status, delivered_at FROM deliveries WHERE order_id=$1', [order.id])).id, delivery.id)
+    assert.equal((await row('SELECT delivery_status FROM deliveries WHERE order_id=$1', [order.id])).delivery_status, 'delivered')
+    assert.equal(new Date((await row('SELECT delivered_at FROM deliveries WHERE order_id=$1', [order.id])).delivered_at).getTime(), new Date(delivery.delivered_at).getTime())
+    assert.equal((await row('SELECT id FROM order_items WHERE order_id=$1', [order.id])).id, item.id)
+    assert.equal(await count('SELECT COUNT(*) FROM supplier_payments WHERE id=$1 AND payable_id=$2', [supplierPayment.id, payable.id]), 1)
+    assert.equal((await row('SELECT status, cod_amount FROM cod_collections WHERE order_id=$1', [order.id])).status, 'delivered_awaiting_remittance')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='reversal'", [order.id]), 1)
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned' AND transaction_status<>'reversed'", [order.id]), 0)
+
+    await request('POST', `/deliveries/orders/${order.id}/cod`, admin.accessToken, {
+      amount: 1100, payment_method: 'bank_transfer', reference: 'COMPLETED-COD-REM-001'
+    }, 201)
+    assert.equal((await row('SELECT status FROM orders WHERE id=$1', [order.id])).status, 'collected_paid')
+    assert.equal(await count("SELECT COUNT(*) FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned' AND transaction_status<>'reversed'", [order.id]), 1)
+    assert.equal((await row("SELECT salesperson_id FROM commission_transactions WHERE order_id=$1 AND transaction_type='earned' AND transaction_status<>'reversed'", [order.id])).salesperson_id, attendantUser.id)
+    await assertGlobalIntegrity()
+  })
+
   await t.test('5c. Speedaf item COD with delivery fee collected by Speedaf', async () => {
     const order = await createOrder({
       ...customer('COD Speedaf Fee'), delivery_type: 'courier', courier_id: courier.id,
@@ -2672,6 +2716,48 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     )
     assert.equal(afterCorrectionCycle.totals.isBalanced, true)
     assert.equal(Number(afterCorrectionCycle.totals.difference), 0)
+
+    const courierCorrectionOrder = await createOrder({
+      ...customer('Trial Balance Courier COD Correction'),
+      delivery_type: 'courier', courier_id: courier.id,
+      courier_tracking_number: 'SPD-P6-TB-COD-CORRECTION', courier_payment_type: 'prepaid',
+      delivery_fee_payment_method: 'paid_to_courier', customer_delivery_fee: 0,
+      actual_courier_fee: 0, payment_method: 'cash',
+      items: [internalItem(stockProduct.id, 1, 275)]
+    }, attendant.accessToken)
+    const courierPayment = await row('SELECT id FROM order_payments WHERE order_id=$1', [courierCorrectionOrder.id])
+    await advance(courierCorrectionOrder.id, ['confirmed', 'in_transit', 'delivered'])
+    await request('PUT', `/orders/${courierCorrectionOrder.id}/courier-cod-correction`, admin.accessToken, {
+      reason: 'Accounting test for incorrect completed customer payment',
+      confirm_customer_payment_not_received: true
+    })
+    for (const event of ['sale_recognized', 'sale_reclassified_to_courier_cod', 'sale_recognized_as_courier_cod']) {
+      assert.equal(await count(
+        `SELECT COUNT(*) FROM journal_entries WHERE source_type='order' AND source_id=$1 AND source_event=$2`,
+        [courierCorrectionOrder.id, event]
+      ), 1)
+    }
+    assert.equal(await count(
+      `SELECT COUNT(*)
+       FROM journal_entries je JOIN journal_lines jl ON jl.journal_entry_id=je.id
+       JOIN accounts a ON a.id=jl.account_id
+       WHERE je.source_type='order' AND je.source_id=$1
+         AND je.source_event='sale_recognized_as_courier_cod'
+         AND a.code='1120' AND jl.debit=275`,
+      [courierCorrectionOrder.id]
+    ), 1)
+    assert.equal(await count(
+      `SELECT COUNT(*) FROM journal_entries
+       WHERE source_type='order_payment' AND source_id=$1 AND source_event='receipt_reversed'`,
+      [courierPayment.id]
+    ), 1)
+    const afterCourierCorrection = await request(
+      'GET',
+      `/reports/trial-balance?date_from=${today}&date_to=${today}`,
+      admin.accessToken
+    )
+    assert.equal(afterCourierCorrection.totals.isBalanced, true)
+    assert.equal(Number(afterCourierCorrection.totals.difference), 0)
 
     await request('PUT', `/orders/${order.id}/status`, admin.accessToken, {
       status: 'returned',
