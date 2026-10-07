@@ -354,7 +354,10 @@ router.get('/sales', async (req, res) => {
       ORDER BY o.sale_date DESC, o.created_at DESC`,
       params
     )
-    sendRows(req, res, result.rows)
+    const rows = req.query.structured_items === '1'
+      ? result.rows
+      : result.rows.map(({ item_details: _itemDetails, ...row }) => row)
+    sendRows(req, res, rows)
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }

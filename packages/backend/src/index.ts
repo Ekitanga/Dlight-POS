@@ -45,10 +45,19 @@ if (process.env.NODE_ENV === 'production' && fs.existsSync(frontendDistPath)) {
     }
     next()
   })
-  app.use(express.static(frontendDistPath, { dotfiles: 'deny' }))
+  app.use(express.static(frontendDistPath, {
+    dotfiles: 'deny',
+    setHeaders: (res, filePath) => {
+      if (path.basename(filePath) === 'index.html') {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
+      }
+    }
+  }))
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api')) return next()
-    res.sendFile(path.join(frontendDistPath, 'index.html'))
+    res.sendFile(path.join(frontendDistPath, 'index.html'), {
+      headers: { 'Cache-Control': 'no-store, no-cache, must-revalidate' }
+    })
   })
 }
 

@@ -297,7 +297,9 @@ export function Reports() {
         const response = await axios.get(`/api/couriers/cod/ledger?page=1&page_size=500&${params}`)
         return response.data.data
       }
-      return (await axios.get(`/api/reports/${report}?${params}`)).data
+      const detailParams = new URLSearchParams(params)
+      if (report === 'sales') detailParams.set('structured_items', '1')
+      return (await axios.get(`/api/reports/${report}?${detailParams}`)).data
     },
     enabled: department !== 'overview' && !['reconciliation', 'trial-balance'].includes(report)
   })

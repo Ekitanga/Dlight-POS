@@ -142,8 +142,10 @@ test('shows every sales-analysis item with its matching supplier tag', async ({ 
     }))
   })
   await page.route('**/api/**', async route => {
-    const pathname = new URL(route.request().url()).pathname
+    const requestUrl = new URL(route.request().url())
+    const pathname = requestUrl.pathname
     if (pathname === '/api/reports/sales') {
+      expect(requestUrl.searchParams.get('structured_items')).toBe('1')
       return route.fulfill({ json: [{
         order_number: 'ORD-ITEM-TAGS', sale_date: '2026-10-06', customer: 'Report Customer', status: 'delivered', payment_status: 'paid', delivery_type: 'rider', revenue: 12000, delivery_cost: 400,
         items: '1 x Long product [Essential Scents]',
