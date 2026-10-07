@@ -490,6 +490,7 @@ router.get('/daily-whatsapp-report', requirePermission('dashboard', 'personal_or
                   ELSE COALESCE(NULLIF(o.delivery_address, ''), NULLIF(customer.address, ''), 'Location not recorded') END AS location,
                 COALESCE(items.product_summary, 'Items not recorded') AS product_summary,
                 COALESCE(items.source_summary, 'Shop stock') AS source_summary,
+                COALESCE(items.item_details, '[]'::jsonb) AS item_details,
                 CASE WHEN ${commissionCompletedStatusSql('o')} THEN 'paid' ELSE 'pending_speedaf' END AS report_status,
                 CASE WHEN o.delivery_type = 'rider' THEN COALESCE(rider.name, 'Rider not recorded')
                   WHEN o.delivery_type = 'courier' THEN COALESCE(courier.name, 'Speedaf')
@@ -500,18 +501,36 @@ router.get('/daily-whatsapp-report', requirePermission('dashboard', 'personal_or
            LEFT JOIN riders rider ON rider.id = o.rider_id
            LEFT JOIN couriers courier ON courier.id = o.courier_id
            LEFT JOIN LATERAL (
-             SELECT string_agg(oi.quantity::text || ' x ' || product.name, ', ' ORDER BY product.name) AS product_summary,
-                    string_agg(DISTINCT CASE
-                      WHEN oi.fulfillment_type = 'hybrid' OR (oi.internal_quantity > 0 AND oi.supplier_quantity > 0)
-                        THEN 'Shop stock + ' || COALESCE(item_supplier.name, 'Supplier not recorded')
-                      WHEN oi.fulfillment_type = 'supplier' OR oi.supplier_quantity > 0
-                        THEN COALESCE(item_supplier.name, 'Supplier not recorded')
-                      ELSE 'Shop stock'
-                    END, ', ') AS source_summary
-               FROM order_items oi
-               JOIN products product ON product.id = oi.product_id
-               LEFT JOIN suppliers item_supplier ON item_supplier.id = oi.supplier_id
-              WHERE oi.order_id = o.id
+             SELECT string_agg(item.quantity::text || ' x ' || item.product_name, ', ' ORDER BY item.product_name) AS product_summary,
+                    string_agg(DISTINCT item.source_label, ', ' ORDER BY item.source_label) AS source_summary,
+                    jsonb_agg(
+                      jsonb_build_object(
+                        'quantity', item.quantity,
+                        'productName', item.product_name,
+                        'sources', item.sources
+                      ) ORDER BY item.product_name, item.order_item_id
+                    ) AS item_details
+               FROM (
+                 SELECT oi.id AS order_item_id, oi.quantity, product.name AS product_name,
+                        CASE
+                          WHEN oi.fulfillment_type = 'hybrid' OR (oi.internal_quantity > 0 AND oi.supplier_quantity > 0)
+                            THEN 'Shop stock + ' || COALESCE(item_supplier.name, 'Supplier not recorded')
+                          WHEN oi.fulfillment_type = 'supplier' OR oi.supplier_quantity > 0
+                            THEN COALESCE(item_supplier.name, 'Supplier not recorded')
+                          ELSE 'Shop stock'
+                        END AS source_label,
+                        CASE
+                          WHEN oi.fulfillment_type = 'hybrid' OR (oi.internal_quantity > 0 AND oi.supplier_quantity > 0)
+                            THEN jsonb_build_array('Shop stock', COALESCE(item_supplier.name, 'Supplier not recorded'))
+                          WHEN oi.fulfillment_type = 'supplier' OR oi.supplier_quantity > 0
+                            THEN jsonb_build_array(COALESCE(item_supplier.name, 'Supplier not recorded'))
+                          ELSE jsonb_build_array('Shop stock')
+                        END AS sources
+                   FROM order_items oi
+                   JOIN products product ON product.id = oi.product_id
+                   LEFT JOIN suppliers item_supplier ON item_supplier.id = oi.supplier_id
+                  WHERE oi.order_id = o.id
+               ) item
            ) items ON TRUE
           WHERE o.created_by = $1
             AND COALESCE(o.sale_date, o.created_at::date) = $2::date
@@ -532,6 +551,7 @@ router.get('/daily-whatsapp-report', requirePermission('dashboard', 'personal_or
       location: row.location,
       productSummary: row.product_summary,
       sourceSummary: row.source_summary,
+      items: Array.isArray(row.item_details) ? row.item_details : [],
       status: row.report_status,
       handledBy: row.handled_by,
       riderAmount: row.rider_amount == null ? null : asNumber(row.rider_amount)

@@ -62,8 +62,16 @@ async function openMockedDashboard(page: Page, role: 'admin' | 'attendant') {
         preparedBy: 'Ann Attendant',
         summary: { totalOrders: 2, paidOrders: 1, pendingSpeedafOrders: 1, totalRiderAmount: 200 },
         rows: [
-          { orderId: 'order-1', orderNumber: 'ORD-001', location: 'Westlands', productSummary: '1 x Perfume', sourceSummary: 'Shop stock', status: 'paid', handledBy: 'Brian', riderAmount: 200 },
-          { orderId: 'order-2', orderNumber: 'ORD-002', location: 'Mombasa', productSummary: '2 x Perfume', sourceSummary: 'Scent Supplier', status: 'pending_speedaf', handledBy: 'Speedaf', riderAmount: null }
+          { orderId: 'order-1', orderNumber: 'ORD-001', location: 'Westlands', productSummary: '1 x Perfume', sourceSummary: 'Shop stock', items: [
+            { quantity: 1, productName: 'A very long perfume product name that remains fully visible in the report', sources: ['Shop stock'] },
+            { quantity: 1, productName: 'Bvlgari Man in Black Eau de Parfum 100ml – Men, Spicy Amber Fragrance', sources: ['Essential Scents'] },
+            { quantity: 2, productName: 'Carolina Herrera Good Girl Eau de Parfum Suprême', sources: ['Prompt Scents'] },
+            { quantity: 1, productName: 'Giorgio Armani My Way Eau de Parfum', sources: ['Aroma House'] },
+            { quantity: 1, productName: 'Valentino Donna Born In Roma Yellow Dream Eau de Parfum', sources: ['Fragrance Hub'] },
+            { quantity: 3, productName: 'Burberry Goddess Eau de Parfum 100ml', sources: ['Nairobi Perfumes'] },
+            { quantity: 1, productName: 'Dolce & Gabbana Light Blue Eau de Toilette', sources: ['Luxury Scents'] }
+          ], status: 'paid', handledBy: 'Brian', riderAmount: 200 },
+          { orderId: 'order-2', orderNumber: 'ORD-002', location: 'Mombasa', productSummary: '2 x Perfume', sourceSummary: 'Scent Supplier', items: [{ quantity: 2, productName: 'Perfume', sources: ['Scent Supplier'] }], status: 'pending_speedaf', handledBy: 'Speedaf', riderAmount: null }
         ]
       } })
     }
@@ -96,9 +104,15 @@ test('keeps the attendant dashboard compact while leaving reports obvious', asyn
   await expect(page.getByRole('columnheader', { name: 'Location / Order' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Preview' }).click()
   await expect(page.getByRole('columnheader', { name: 'Location / Order' })).toBeVisible()
-  await expect(page.getByRole('columnheader', { name: 'Supplier' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Item(s) and source' })).toBeVisible()
+  await expect(page.getByText('A very long perfume product name that remains fully visible in the report')).toBeVisible()
   await expect(page.getByText('Shop stock', { exact: true })).toBeVisible()
   await expect(page.getByText('Scent Supplier', { exact: true })).toBeVisible()
+  const downloadPromise = page.waitForEvent('download')
+  await page.getByRole('button', { name: /Download image/ }).click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe('dlight-daily-report-2026-09-04.png')
+  await download.saveAs('artifacts/daily-report-layout-preview.png')
   await page.getByRole('button', { name: /Hide preview/ }).click()
   await expect(page.getByRole('columnheader', { name: 'Location / Order' })).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
@@ -114,4 +128,43 @@ test('keeps the admin dashboard compact and all detail cards clickable', async (
   await expect(page.getByTitle('View Pending approval')).toBeVisible()
   await expect(page.getByRole('heading', { name: 'My activity' })).toHaveCount(0)
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390)
+})
+
+test('shows every sales-analysis item with its matching supplier tag', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('auth-storage', JSON.stringify({
+      state: {
+        user: { id: 'mock-admin', email: 'admin@example.test', full_name: 'Admin User', role: 'admin', permissions: [] },
+        token: 'mock-access-token',
+        refreshToken: 'mock-refresh-token'
+      },
+      version: 0
+    }))
+  })
+  await page.route('**/api/**', async route => {
+    const pathname = new URL(route.request().url()).pathname
+    if (pathname === '/api/reports/sales') {
+      return route.fulfill({ json: [{
+        order_number: 'ORD-ITEM-TAGS', sale_date: '2026-10-06', customer: 'Report Customer', status: 'delivered', payment_status: 'paid', delivery_type: 'rider', revenue: 12000, delivery_cost: 400,
+        items: '1 x Long product [Essential Scents]',
+        item_details: [
+          { quantity: 1, productName: 'A complete long product name that must wrap without being shortened or hidden', sources: ['Essential Scents'] },
+          { quantity: 2, productName: 'Second product supplied from another business', sources: ['Prompt Scents'] },
+          { quantity: 1, productName: 'Hybrid fulfilled product', sources: ['Shop stock', 'Luxury Scents'] }
+        ],
+        product_cost: 5000, profit: 6600, margin_percent: 55, payment_methods: 'cash'
+      }] })
+    }
+    return route.fulfill({ json: {} })
+  })
+
+  await page.goto('/reports?department=sales&report=sales&date_from=2026-10-06&date_to=2026-10-06')
+  await expect(page.getByRole('heading', { name: 'Business Intelligence' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Items' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Item Details' })).toHaveCount(0)
+  await expect(page.getByText('A complete long product name that must wrap without being shortened or hidden')).toBeVisible()
+  await expect(page.getByText('Essential Scents', { exact: true })).toBeVisible()
+  await expect(page.getByText('Prompt Scents', { exact: true })).toBeVisible()
+  await expect(page.getByText('Shop stock', { exact: true })).toBeVisible()
+  await expect(page.getByText('Luxury Scents', { exact: true })).toBeVisible()
 })

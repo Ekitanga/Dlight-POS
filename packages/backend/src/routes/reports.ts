@@ -23,7 +23,7 @@ function nairobiBusinessDate(): string {
 function sendRows(req: any, res: any, rows: any[]) {
   if (req.query.format === 'csv') {
     const exportRows = rows.map(row => Object.fromEntries(
-      Object.entries(row).filter(([key]) => key !== 'id' && !key.endsWith('_id'))
+      Object.entries(row).filter(([key]) => key !== 'id' && key !== 'item_details' && !key.endsWith('_id'))
     ))
     const headers = exportRows.length > 0 ? Object.keys(exportRows[0]) : []
     const isMoneyColumn = (key: string) => [
@@ -303,6 +303,7 @@ router.get('/sales', async (req, res) => {
       `SELECT o.order_number, o.sale_date, o.created_at, c.name as customer, o.status, o.payment_status,
         o.delivery_type, o.subtotal + ${salesIncome} AS revenue, ${salesCost} AS delivery_cost,
         COALESCE(items.items, '-') AS items,
+        COALESCE(items.item_details, '[]'::jsonb) AS item_details,
         COALESCE(items.product_cost,0) AS product_cost,
         o.subtotal + ${salesIncome} - ${salesCost} - COALESCE(items.product_cost,0) AS profit,
         CASE WHEN o.subtotal + ${salesIncome} > 0 THEN
@@ -313,12 +314,43 @@ router.get('/sales', async (req, res) => {
       LEFT JOIN customers c ON o.customer_id = c.id
       LEFT JOIN order_payments op ON o.id = op.order_id
       LEFT JOIN LATERAL (
-        SELECT STRING_AGG(p.name || ' x' || oi.quantity, ', ' ORDER BY p.name) AS items,
-          SUM(oi.unit_cost*oi.internal_quantity + oi.supplier_cost*oi.supplier_quantity) AS product_cost
-        FROM order_items oi JOIN products p ON p.id=oi.product_id WHERE oi.order_id=o.id
+        SELECT STRING_AGG(
+                 item.quantity::text || ' x ' || item.product_name || ' [' || item.source_label || ']',
+                 E'\n' ORDER BY item.product_name, item.order_item_id
+               ) AS items,
+               JSONB_AGG(
+                 JSONB_BUILD_OBJECT(
+                   'quantity', item.quantity,
+                   'productName', item.product_name,
+                   'sources', item.sources
+                 ) ORDER BY item.product_name, item.order_item_id
+               ) AS item_details,
+               SUM(item.product_cost) AS product_cost
+          FROM (
+            SELECT oi.id AS order_item_id, oi.quantity, p.name AS product_name,
+                   oi.unit_cost*oi.internal_quantity + oi.supplier_cost*oi.supplier_quantity AS product_cost,
+                   CASE
+                     WHEN oi.fulfillment_type = 'hybrid' OR (oi.internal_quantity > 0 AND oi.supplier_quantity > 0)
+                       THEN 'Shop stock + ' || COALESCE(s.name, 'Supplier not recorded')
+                     WHEN oi.fulfillment_type = 'supplier' OR oi.supplier_quantity > 0
+                       THEN COALESCE(s.name, 'Supplier not recorded')
+                     ELSE 'Shop stock'
+                   END AS source_label,
+                   CASE
+                     WHEN oi.fulfillment_type = 'hybrid' OR (oi.internal_quantity > 0 AND oi.supplier_quantity > 0)
+                       THEN JSONB_BUILD_ARRAY('Shop stock', COALESCE(s.name, 'Supplier not recorded'))
+                     WHEN oi.fulfillment_type = 'supplier' OR oi.supplier_quantity > 0
+                       THEN JSONB_BUILD_ARRAY(COALESCE(s.name, 'Supplier not recorded'))
+                     ELSE JSONB_BUILD_ARRAY('Shop stock')
+                   END AS sources
+              FROM order_items oi
+              JOIN products p ON p.id=oi.product_id
+              LEFT JOIN suppliers s ON s.id=oi.supplier_id
+             WHERE oi.order_id=o.id
+          ) item
       ) items ON TRUE
       ${conditions.length ? 'WHERE ' + conditions.join(' AND ') : ''}
-      GROUP BY o.id, c.name, items.items, items.product_cost
+      GROUP BY o.id, c.name, items.items, items.item_details, items.product_cost
       ORDER BY o.sale_date DESC, o.created_at DESC`,
       params
     )

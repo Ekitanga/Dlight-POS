@@ -17,6 +17,12 @@ import { ProductDemandCharts } from '../../components/reports/ProductDemandChart
 
 type Row = Record<string, unknown>
 
+interface ReportItemDetail {
+  quantity: number
+  productName: string
+  sources: string[]
+}
+
 interface Overview {
   period: { dateFrom: string; dateTo: string }
   kpis: Row
@@ -137,7 +143,7 @@ const reportHelp: Record<string, string> = {
   'trial-balance': 'Opening columns contain all posted activity before the From date. Period columns contain activity inside the selected range. Closing columns are the account balances at the To date.'
 }
 const clientCourierReports = ['speedaf-orders', 'courier-cod-ledger']
-const technicalKey = (key: string) => key === 'id' || key === 'tracking_url' || key.endsWith('_id') || ['created_by', 'approved_by', 'closed_by'].includes(key)
+const technicalKey = (key: string) => key === 'id' || key === 'tracking_url' || key === 'item_details' || key.endsWith('_id') || ['created_by', 'approved_by', 'closed_by'].includes(key)
 const dateKey = (key: string) => /(^date$|date$|_at$|last_purchase|last_delivery|last_transaction)/.test(key)
 const moneyKey = (key: string) => [
   'amount', 'sales', 'cost', 'profit', 'expense', 'paid', 'payable', 'earnings',
@@ -148,6 +154,7 @@ const phoneKey = (key: string) => /(^phone$|phone|mobile|tel|fax)/.test(key)
 const countKey = (key: string) => /(^quantity$|quantity|orders|deliveries|units|days|level|count|available_stock|suggested_stock|reorder_gap)/.test(key)
 const descriptiveKey = (key: string) => !countKey(key) && /(^name$|items|product$|products$|description|notes|details|reason|recommendation|signal)/.test(key)
 const columnWidth = (key: string) => {
+  if (key === 'items') return 520
   if (/recommendation|signal/.test(key)) return 180
   if (descriptiveKey(key)) return 340
   if (/suggested_stock|average_daily_units|reorder_gap/.test(key)) return 150
@@ -178,6 +185,32 @@ const formatCell = (key: string, value: unknown) => {
   if (phoneKey(key)) return String(value)
   if (typeof value === 'number') return number(value)
   return String(value).replaceAll('_', ' ')
+}
+
+function reportItemDetails(value: unknown): ReportItemDetail[] {
+  if (!Array.isArray(value)) return []
+  return value.map(item => {
+    const record = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+    return {
+      quantity: Number(record.quantity || 0),
+      productName: String(record.productName || 'Item not recorded'),
+      sources: Array.isArray(record.sources) && record.sources.length > 0 ? record.sources.map(String) : ['Shop stock']
+    }
+  })
+}
+
+function SalesItemsCell({ details, fallback }: { details: unknown; fallback: string }) {
+  const items = reportItemDetails(details)
+  if (items.length === 0) return <div className="whitespace-pre-wrap break-words leading-5">{fallback}</div>
+  return <div className="divide-y">
+    {items.map((item, index) => <div key={`${item.productName}-${index}`} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 py-2 first:pt-0 last:pb-0">
+      <span className="inline-flex min-w-9 justify-center rounded-md bg-primary/10 px-1.5 py-1 text-xs font-bold text-primary">{item.quantity}x</span>
+      <span className="break-words leading-5">{item.productName}</span>
+      <span className="flex max-w-44 flex-wrap justify-end gap-1">
+        {item.sources.map(source => <span key={source} className={`inline-flex rounded-md border px-2 py-1 text-[11px] font-medium leading-4 ${source === 'Shop stock' ? 'border-slate-200 bg-slate-50 text-slate-600' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>{source}</span>)}
+      </span>
+    </div>)}
+  </div>
 }
 function MetricCard({ title, value, icon, onClick, danger }: {
   title: string
@@ -511,6 +544,9 @@ export function Reports() {
                 const value = formatCell(header, row[header])
                 const trackingUrl = typeof row.tracking_url === 'string' ? row.tracking_url : ''
                 const isTrackingCell = header.includes('tracking') && trackingUrl && String(row[header] ?? '').trim()
+                if (report === 'sales' && header === 'items') {
+                  return <td key={header} className="px-3 py-3"><SalesItemsCell details={row.item_details} fallback={value} /></td>
+                }
                 return <td key={header} className="overflow-hidden px-3 py-3">
                   <div
                     title={descriptiveKey(header) ? String(row[header] ?? '') : undefined}

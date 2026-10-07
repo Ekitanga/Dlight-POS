@@ -116,6 +116,11 @@ interface DailyWhatsappReportRow {
   location: string
   productSummary: string
   sourceSummary: string
+  items: Array<{
+    quantity: number
+    productName: string
+    sources: string[]
+  }>
   status: 'paid' | 'pending_speedaf'
   handledBy: string
   riderAmount: number | null
@@ -214,13 +219,40 @@ function commissionHistoryStatus(status: string): { label: string; className: st
   return { label: 'In progress', className: 'bg-blue-100 text-blue-800' }
 }
 
-const DAILY_REPORT_ROWS_PER_IMAGE = 12
+const DAILY_REPORT_MAX_BODY_HEIGHT = 1120
+const DAILY_REPORT_COLUMNS = {
+  location: { x: 48, width: 220 },
+  items: { x: 268, width: 540 },
+  status: { x: 808, width: 190 },
+  handler: { x: 998, width: 190 },
+  amount: { x: 1188, width: 164 }
+}
+
+interface PreparedDailyReportItem {
+  quantity: number | null
+  nameLines: string[]
+  sourceTags: Array<{ label: string; lines: string[]; height: number }>
+  height: number
+}
+
+interface PreparedDailyReportRow {
+  row: DailyWhatsappReportRow
+  locationLines: string[]
+  handlerLines: string[]
+  items: PreparedDailyReportItem[]
+  itemFontSize: number
+  itemLineHeight: number
+  itemGap: number
+  badgeFontSize: number
+  tagFontSize: number
+  height: number
+}
 
 function dailyReportStatusLabel(status: DailyWhatsappReportRow['status']): string {
   return status === 'paid' ? 'Paid' : 'Pending Speedaf'
 }
 
-function wrapCanvasText(context: CanvasRenderingContext2D, value: string, maxWidth: number, maxLines: number): string[] {
+function wrapCanvasText(context: CanvasRenderingContext2D, value: string, maxWidth: number, maxLines = Number.POSITIVE_INFINITY): string[] {
   const words = String(value || '-').trim().split(/\s+/)
   const lines: string[] = []
   let current = ''
@@ -232,11 +264,11 @@ function wrapCanvasText(context: CanvasRenderingContext2D, value: string, maxWid
     }
     if (current) lines.push(current)
     current = word
-    if (lines.length === maxLines) break
+    if (lines.length >= maxLines) break
   }
   if (current && lines.length < maxLines) lines.push(current)
   const consumed = lines.join(' ').length
-  if (consumed < String(value || '-').trim().length && lines.length > 0) {
+  if (Number.isFinite(maxLines) && consumed < String(value || '-').trim().length && lines.length > 0) {
     let last = lines[lines.length - 1]
     while (last.length > 1 && context.measureText(`${last}...`).width > maxWidth) last = last.slice(0, -1)
     lines[lines.length - 1] = `${last}...`
@@ -248,29 +280,107 @@ function drawCanvasLines(context: CanvasRenderingContext2D, lines: string[], x: 
   lines.forEach((line, index) => context.fillText(line, x, y + index * lineHeight))
 }
 
-function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappReportRow[], page: number, pages: number): HTMLCanvasElement {
+function dailyReportItemStyle(itemCount: number) {
+  if (itemCount <= 3) return { fontSize: 18, lineHeight: 23, gap: 10, badgeFontSize: 14, tagFontSize: 13 }
+  if (itemCount <= 6) return { fontSize: 16, lineHeight: 20, gap: 6, badgeFontSize: 13, tagFontSize: 12 }
+  return { fontSize: 14, lineHeight: 18, gap: 4, badgeFontSize: 12, tagFontSize: 11 }
+}
+
+function normalizedDailyReportItems(row: DailyWhatsappReportRow) {
+  if (Array.isArray(row.items) && row.items.length > 0) {
+    return row.items.map(item => ({
+      quantity: Number(item.quantity || 0),
+      productName: String(item.productName || 'Item not recorded'),
+      sources: Array.isArray(item.sources) && item.sources.length > 0 ? item.sources.map(String) : ['Shop stock']
+    }))
+  }
+  return [{ quantity: null, productName: row.productSummary || 'Items not recorded', sources: [row.sourceSummary || 'Shop stock'] }]
+}
+
+function prepareDailyReportRows(rows: DailyWhatsappReportRow[]): PreparedDailyReportRow[] {
+  const measurementCanvas = document.createElement('canvas')
+  const context = measurementCanvas.getContext('2d')!
+  const itemTagWidth = 154
+  const itemBadgeWidth = 42
+  const itemNameWidth = DAILY_REPORT_COLUMNS.items.width - 28 - itemTagWidth - itemBadgeWidth - 24
+
+  return rows.map(row => {
+    context.font = '20px Arial, sans-serif'
+    const locationLines = wrapCanvasText(context, row.location, DAILY_REPORT_COLUMNS.location.width - 28, 2)
+    const handlerLines = wrapCanvasText(context, row.handledBy, DAILY_REPORT_COLUMNS.handler.width - 28, 2)
+    const normalizedItems = normalizedDailyReportItems(row)
+    const style = dailyReportItemStyle(normalizedItems.length)
+    const items = normalizedItems.map(item => {
+      context.font = `${style.fontSize}px Arial, sans-serif`
+      const nameLines = wrapCanvasText(context, item.productName, itemNameWidth)
+      context.font = `bold ${style.tagFontSize}px Arial, sans-serif`
+      const sourceTags = item.sources.map(source => {
+        const lines = wrapCanvasText(context, source, itemTagWidth - 18)
+        return { label: source, lines, height: lines.length * (style.tagFontSize + 3) + 8 }
+      })
+      const tagsHeight = sourceTags.reduce((total, tag) => total + tag.height, 0) + Math.max(0, sourceTags.length - 1) * 4
+      return {
+        quantity: item.quantity,
+        nameLines,
+        sourceTags,
+        height: Math.max(nameLines.length * style.lineHeight, tagsHeight, 30)
+      }
+    })
+    const itemsHeight = items.reduce((total, item) => total + item.height, 0) + Math.max(0, items.length - 1) * style.gap
+    const height = Math.max(78, locationLines.length * 27 + 50, itemsHeight + 24, handlerLines.length * 27 + 28)
+    return {
+      row,
+      locationLines,
+      handlerLines,
+      items,
+      itemFontSize: style.fontSize,
+      itemLineHeight: style.lineHeight,
+      itemGap: style.gap,
+      badgeFontSize: style.badgeFontSize,
+      tagFontSize: style.tagFontSize,
+      height
+    }
+  })
+}
+
+function paginateDailyReportRows(rows: DailyWhatsappReportRow[]): PreparedDailyReportRow[][] {
+  const prepared = prepareDailyReportRows(rows)
+  const pages: PreparedDailyReportRow[][] = []
+  let current: PreparedDailyReportRow[] = []
+  let currentHeight = 0
+  for (const row of prepared) {
+    if (current.length > 0 && currentHeight + row.height > DAILY_REPORT_MAX_BODY_HEIGHT) {
+      pages.push(current)
+      current = []
+      currentHeight = 0
+    }
+    current.push(row)
+    currentHeight += row.height
+  }
+  if (current.length > 0) pages.push(current)
+  return pages.length > 0 ? pages : [[]]
+}
+
+function drawRoundedRect(context: CanvasRenderingContext2D, x: number, y: number, width: number, height: number, radius: number) {
+  const safeRadius = Math.min(radius, width / 2, height / 2)
+  context.beginPath()
+  context.moveTo(x + safeRadius, y)
+  context.lineTo(x + width - safeRadius, y)
+  context.quadraticCurveTo(x + width, y, x + width, y + safeRadius)
+  context.lineTo(x + width, y + height - safeRadius)
+  context.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height)
+  context.lineTo(x + safeRadius, y + height)
+  context.quadraticCurveTo(x, y + height, x, y + height - safeRadius)
+  context.lineTo(x, y + safeRadius)
+  context.quadraticCurveTo(x, y, x + safeRadius, y)
+  context.closePath()
+}
+
+function renderDailyReportPage(report: DailyWhatsappReport, preparedRows: PreparedDailyReportRow[], page: number, pages: number): HTMLCanvasElement {
   const width = 1400
   const left = 48
   const right = width - 48
-  const columns = {
-    location: { x: left, width: 220 },
-    items: { x: 268, width: 335 },
-    source: { x: 603, width: 205 },
-    status: { x: 808, width: 190 },
-    handler: { x: 998, width: 190 },
-    amount: { x: 1188, width: 164 }
-  }
-  const measurementCanvas = document.createElement('canvas')
-  const measurementContext = measurementCanvas.getContext('2d')!
-  measurementContext.font = '20px Arial, sans-serif'
-  const preparedRows = rows.map(row => {
-    const locationLines = wrapCanvasText(measurementContext, row.location, columns.location.width - 28, 2)
-    const itemLines = wrapCanvasText(measurementContext, row.productSummary, columns.items.width - 28, 5)
-    const sourceLines = wrapCanvasText(measurementContext, row.sourceSummary, columns.source.width - 28, 3)
-    const handlerLines = wrapCanvasText(measurementContext, row.handledBy, columns.handler.width - 28, 2)
-    const height = Math.max(78, locationLines.length * 27 + 50, itemLines.length * 27 + 28, sourceLines.length * 27 + 28, handlerLines.length * 27 + 28)
-    return { row, locationLines, itemLines, sourceLines, handlerLines, height }
-  })
+  const columns = DAILY_REPORT_COLUMNS
   const headerHeight = 250
   const tableHeaderHeight = 58
   const footerHeight = 72
@@ -317,8 +427,7 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
   context.fillStyle = '#374151'
   context.font = 'bold 18px Arial, sans-serif'
   context.fillText('Location / Order', columns.location.x + 14, y + 36)
-  context.fillText('Item(s)', columns.items.x + 14, y + 36)
-  context.fillText('Supplier', columns.source.x + 14, y + 36)
+  context.fillText('Item(s) and source', columns.items.x + 14, y + 36)
   context.fillText('Status', columns.status.x + 14, y + 36)
   context.fillText('Rider / Courier', columns.handler.x + 14, y + 36)
   context.textAlign = 'right'
@@ -326,7 +435,8 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
   context.textAlign = 'left'
   y += tableHeaderHeight
 
-  preparedRows.forEach(({ row, locationLines, itemLines, sourceLines, handlerLines, height: rowHeight }, index) => {
+  preparedRows.forEach((prepared, index) => {
+    const { row, locationLines, handlerLines, height: rowHeight } = prepared
     context.fillStyle = index % 2 === 0 ? '#ffffff' : '#fafafa'
     context.fillRect(left, y, right - left, rowHeight)
     context.strokeStyle = '#e5e7eb'
@@ -341,10 +451,48 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
     context.fillStyle = '#6b7280'
     context.font = '16px Arial, sans-serif'
     context.fillText(row.orderNumber, columns.location.x + 14, y + locationLines.length * 27 + 33)
-    context.fillStyle = '#111827'
-    context.font = '20px Arial, sans-serif'
-    drawCanvasLines(context, itemLines, columns.items.x + 14, y + 30, 27)
-    drawCanvasLines(context, sourceLines, columns.source.x + 14, y + 30, 27)
+
+    let itemY = y + 12
+    const badgeX = columns.items.x + 14
+    const nameX = badgeX + 50
+    const tagWidth = 154
+    const tagX = columns.items.x + columns.items.width - 14 - tagWidth
+    prepared.items.forEach((item, itemIndex) => {
+      if (itemIndex > 0) {
+        context.strokeStyle = '#e5e7eb'
+        context.beginPath()
+        context.moveTo(badgeX, itemY - Math.max(2, prepared.itemGap / 2))
+        context.lineTo(columns.items.x + columns.items.width - 14, itemY - Math.max(2, prepared.itemGap / 2))
+        context.stroke()
+      }
+      if (item.quantity != null) {
+        context.fillStyle = '#f7f2e9'
+        drawRoundedRect(context, badgeX, itemY, 42, 28, 8)
+        context.fill()
+        context.fillStyle = '#6b4a1f'
+        context.font = `bold ${prepared.badgeFontSize}px Arial, sans-serif`
+        context.textAlign = 'center'
+        context.fillText(`${item.quantity}x`, badgeX + 21, itemY + 19)
+        context.textAlign = 'left'
+      }
+      context.fillStyle = '#111827'
+      context.font = `${prepared.itemFontSize}px Arial, sans-serif`
+      drawCanvasLines(context, item.nameLines, nameX, itemY + prepared.itemFontSize, prepared.itemLineHeight)
+
+      let tagY = itemY
+      item.sourceTags.forEach(tag => {
+        context.fillStyle = tag.label === 'Shop stock' ? '#eef2f7' : '#fff7e8'
+        drawRoundedRect(context, tagX, tagY, tagWidth, tag.height, 8)
+        context.fill()
+        context.strokeStyle = tag.label === 'Shop stock' ? '#cbd5e1' : '#e5c58e'
+        context.stroke()
+        context.fillStyle = tag.label === 'Shop stock' ? '#475569' : '#745021'
+        context.font = `bold ${prepared.tagFontSize}px Arial, sans-serif`
+        drawCanvasLines(context, tag.lines, tagX + 9, tagY + prepared.tagFontSize + 5, prepared.tagFontSize + 3)
+        tagY += tag.height + 4
+      })
+      itemY += item.height + prepared.itemGap
+    })
 
     const statusLabel = dailyReportStatusLabel(row.status)
     context.fillStyle = row.status === 'paid' ? '#dcfce7' : '#fef3c7'
@@ -363,7 +511,7 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
   })
 
   context.strokeStyle = '#d1d5db'
-  ;[columns.items.x, columns.source.x, columns.status.x, columns.handler.x, columns.amount.x].forEach(x => {
+  ;[columns.items.x, columns.status.x, columns.handler.x, columns.amount.x].forEach(x => {
     context.beginPath()
     context.moveTo(x, headerHeight)
     context.lineTo(x, y)
@@ -377,12 +525,11 @@ function renderDailyReportPage(report: DailyWhatsappReport, rows: DailyWhatsappR
 }
 
 function downloadDailyReportImages(report: DailyWhatsappReport) {
-  const pages = Math.max(1, Math.ceil(report.rows.length / DAILY_REPORT_ROWS_PER_IMAGE))
-  for (let page = 0; page < pages; page += 1) {
-    const rows = report.rows.slice(page * DAILY_REPORT_ROWS_PER_IMAGE, (page + 1) * DAILY_REPORT_ROWS_PER_IMAGE)
-    const canvas = renderDailyReportPage(report, rows, page + 1, pages)
+  const pageRows = paginateDailyReportRows(report.rows)
+  for (let page = 0; page < pageRows.length; page += 1) {
+    const canvas = renderDailyReportPage(report, pageRows[page], page + 1, pageRows.length)
     const link = document.createElement('a')
-    link.download = `dlight-daily-report-${report.reportDate}${pages > 1 ? `-page-${page + 1}` : ''}.png`
+    link.download = `dlight-daily-report-${report.reportDate}${pageRows.length > 1 ? `-page-${page + 1}` : ''}.png`
     link.href = canvas.toDataURL('image/png')
     link.click()
   }
@@ -1006,8 +1153,7 @@ export function Dashboard() {
                     <thead className="bg-muted/70">
                       <tr>
                         <th className="px-4 py-3 text-left">Location / Order</th>
-                        <th className="px-4 py-3 text-left">Item(s)</th>
-                        <th className="px-4 py-3 text-left">Supplier</th>
+                        <th className="px-4 py-3 text-left">Item(s) and source</th>
                         <th className="px-4 py-3 text-left">Status</th>
                         <th className="px-4 py-3 text-left">Rider / Courier</th>
                         <th className="px-4 py-3 text-right">Rider amount</th>
@@ -1017,8 +1163,19 @@ export function Dashboard() {
                       {dailyReport.rows.map(row => (
                         <tr key={row.orderId} className="border-t align-top">
                           <td className="px-4 py-3 font-medium">{row.location}<span className="mt-1 block text-xs font-normal text-muted-foreground">{row.orderNumber}</span></td>
-                          <td className="max-w-md px-4 py-3">{row.productSummary}</td>
-                          <td className="px-4 py-3">{row.sourceSummary}</td>
+                          <td className="min-w-[460px] max-w-2xl px-4 py-3">
+                            <div className="divide-y">
+                              {normalizedDailyReportItems(row).map((item, itemIndex) => (
+                                <div key={`${row.orderId}-${itemIndex}`} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 py-2 first:pt-0 last:pb-0">
+                                  {item.quantity == null ? <span /> : <span className="inline-flex min-w-9 justify-center rounded-md bg-primary/10 px-1.5 py-1 text-xs font-bold text-primary">{item.quantity}x</span>}
+                                  <span className="break-words leading-5">{item.productName}</span>
+                                  <span className="flex max-w-44 flex-wrap justify-end gap-1">
+                                    {item.sources.map(source => <span key={source} className={`inline-flex rounded-md border px-2 py-1 text-[11px] font-medium leading-4 ${source === 'Shop stock' ? 'border-slate-200 bg-slate-50 text-slate-600' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>{source}</span>)}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
                           <td className="px-4 py-3"><span className={`inline-flex whitespace-nowrap rounded-full px-2 py-1 text-xs font-medium ${row.status === 'paid' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>{dailyReportStatusLabel(row.status)}</span></td>
                           <td className="px-4 py-3">{row.handledBy}</td>
                           <td className="px-4 py-3 text-right">{row.riderAmount == null ? '-' : formatMoney(row.riderAmount)}</td>
@@ -1027,7 +1184,7 @@ export function Dashboard() {
                     </tbody>
                   </table>
                 </div>
-                {dailyReport.rows.length > DAILY_REPORT_ROWS_PER_IMAGE && <p className="border-t px-4 py-2 text-xs text-muted-foreground">The download will be split into {Math.ceil(dailyReport.rows.length / DAILY_REPORT_ROWS_PER_IMAGE)} readable images.</p>}
+                {paginateDailyReportRows(dailyReport.rows).length > 1 && <p className="border-t px-4 py-2 text-xs text-muted-foreground">The download will be split into {paginateDailyReportRows(dailyReport.rows).length} readable images after compact item sizing is applied.</p>}
               </>
             ) : null}
           </div>
