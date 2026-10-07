@@ -150,9 +150,9 @@ test('shows every sales-analysis item with its matching supplier tag', async ({ 
         order_number: 'ORD-ITEM-TAGS', sale_date: '2026-10-06', customer: 'Report Customer', status: 'delivered', payment_status: 'paid', delivery_type: 'rider', revenue: 12000, delivery_cost: 400,
         items: '1 x Long product [Essential Scents]',
         item_details: [
-          { quantity: 1, productName: 'A complete long product name that must wrap without being shortened or hidden', sources: ['Essential Scents'] },
-          { quantity: 2, productName: 'Second product supplied from another business', sources: ['Prompt Scents'] },
-          { quantity: 1, productName: 'Hybrid fulfilled product', sources: ['Shop stock', 'Luxury Scents'] }
+          { quantity: 1, productName: 'A complete long product name that must wrap without being shortened or hidden', sources: ['Essential Scents'], saleTotal: 6200, productCost: 2500, grossProfit: 3700 },
+          { quantity: 2, productName: 'Second product supplied from another business', sources: ['Prompt Scents'], saleTotal: 4000, productCost: 1800, grossProfit: 2200 },
+          { quantity: 1, productName: 'Hybrid fulfilled product', sources: ['Shop stock', 'Luxury Scents'], saleTotal: 1800, productCost: 700, grossProfit: 1100 }
         ],
         product_cost: 5000, profit: 6600, margin_percent: 55, payment_methods: 'cash'
       }] })
@@ -162,11 +162,21 @@ test('shows every sales-analysis item with its matching supplier tag', async ({ 
 
   await page.goto('/reports?department=sales&report=sales&date_from=2026-10-06&date_to=2026-10-06')
   await expect(page.getByRole('heading', { name: 'Business Intelligence' })).toBeVisible()
-  await expect(page.getByRole('columnheader', { name: 'Items' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Items and Profitability' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Total Product Cost' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: 'Net Order Profit' })).toBeVisible()
   await expect(page.getByRole('columnheader', { name: 'Item Details' })).toHaveCount(0)
   await expect(page.getByText('A complete long product name that must wrap without being shortened or hidden')).toBeVisible()
   await expect(page.getByText('Essential Scents', { exact: true })).toBeVisible()
   await expect(page.getByText('Prompt Scents', { exact: true })).toBeVisible()
   await expect(page.getByText('Shop stock', { exact: true })).toBeVisible()
   await expect(page.getByText('Luxury Scents', { exact: true })).toBeVisible()
+  await expect(page.getByText('KES 6,200', { exact: true })).toBeVisible()
+  await expect(page.getByText('KES 2,500', { exact: true })).toBeVisible()
+  await expect(page.getByText('KES 3,700', { exact: true })).toBeVisible()
+  await expect(page.getByText('KES 2,000 each', { exact: true })).toBeVisible()
+  await expect(page.getByText('KES 900 each', { exact: true })).toBeVisible()
+  await expect(page.getByText('KES 1,100 each', { exact: true })).toBeVisible()
+  await page.getByText('A complete long product name that must wrap without being shortened or hidden').scrollIntoViewIfNeeded()
+  await page.screenshot({ path: 'artifacts/sales-analysis-profitability.png', fullPage: true })
 })

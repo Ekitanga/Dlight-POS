@@ -21,6 +21,9 @@ interface ReportItemDetail {
   quantity: number
   productName: string
   sources: string[]
+  saleTotal: number
+  productCost: number
+  grossProfit: number
 }
 
 interface Overview {
@@ -90,6 +93,14 @@ const number = (value: unknown, maximumFractionDigits = 0) => formatNumber(value
 const money = (value: unknown) => formatMoney(value)
 const label = (key: string) => key.replaceAll('_', ' ').replace(/\b\w/g, character => character.toUpperCase())
 const reportLabelOverrides: Record<string, Record<string, string>> = {
+  sales: {
+    revenue: 'Order Revenue',
+    delivery_cost: 'Delivery Cost',
+    items: 'Items and Profitability',
+    product_cost: 'Total Product Cost',
+    profit: 'Net Order Profit',
+    margin_percent: 'Net Margin'
+  },
   inventory: {
     sku: 'SKU',
     product: 'Product',
@@ -137,6 +148,7 @@ const reportLabelOverrides: Record<string, Record<string, string>> = {
 }
 const reportLabel = (report: string, key: string) => reportLabelOverrides[report]?.[key] ?? label(key)
 const reportHelp: Record<string, string> = {
+  sales: 'Each product shows its recorded selling total, product cost, and gross profit. Net Order Profit also includes the order-level delivery income and delivery cost.',
   inventory: 'Current Stock shows what is physically available, reserved, damaged, returned, and the estimated stock value.',
   'category-demand': 'Demand By Category shows which product categories sold most in the selected period.',
   'product-demand': 'Restock Advice uses sales in the selected period to estimate stock needs. Needed For 14/30 Days is the stock level required to cover that many days. Add This Many is the extra quantity needed after comparing that estimate with Stock Now.',
@@ -154,7 +166,7 @@ const phoneKey = (key: string) => /(^phone$|phone|mobile|tel|fax)/.test(key)
 const countKey = (key: string) => /(^quantity$|quantity|orders|deliveries|units|days|level|count|available_stock|suggested_stock|reorder_gap)/.test(key)
 const descriptiveKey = (key: string) => !countKey(key) && /(^name$|items|product$|products$|description|notes|details|reason|recommendation|signal)/.test(key)
 const columnWidth = (key: string) => {
-  if (key === 'items') return 520
+  if (key === 'items') return 650
   if (/recommendation|signal/.test(key)) return 180
   if (descriptiveKey(key)) return 340
   if (/suggested_stock|average_daily_units|reorder_gap/.test(key)) return 150
@@ -194,7 +206,10 @@ function reportItemDetails(value: unknown): ReportItemDetail[] {
     return {
       quantity: Number(record.quantity || 0),
       productName: String(record.productName || 'Item not recorded'),
-      sources: Array.isArray(record.sources) && record.sources.length > 0 ? record.sources.map(String) : ['Shop stock']
+      sources: Array.isArray(record.sources) && record.sources.length > 0 ? record.sources.map(String) : ['Shop stock'],
+      saleTotal: Number(record.saleTotal || 0),
+      productCost: Number(record.productCost || 0),
+      grossProfit: Number(record.grossProfit || 0)
     }
   })
 }
@@ -202,14 +217,25 @@ function reportItemDetails(value: unknown): ReportItemDetail[] {
 function SalesItemsCell({ details, fallback }: { details: unknown; fallback: string }) {
   const items = reportItemDetails(details)
   if (items.length === 0) return <div className="whitespace-pre-wrap break-words leading-5">{fallback}</div>
-  return <div className="divide-y">
-    {items.map((item, index) => <div key={`${item.productName}-${index}`} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2 py-2 first:pt-0 last:pb-0">
-      <span className="inline-flex min-w-9 justify-center rounded-md bg-primary/10 px-1.5 py-1 text-xs font-bold text-primary">{item.quantity}x</span>
-      <span className="break-words leading-5">{item.productName}</span>
-      <span className="flex max-w-44 flex-wrap justify-end gap-1">
-        {item.sources.map(source => <span key={source} className={`inline-flex rounded-md border px-2 py-1 text-[11px] font-medium leading-4 ${source === 'Shop stock' ? 'border-slate-200 bg-slate-50 text-slate-600' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>{source}</span>)}
-      </span>
-    </div>)}
+  const unitValue = (total: number, quantity: number) => quantity > 1 ? money(total / quantity) : null
+  return <div className="overflow-hidden rounded-md border">
+    <div className="grid grid-cols-[minmax(0,1fr)_95px_95px_95px] gap-3 bg-muted/60 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <span>Product and source</span><span className="text-right">Sale</span><span className="text-right">Cost</span><span className="text-right">Profit</span>
+    </div>
+    <div className="divide-y">{items.map((item, index) => <div key={`${item.productName}-${index}`} className="grid grid-cols-[minmax(0,1fr)_95px_95px_95px] items-start gap-3 px-3 py-3">
+      <div className="flex min-w-0 items-start gap-2">
+        <span className="inline-flex min-w-9 shrink-0 justify-center rounded-md bg-primary/10 px-1.5 py-1 text-xs font-bold text-primary">{item.quantity}x</span>
+        <div className="min-w-0">
+          <div className="break-words leading-5">{item.productName}</div>
+          <div className="mt-1.5 flex flex-wrap gap-1">
+            {item.sources.map(source => <span key={source} className={`inline-flex rounded-md border px-2 py-1 text-[11px] font-medium leading-4 ${source === 'Shop stock' ? 'border-slate-200 bg-slate-50 text-slate-600' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>{source}</span>)}
+          </div>
+        </div>
+      </div>
+      <div className="text-right font-medium"><div>{money(item.saleTotal)}</div>{unitValue(item.saleTotal, item.quantity) && <div className="mt-1 text-[11px] font-normal text-muted-foreground">{unitValue(item.saleTotal, item.quantity)} each</div>}</div>
+      <div className="text-right font-medium"><div>{money(item.productCost)}</div>{unitValue(item.productCost, item.quantity) && <div className="mt-1 text-[11px] font-normal text-muted-foreground">{unitValue(item.productCost, item.quantity)} each</div>}</div>
+      <div className={`text-right font-semibold ${item.grossProfit < 0 ? 'text-red-600' : 'text-emerald-700'}`}><div>{money(item.grossProfit)}</div>{unitValue(item.grossProfit, item.quantity) && <div className="mt-1 text-[11px] font-normal opacity-80">{unitValue(item.grossProfit, item.quantity)} each</div>}</div>
+    </div>)}</div>
   </div>
 }
 function MetricCard({ title, value, icon, onClick, danger }: {

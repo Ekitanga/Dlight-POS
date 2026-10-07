@@ -397,7 +397,13 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     const structuredSale = structuredSalesReport.find((item: any) => item.order_number === supplierFromStockedProduct.order_number)
     assert.deepEqual(structuredSale.item_details[0].sources, [supplier.name])
     assert.equal(structuredSale.item_details[0].productName, stockProduct.name)
+    assert.equal(Number(structuredSale.item_details[0].saleTotal), 100)
+    assert.equal(Number(structuredSale.item_details[0].productCost), 60)
+    assert.equal(Number(structuredSale.item_details[0].grossProfit), 40)
     assert.ok(String(structuredSale.items).includes(`[${supplier.name}]`))
+    assert.ok(String(structuredSale.items).includes('Sale KES 100'))
+    assert.ok(String(structuredSale.items).includes('Cost KES 60'))
+    assert.ok(String(structuredSale.items).includes('Profit KES 40'))
     await assertGlobalIntegrity()
   })
 

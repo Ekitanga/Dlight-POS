@@ -315,19 +315,26 @@ router.get('/sales', async (req, res) => {
       LEFT JOIN order_payments op ON o.id = op.order_id
       LEFT JOIN LATERAL (
         SELECT STRING_AGG(
-                 item.quantity::text || ' x ' || item.product_name || ' [' || item.source_label || ']',
+                 item.quantity::text || ' x ' || item.product_name || ' [' || item.source_label || ']' ||
+                 ' | Sale KES ' || item.sale_total::text ||
+                 ' | Cost KES ' || item.product_cost::text ||
+                 ' | Profit KES ' || (item.sale_total - item.product_cost)::text,
                  E'\n' ORDER BY item.product_name, item.order_item_id
                ) AS items,
                JSONB_AGG(
                  JSONB_BUILD_OBJECT(
                    'quantity', item.quantity,
                    'productName', item.product_name,
-                   'sources', item.sources
+                   'sources', item.sources,
+                   'saleTotal', item.sale_total,
+                   'productCost', item.product_cost,
+                   'grossProfit', item.sale_total - item.product_cost
                  ) ORDER BY item.product_name, item.order_item_id
                ) AS item_details,
                SUM(item.product_cost) AS product_cost
           FROM (
             SELECT oi.id AS order_item_id, oi.quantity, p.name AS product_name,
+                   oi.total_price AS sale_total,
                    oi.unit_cost*oi.internal_quantity + oi.supplier_cost*oi.supplier_quantity AS product_cost,
                    CASE
                      WHEN oi.fulfillment_type = 'hybrid' OR (oi.internal_quantity > 0 AND oi.supplier_quantity > 0)
