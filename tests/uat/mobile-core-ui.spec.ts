@@ -55,7 +55,8 @@ test('keeps core operations thumb-friendly on a phone viewport', async ({ page }
 
 test('shows configured M-PESA details on delivery receipts without handwritten fields', async ({ page }) => {
   await login(page)
-  const token = await page.evaluate(() => JSON.parse(localStorage.getItem('auth-storage') || '{}')?.state?.token)
+  // Access tokens live only in page memory; mint one from the session's httpOnly refresh cookie.
+  const token = (await (await page.request.post('/api/auth/refresh')).json()).accessToken
   const apiResponse = await page.request.get('/api/receipts?page=1&page_size=100', {
     headers: { Authorization: `Bearer ${token}` }
   })
@@ -83,7 +84,8 @@ test('shows configured M-PESA details on delivery receipts without handwritten f
 
 test('keeps delivery receipt and unlocks sales receipt after full payment', async ({ page }) => {
   await login(page)
-  const token = await page.evaluate(() => JSON.parse(localStorage.getItem('auth-storage') || '{}')?.state?.token)
+  // Access tokens live only in page memory; mint one from the session's httpOnly refresh cookie.
+  const token = (await (await page.request.post('/api/auth/refresh')).json()).accessToken
   const apiResponse = await page.request.get('/api/orders?workflow_stage=completed&page=1&page_size=100', {
     headers: { Authorization: `Bearer ${token}` }
   })

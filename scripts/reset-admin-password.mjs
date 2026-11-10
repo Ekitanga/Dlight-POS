@@ -17,10 +17,18 @@ try {
   const result = await pool.query(
     `UPDATE users SET password_hash = $1, updated_at = NOW()
      WHERE LOWER(email) = $2 AND is_active = true
-     RETURNING email, role`,
+     RETURNING id, email, role`,
     [passwordHash, email]
   )
   if (!result.rows[0]) throw new Error('Active admin or owner account not found')
+  // End every existing sign-in for this account (table exists from the auth sessions release onward).
+  const sessionsTable = await pool.query("SELECT to_regclass('public.user_sessions') IS NOT NULL AS exists")
+  if (sessionsTable.rows[0].exists) {
+    await pool.query(
+      "UPDATE user_sessions SET revoked_at = NOW(), revoked_reason = 'password_reset' WHERE user_id = $1 AND revoked_at IS NULL",
+      [result.rows[0].id]
+    )
+  }
   console.log(`Password reset completed for ${result.rows[0].email} (${result.rows[0].role})`)
 } finally {
   await pool.end()

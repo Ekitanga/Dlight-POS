@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import axios from 'axios'
 import { AlertTriangle, Archive, Building2, Check, CreditCard, Database, Download, Laptop, Loader2, Moon, Palette, Plus, Receipt, RefreshCcw, Save, ShieldAlert, SlidersHorizontal, Sun, Trash2, TrendingUp, Upload, X } from 'lucide-react'
 import { applyAppearance, AppearanceMode } from '../../lib/appearance'
+import { TitheSettingsSection } from './TitheSettingsSection'
 
 interface SettingsData {
   company_name: string
@@ -369,6 +370,8 @@ export function Settings() {
           <div className="flex items-center gap-2"><TrendingUp className="h-5 w-5 text-primary" /><div><h2 className="font-semibold">Commission Module</h2><p className="text-sm text-muted-foreground">Disable new commission earnings while keeping existing history and reports available.</p></div></div>
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" {...register('commission_module_enabled')} className="h-4 w-4" /> Commission module enabled</label>
         </section>
+
+        <TitheSettingsSection />
 
         <section className="min-w-0 space-y-5 border-b pb-8">
           <div className="flex items-center gap-2">

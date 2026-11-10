@@ -44,11 +44,9 @@ async function openMockedDashboard(page: Page, role: 'admin' | 'attendant') {
   await page.addInitScript(({ selectedRole, selectedPermissions }) => {
     localStorage.setItem('auth-storage', JSON.stringify({
       state: {
-        user: { id: `mock-${selectedRole}`, email: `${selectedRole}@example.test`, full_name: selectedRole === 'admin' ? 'Admin User' : 'Ann Attendant', role: selectedRole, permissions: selectedPermissions },
-        token: 'mock-access-token',
-        refreshToken: 'mock-refresh-token'
+        user: { id: `mock-${selectedRole}`, email: `${selectedRole}@example.test`, full_name: selectedRole === 'admin' ? 'Admin User' : 'Ann Attendant', role: selectedRole, permissions: selectedPermissions }
       },
-      version: 0
+      version: 1
     }))
   }, { selectedRole: role, selectedPermissions: permissions })
 
@@ -135,10 +133,8 @@ test('shows every sales-analysis item with its matching supplier tag', async ({ 
     localStorage.setItem('auth-storage', JSON.stringify({
       state: {
         user: { id: 'mock-admin', email: 'admin@example.test', full_name: 'Admin User', role: 'admin', permissions: [] },
-        token: 'mock-access-token',
-        refreshToken: 'mock-refresh-token'
       },
-      version: 0
+      version: 1
     }))
   })
   await page.route('**/api/**', async route => {

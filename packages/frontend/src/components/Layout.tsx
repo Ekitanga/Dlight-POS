@@ -20,7 +20,8 @@ import {
   BarChart3,
   History,
   Bell,
-  Wallet
+  Wallet,
+  HandCoins
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { ThemeToggle } from './ThemeToggle'
@@ -30,6 +31,7 @@ import axios from 'axios'
 import { useEffect } from 'react'
 import { applyAppearance, AppearanceSettings } from '../lib/appearance'
 import { NotificationBell } from './NotificationBell'
+import { isOwnerOrAdmin, useTitheSettings } from '../lib/tithe'
 
 const mobilePrimaryPaths = ['/dashboard', '/orders', '/products', '/inventory']
 
@@ -57,6 +59,7 @@ const navItems = [
   { path: '/audit', icon: History, label: 'Audit Logs', permission: 'audit.view' },
   { path: '/notifications', icon: Bell, label: 'Notifications', permission: 'notifications.view' },
   { path: '/commissions', icon: Wallet, label: 'Commission', permission: 'commission.view' },
+  { path: '/tithe', icon: HandCoins, label: 'Tithe', permission: 'tithe.owner' },
   { path: '/users', icon: UserCog, label: 'Users', permission: 'users.view' },
   { path: '/settings', icon: Settings, label: 'Settings', permission: 'settings.view' },
 ]
@@ -65,6 +68,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation()
   const { user, logout, hasPermission } = useAuthStore()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const { data: titheSettings } = useTitheSettings()
   const { data: branding } = useQuery<{ company_name: string; logo_url?: string } & AppearanceSettings>({
     queryKey: ['branding'],
     queryFn: async () => (await axios.get('/api/auth/branding')).data
@@ -104,6 +108,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
         
         <nav className="flex-1 overflow-y-auto px-3 py-4">
           {navItems.filter(item => {
+            if (item.permission === 'tithe.owner') {
+              return isOwnerOrAdmin(user?.role) && titheSettings?.enabled === true
+            }
             if (item.permission === 'dashboard.view') {
               return dashboardAccessPermissions.some(hasPermission)
             }

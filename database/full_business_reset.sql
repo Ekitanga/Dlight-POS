@@ -19,6 +19,7 @@ TRUNCATE TABLE
     daily_reconciliations,
     deliveries,
     expenses,
+    tithe_payments,
     inventory,
     inventory_movements,
     order_items,

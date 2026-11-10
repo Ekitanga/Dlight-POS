@@ -17,6 +17,7 @@ import { reportRoutes } from './reports.js'
 import { auditRoutes } from './audit.js'
 import { notificationsRoutes } from './notifications.js'
 import { commissionRoutes } from './commissions.js'
+import { titheRoutes } from './tithe.js'
 import { authMiddleware, requireAdmin, requireModulePermission } from '../middleware/auth.js'
 
 const router = Router()
@@ -41,5 +42,7 @@ router.use('/inventory', authMiddleware, requireModulePermission('inventory'), i
 router.use('/audit', authMiddleware, requireModulePermission('audit'), auditRoutes)
 router.use('/notifications', authMiddleware, notificationsRoutes)
 router.use('/commissions', authMiddleware, commissionRoutes)
+// Tithe is private to owners and administrators; no permission grant can open it to staff.
+router.use('/tithe', authMiddleware, requireAdmin, titheRoutes)
 
 export { router as apiRouter }

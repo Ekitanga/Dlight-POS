@@ -6,9 +6,11 @@ export interface AuthPayload {
   userId: string
   email: string
   role: string
+  /** Server-side session id. Revoking the session invalidates the token immediately. */
+  sid: string
 }
 
-function jwtSecret(name: 'JWT_SECRET' | 'JWT_REFRESH_SECRET'): string {
+function jwtSecret(name: 'JWT_SECRET'): string {
   const value = process.env[name]
   const unsafeDefaults = ['secret', 'refresh-secret', 'your-secret-key-here-change-in-production', 'your-refresh-secret-here-change-in-production']
   if (!value || (process.env.NODE_ENV === 'production' && unsafeDefaults.includes(value))) {
@@ -17,51 +19,51 @@ function jwtSecret(name: 'JWT_SECRET' | 'JWT_REFRESH_SECRET'): string {
   return value
 }
 
-export function generateTokens(payload: AuthPayload) {
-  const accessToken = jwt.sign(payload, jwtSecret('JWT_SECRET'), {
+export function generateAccessToken(payload: AuthPayload) {
+  return jwt.sign(payload, jwtSecret('JWT_SECRET'), {
     expiresIn: process.env.JWT_EXPIRES_IN || '15m'
   } as jwt.SignOptions)
-  
-  const refreshToken = jwt.sign({ ...payload }, jwtSecret('JWT_REFRESH_SECRET'), {
-    expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d'
-  } as jwt.SignOptions)
-  
-  return { accessToken, refreshToken }
 }
 
 export function verifyAccessToken(token: string): AuthPayload {
   return jwt.verify(token, jwtSecret('JWT_SECRET')) as AuthPayload
 }
 
-export function verifyRefreshToken(token: string): AuthPayload {
-  return jwt.verify(token, jwtSecret('JWT_REFRESH_SECRET')) as AuthPayload
-}
-
 export async function authMiddleware(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization
-  
+
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: { message: 'No token provided' } })
   }
-  
+
   const token = authHeader.split(' ')[1]
-  
+
   try {
     const payload = verifyAccessToken(token)
-    
+    if (!payload.sid) {
+      return res.status(401).json({ error: { message: 'Session expired. Please sign in again.' } })
+    }
+
+    // The user must be active AND the session must still be live. This is what
+    // makes logout, password changes, and deactivation take effect at once.
     const userResult = await query(
-      'SELECT id, email, role FROM users WHERE id = $1 AND is_active = true',
-      [payload.userId]
+      `SELECT u.id, u.email, u.role
+       FROM users u
+       JOIN user_sessions s ON s.user_id = u.id
+       WHERE u.id = $1 AND u.is_active = true
+         AND s.id = $2 AND s.revoked_at IS NULL AND s.expires_at > NOW()`,
+      [payload.userId, payload.sid]
     )
-    
+
     if (userResult.rows.length === 0) {
       return res.status(401).json({ error: { message: 'Invalid token' } })
     }
-    
+
     req.user = {
       userId: userResult.rows[0].id,
       email: userResult.rows[0].email,
-      role: userResult.rows[0].role
+      role: userResult.rows[0].role,
+      sid: payload.sid
     }
     next()
   } catch {

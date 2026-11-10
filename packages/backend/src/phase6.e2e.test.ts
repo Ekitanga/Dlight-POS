@@ -39,7 +39,9 @@ for (const file of [
   'database/commission_business_policy_migration.sql',
   'database/commission_initial_activation_fix_migration.sql',
   'database/commission_month_end_usability_migration.sql',
-  'database/speedaf_immediate_reconciliation_migration.sql'
+  'database/speedaf_immediate_reconciliation_migration.sql',
+  'database/auth_sessions_migration.sql',
+  'database/tithe_migration.sql'
 ]) {
   const sql = await fs.readFile(path.join(root, file), 'utf8')
   // schema.sql uses psql's relative include for production/fresh installs.
@@ -2819,6 +2821,152 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
       ) entries
     `)
     assert.equal(unbalanced, 0)
+  })
+
+  await t.test('21. sessions: refresh rotates via httpOnly cookie, logout and password change revoke at once', async () => {
+    const email = 'session.phase6@dlight.test'
+    await db.query(
+      `INSERT INTO users (email, password_hash, full_name, role) VALUES ($1, $2, 'Session User', 'attendant')`,
+      [email, await bcrypt.hash(password, 4)]
+    )
+    const sessionUserId = (await db.query('SELECT id FROM users WHERE email = $1', [email])).rows[0].id
+
+    async function rawLogin() {
+      const response = await fetch(`${baseUrl}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      })
+      assert.equal(response.status, 200)
+      const body = await response.json()
+      const cookie = response.headers.get('set-cookie') || ''
+      assert.match(cookie, /dlight_rt=/)
+      assert.match(cookie, /HttpOnly/i)
+      assert.match(cookie, /SameSite=Strict/i)
+      assert.match(cookie, /Path=\/api\/auth/)
+      assert.equal(body.refreshToken, undefined, 'refresh token must not be exposed to page scripts')
+      return { accessToken: body.accessToken as string, cookie: cookie.split(';')[0] }
+    }
+    async function refresh(cookie: string) {
+      const response = await fetch(`${baseUrl}/auth/refresh`, { method: 'POST', headers: { Cookie: cookie } })
+      const body = await response.json()
+      const next = (response.headers.get('set-cookie') || '').split(';')[0]
+      return { status: response.status, accessToken: body.accessToken as string | undefined, cookie: next }
+    }
+
+    // Rotation: each refresh issues a new cookie; the old one stops working after the grace window.
+    const first = await rawLogin()
+    await request('GET', '/auth/me', first.accessToken)
+    const rotated = await refresh(first.cookie)
+    assert.equal(rotated.status, 200)
+    assert.notEqual(rotated.cookie, first.cookie)
+    await request('GET', '/auth/me', rotated.accessToken!)
+    await db.query(`UPDATE user_sessions SET rotated_at = NOW() - INTERVAL '5 minutes' WHERE user_id = $1`, [sessionUserId])
+    const replay = await refresh(first.cookie)
+    assert.equal(replay.status, 401, 'a stale refresh token is treated as stolen')
+    await request('GET', '/auth/me', rotated.accessToken!, undefined, 401)
+    assert.equal(await count(`SELECT COUNT(*) FROM user_sessions WHERE user_id = '${sessionUserId}' AND revoked_reason = 'token_reuse'`), 1)
+
+    // Logout revokes the session: the still-unexpired access token stops working immediately.
+    const second = await rawLogin()
+    await request('GET', '/auth/me', second.accessToken)
+    const logout = await fetch(`${baseUrl}/auth/logout`, { method: 'POST', headers: { Cookie: second.cookie } })
+    assert.equal(logout.status, 200)
+    await request('GET', '/auth/me', second.accessToken, undefined, 401)
+    assert.equal((await refresh(second.cookie)).status, 401)
+
+    // A password change by an administrator ends every session for that user.
+    const deviceA = await rawLogin()
+    const deviceB = await rawLogin()
+    await request('PUT', `/users/${sessionUserId}`, admin.accessToken, { password: 'A-New-Password-For-Phase6' })
+    await request('GET', '/auth/me', deviceA.accessToken, undefined, 401)
+    await request('GET', '/auth/me', deviceB.accessToken, undefined, 401)
+    assert.equal((await refresh(deviceB.cookie)).status, 401)
+  })
+
+  await t.test('22. login throttling locks one IP+account, not everyone', async () => {
+    const previousBypass = process.env.DEV_BYPASS_LOGIN_LIMIT
+    process.env.DEV_BYPASS_LOGIN_LIMIT = 'false'
+    try {
+      await db.query('DELETE FROM login_attempts')
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await request('POST', '/auth/login', undefined, { email: attendantUser.email, password: 'wrong-password' }, 401)
+      }
+      // The guessed account is locked from this IP, even with the right password...
+      await request('POST', '/auth/login', undefined, { email: attendantUser.email, password }, 429)
+      // ...but other staff can still sign in.
+      await request('POST', '/auth/login', undefined, { email: adminUser.email, password }, 200)
+      // The lock is stored in the database, so a restart does not clear it.
+      assert.equal(await count(`SELECT COUNT(*) FROM login_attempts WHERE locked_until > NOW()`), 1)
+    } finally {
+      await db.query('DELETE FROM login_attempts')
+      process.env.DEV_BYPASS_LOGIN_LIMIT = previousBypass
+    }
+  })
+
+  await t.test('23. tithe is owner/admin only, can be switched off, and follows Reports profit', async () => {
+    const today = (await db.query(`SELECT (NOW() AT TIME ZONE 'Africa/Nairobi')::date::text AS d`)).rows[0].d as string
+    const monthStart = `${today.slice(0, 7)}-01`
+
+    // Staff can never reach tithe, whatever permissions they hold.
+    await request('GET', '/tithe/settings', attendant.accessToken, undefined, 403)
+    await request('GET', '/tithe/summary', attendant.accessToken, undefined, 403)
+
+    // Off by default.
+    const initial = await request('GET', '/tithe/settings', owner.accessToken)
+    assert.equal(initial.enabled, false)
+    await request('GET', '/tithe/summary', owner.accessToken, undefined, 409)
+
+    await request('PUT', '/tithe/settings', admin.accessToken, { enabled: true, rate_percent: 0, basis: 'net_profit', start_date: monthStart }, 400)
+    await request('PUT', '/tithe/settings', admin.accessToken, { enabled: true, rate_percent: 10, basis: 'bogus', start_date: monthStart }, 400)
+    const saved = await request('PUT', '/tithe/settings', admin.accessToken, {
+      enabled: true, rate_percent: 10, basis: 'net_profit', start_date: monthStart, recipient_name: 'Phase 6 Church'
+    })
+    assert.equal(saved.enabled, true)
+    assert.equal(saved.rate_percent, 10)
+
+    const profit = await request('GET', `/reports/profit?date_from=${monthStart}&date_to=${today}`, admin.accessToken)
+    const summary = await request('GET', '/tithe/summary', owner.accessToken)
+    const current = summary.months[0]
+    assert.equal(current.in_progress, true)
+    assert.equal(current.net_profit, roundMoney(profit.netProfit))
+    const expectedDue = roundMoney(Math.max(0, roundMoney(profit.netProfit)) * 0.1)
+    assert.equal(current.tithe_due, expectedDue)
+    assert.equal(summary.totals.outstanding, expectedDue)
+
+    // Revenue basis is always >= 0, so a payment can be checked against a known amount.
+    await request('PUT', '/tithe/settings', admin.accessToken, {
+      enabled: true, rate_percent: 10, basis: 'revenue', start_date: monthStart, recipient_name: 'Phase 6 Church'
+    })
+    const revenueSummary = await request('GET', '/tithe/summary', owner.accessToken)
+    const revenueDue = roundMoney(roundMoney(profit.revenue) * 0.1)
+    assert.ok(revenueDue > 0, 'earlier scenarios should have produced completed sales this month')
+    assert.equal(revenueSummary.totals.total_due, revenueDue)
+
+    await request('POST', '/tithe/payments', owner.accessToken, { amount: 0, paid_on: today, payment_method: 'mpesa' }, 400)
+    await request('POST', '/tithe/payments', owner.accessToken, { amount: 100, paid_on: addDays(today, 1), payment_method: 'mpesa' }, 400)
+    const payment = await request('POST', '/tithe/payments', owner.accessToken, {
+      amount: 100, paid_on: today, payment_method: 'mpesa', reference: 'QWE123'
+    }, 201)
+    assert.equal(payment.recipient, 'Phase 6 Church', 'recipient defaults from settings')
+    const afterPayment = await request('GET', '/tithe/summary', owner.accessToken)
+    assert.equal(afterPayment.totals.total_paid, 100)
+    assert.equal(afterPayment.totals.outstanding, roundMoney(revenueDue - 100))
+
+    await request('POST', `/tithe/payments/${payment.id}/void`, owner.accessToken, { reason: '' }, 400)
+    await request('POST', `/tithe/payments/${payment.id}/void`, owner.accessToken, { reason: 'Entered twice' })
+    await request('POST', `/tithe/payments/${payment.id}/void`, owner.accessToken, { reason: 'Again' }, 404)
+    const afterVoid = await request('GET', '/tithe/summary', owner.accessToken)
+    assert.equal(afterVoid.totals.total_paid, 0)
+    assert.equal(await count(`SELECT COUNT(*) FROM audit_logs WHERE action IN ('tithe_payment_recorded', 'tithe_payment_voided')`), 2)
+
+    // Switching off hides the numbers but keeps history.
+    await request('PUT', '/tithe/settings', admin.accessToken, {
+      enabled: false, rate_percent: 10, basis: 'revenue', start_date: monthStart, recipient_name: 'Phase 6 Church'
+    })
+    await request('GET', '/tithe/summary', owner.accessToken, undefined, 409)
+    await request('POST', '/tithe/payments', owner.accessToken, { amount: 50, paid_on: today, payment_method: 'cash' }, 409)
+    assert.equal(await count('SELECT COUNT(*) FROM tithe_payments'), 1)
   })
 })
 

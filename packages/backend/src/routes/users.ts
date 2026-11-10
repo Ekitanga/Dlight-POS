@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { query, transaction } from '../db/index.js'
 import { authMiddleware } from '../middleware/auth.js'
 import bcrypt from 'bcryptjs'
+import { revokeAllUserSessions } from '../services/sessions.js'
 
 const router = Router()
 
@@ -143,6 +144,12 @@ router.put('/:id', async (req, res) => {
           )
         }
       }
+      // A new password or a deactivation must end every existing sign-in.
+      if (password) {
+        await revokeAllUserSessions(id, 'password_changed', client)
+      } else if (is_active === false) {
+        await revokeAllUserSessions(id, 'user_deactivated', client)
+      }
       await client.query(
         'INSERT INTO audit_logs (user_id, action, entity_type, entity_id, new_values) VALUES ($1, $2, $3, $4, $5)',
         [req.user?.userId, 'user_permissions_updated', 'user', id, JSON.stringify({ role: updatedUser.role, commission_eligible: updatedUser.commission_eligible, permissions })]
@@ -167,7 +174,10 @@ router.delete('/:id', async (req, res) => {
         return res.status(400).json({ error: { message: 'The final active administrator cannot be deactivated' } })
       }
     }
-    await query('UPDATE users SET is_active = false WHERE id = $1', [id])
+    await transaction(async client => {
+      await client.query('UPDATE users SET is_active = false WHERE id = $1', [id])
+      await revokeAllUserSessions(id, 'user_deactivated', client)
+    })
     res.status(204).send()
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })

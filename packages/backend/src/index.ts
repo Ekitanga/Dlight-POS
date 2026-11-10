@@ -24,6 +24,19 @@ const blockedStaticPaths = [
   /^\/js\/(?:config|env|settings)\.js$/i,
 ]
 
+// Behind Caddy (or any reverse proxy) the socket address is the proxy, not the
+// browser. Trusting exactly one hop makes req.ip the real client IP, which the
+// login throttle and audit log depend on. Override with TRUST_PROXY if the
+// deployment has a different number of proxies in front of the app.
+function trustProxySetting(): boolean | number | string {
+  const raw = process.env.TRUST_PROXY
+  if (raw === undefined || raw === '') return process.env.NODE_ENV === 'production' ? 1 : false
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  return /^\d+$/.test(raw) ? Number(raw) : raw
+}
+app.set('trust proxy', trustProxySetting())
+
 app.use(cors({
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
   credentials: true

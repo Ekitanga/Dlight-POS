@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { query, transaction } from '../db/index.js'
 import { recognizedExpensesSql } from '../lib/expenseRecognition.js'
+import { profitSummary, shopDeliveryCostSql, shopDeliveryIncomeSql } from '../lib/profit.js'
 import { requireAdmin } from '../middleware/auth.js'
 import {
   accountingStatus,
@@ -45,20 +46,6 @@ function sendRows(req: any, res: any, rows: any[]) {
     return
   }
   res.json(rows)
-}
-
-function shopDeliveryIncomeSql(alias: string): string {
-  return `(CASE WHEN ${alias}.delivery_type = 'courier'
-    AND ${alias}.courier_payment_type = 'cod'
-    AND ${alias}.delivery_fee_payment_method IN ('paid_to_courier', 'pay_on_delivery')
-    THEN 0 ELSE ${alias}.delivery_income END)`
-}
-
-function shopDeliveryCostSql(alias: string): string {
-  return `(CASE WHEN ${alias}.delivery_type = 'courier'
-    AND ${alias}.courier_payment_type = 'cod'
-    AND ${alias}.delivery_fee_payment_method IN ('paid_to_courier', 'pay_on_delivery')
-    THEN 0 ELSE ${alias}.delivery_cost END)`
 }
 
 router.get('/trial-balance/status', async (_req, res) => {
@@ -812,47 +799,7 @@ router.get('/profit', async (req, res) => {
     const today = nairobiBusinessDate()
     const dateFrom = String(req.query.date_from || today)
     const dateTo = String(req.query.date_to || dateFrom)
-    const params: any[] = [dateFrom, dateTo]
-    const conditions = ['COALESCE(o.sale_date, o.created_at::date) >= $1', 'COALESCE(o.sale_date, o.created_at::date) <= $2']
-    conditions.push("o.status IN ('delivered', 'collected_paid')")
-    const recognizedExpenses = recognizedExpensesSql('$1', '$2')
-    const profitIncome = shopDeliveryIncomeSql('o')
-    const profitCost = shopDeliveryCostSql('o')
-    const result = await query(
-      `WITH completed_orders AS (
-         SELECT
-           o.id, o.subtotal, ${profitIncome} AS delivery_income, ${profitCost} AS delivery_cost,
-           COALESCE(SUM(CASE WHEN oi.fulfillment_type = 'internal' THEN oi.unit_cost * oi.internal_quantity ELSE 0 END), 0) AS internal_cogs,
-           COALESCE(SUM(CASE WHEN oi.fulfillment_type IN ('supplier', 'hybrid') THEN oi.supplier_cost * oi.supplier_quantity ELSE 0 END), 0) AS supplier_costs
-         FROM orders o
-         JOIN order_items oi ON oi.order_id = o.id
-         WHERE ${conditions.join(' AND ')}
-         GROUP BY o.id
-       )
-       SELECT
-         COALESCE(SUM(subtotal + delivery_income), 0) AS revenue,
-         COALESCE(SUM(internal_cogs), 0) AS internal_cogs,
-         COALESCE(SUM(supplier_costs), 0) AS supplier_costs,
-         COALESCE(SUM(delivery_cost), 0) AS delivery_costs,
-         ${recognizedExpenses} AS expenses
-       FROM completed_orders`,
-      params
-    )
-    const row = result.rows[0]
-    const revenue = Number(row.revenue || 0)
-    const internalCogs = Number(row.internal_cogs || 0)
-    const supplierCosts = Number(row.supplier_costs || 0)
-    const deliveryCosts = Number(row.delivery_costs || 0)
-    const expenses = Number(row.expenses || 0)
-    res.json({
-      revenue,
-      internalCogs,
-      supplierCosts,
-      deliveryCosts,
-      expenses,
-      grossProfit: revenue - internalCogs - supplierCosts,
-      netProfit: revenue - internalCogs - supplierCosts - deliveryCosts - expenses
-    })
+    res.json(await profitSummary({ query }, dateFrom, dateTo))
   } catch {
     res.status(500).json({ error: { message: 'Database error' } })
   }

@@ -19,6 +19,7 @@ import { Reports } from './pages/reports/Reports'
 import { AuditLogs } from './pages/audit/AuditLogs'
 import { Notifications } from './pages/notifications/Notifications'
 import { Commissions } from './pages/commissions/Commissions'
+import { Tithe } from './pages/tithe/Tithe'
 
 const dashboardAccessPermissions = [
   'dashboard.view',
@@ -63,6 +64,7 @@ function App() {
         <Route path="/settings" element={hasPermission('settings.view') ? <Settings /> : <Navigate to="/orders" replace />} />
         <Route path="/reports" element={hasPermission('reports.view') ? <Reports /> : <Navigate to="/orders" replace />} />
         <Route path="/audit" element={hasPermission('audit.view') ? <AuditLogs /> : <Navigate to="/orders" replace />} />
+        <Route path="/tithe" element={isAdminOrOwner ? <Tithe /> : <Navigate to="/orders" replace />} />
         <Route path="/notifications" element={isAdminOrOwner ? <Notifications /> : <Navigate to="/orders" replace />} />
         <Route path="/commissions" element={
           hasPermission('commission.view') || hasPermission('commission.own_view') || hasPermission('commission.own_daily') ||

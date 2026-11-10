@@ -50,5 +50,7 @@ docker compose -f "$COMPOSE_FILE" exec -T db psql -U dlight_app -d dlight_pos -v
 docker compose -f "$COMPOSE_FILE" exec -T db psql -U dlight_app -d dlight_pos -v ON_ERROR_STOP=1 -f /migrations/commission_operational_hardening_migration.sql
 docker compose -f "$COMPOSE_FILE" exec -T db psql -U dlight_app -d dlight_pos -v ON_ERROR_STOP=1 -f /migrations/commission_business_policy_migration.sql
 docker compose -f "$COMPOSE_FILE" exec -T db psql -U dlight_app -d dlight_pos -v ON_ERROR_STOP=1 -f /migrations/commission_month_end_usability_migration.sql
+docker compose -f "$COMPOSE_FILE" exec -T db psql -U dlight_app -d dlight_pos -v ON_ERROR_STOP=1 -f /migrations/auth_sessions_migration.sql
+docker compose -f "$COMPOSE_FILE" exec -T db psql -U dlight_app -d dlight_pos -v ON_ERROR_STOP=1 -f /migrations/tithe_migration.sql
 
 echo "Database migrations completed."
