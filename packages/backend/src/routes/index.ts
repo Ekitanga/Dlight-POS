@@ -18,6 +18,7 @@ import { auditRoutes } from './audit.js'
 import { notificationsRoutes } from './notifications.js'
 import { commissionRoutes } from './commissions.js'
 import { titheRoutes } from './tithe.js'
+import { websiteSyncRoutes } from './websiteSync.js'
 import { authMiddleware, requireAdmin, requireModulePermission } from '../middleware/auth.js'
 
 const router = Router()
@@ -44,5 +45,6 @@ router.use('/notifications', authMiddleware, notificationsRoutes)
 router.use('/commissions', authMiddleware, commissionRoutes)
 // Tithe is private to owners and administrators; no permission grant can open it to staff.
 router.use('/tithe', authMiddleware, requireAdmin, titheRoutes)
+router.use('/website-sync', authMiddleware, requireAdmin, websiteSyncRoutes)
 
 export { router as apiRouter }

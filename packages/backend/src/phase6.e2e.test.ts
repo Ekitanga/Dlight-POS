@@ -41,7 +41,8 @@ for (const file of [
   'database/commission_month_end_usability_migration.sql',
   'database/speedaf_immediate_reconciliation_migration.sql',
   'database/auth_sessions_migration.sql',
-  'database/tithe_migration.sql'
+  'database/tithe_migration.sql',
+  'database/website_product_sync_migration.sql'
 ]) {
   const sql = await fs.readFile(path.join(root, file), 'utf8')
   // schema.sql uses psql's relative include for production/fresh installs.
@@ -2967,6 +2968,123 @@ await test('Phase 6 order-first ERP scenarios', { concurrency: false }, async t 
     await request('GET', '/tithe/summary', owner.accessToken, undefined, 409)
     await request('POST', '/tithe/payments', owner.accessToken, { amount: 50, paid_on: today, payment_method: 'cash' }, 409)
     assert.equal(await count('SELECT COUNT(*) FROM tithe_payments'), 1)
+  })
+
+  await t.test('24. website sync adds only new products, never changes existing ones, and queues uncertain ones', async () => {
+    const http = await import('node:http')
+    for (const name of ['Watches', 'Perfumes']) {
+      await db.query('INSERT INTO categories (name) SELECT $1::text WHERE NOT EXISTS (SELECT 1 FROM categories WHERE name = $1::text)', [name])
+    }
+    const watches = (await db.query("SELECT id FROM categories WHERE name = 'Watches'")).rows[0].id
+    const perfumes = (await db.query("SELECT id FROM categories WHERE name = 'Perfumes'")).rows[0].id
+    const existingNamed = (await db.query(
+      `INSERT INTO products (sku, name, category_id, cost_price, selling_price, is_dropship)
+       VALUES ('SYNC-EXIST', 'Casio MTP-SYNC1 Men’s Watch – Black Dial', $1, 1234, 5000, true) RETURNING *`, [watches]
+    )).rows[0]
+    const genericModel = (await db.query(
+      `INSERT INTO products (sku, name, category_id, cost_price, selling_price, is_dropship)
+       VALUES ('SYNC-GENERIC', 'NAVIFORCE 9988 Men''s Military Quartz Watch Waterproof Steel', $1, 0, 4500, true) RETURNING *`, [watches]
+    )).rows[0]
+    await db.query(
+      `INSERT INTO products (sku, name, category_id, cost_price, selling_price, is_dropship)
+       VALUES ('SYNC-PERF', 'Hugo Boss Boss Bottled Oud Eau de Parfum 100ml – Men', $1, 0, 9999, true)`, [perfumes]
+    )
+    const before = (await db.query('SELECT id, name, selling_price, cost_price, updated_at FROM products ORDER BY id')).rows
+
+    const storeProduct = (id: number, name: string, price: number, categories: string[]) => ({
+      id, name, permalink: `https://example.test/p/${id}`,
+      prices: { price: String(price * 100), currency_minor_unit: 2 },
+      categories: categories.map(category => ({ name: category }))
+    })
+    let catalogue = [
+      // Same product, different apostrophe/entity -> existing, untouched even though the website price differs.
+      storeProduct(9001, 'Casio MTP-SYNC1 Men&#8217;s Watch &#8211; Black Dial', 7777, ['Watches']),
+      // Colour version of a model the POS holds as one product -> skipped_variant.
+      storeProduct(9002, 'Naviforce 9988 Men’s Military Watch – Gold Dial, Gold Steel', 4500, ['Watches']),
+      // Similar perfume, different edition -> review.
+      storeProduct(9003, 'Hugo Boss Boss Bottled Elixir Eau de Parfum 100ml – Men', 9999, ['Perfumes']),
+      // Clearly new -> added.
+      storeProduct(9004, 'Seiko Presage SRPSYNC Men’s Automatic Watch – Blue Dial', 52000, ['Watches']),
+      storeProduct(9005, 'Creed Sync Test Eau de Parfum 100ml – Men', 9999, ['Perfumes'])
+    ]
+    const site = http.createServer((req, res) => {
+      const page = Number(new URL(req.url || '/', 'http://x').searchParams.get('page') || 1)
+      res.setHeader('Content-Type', 'application/json')
+      res.setHeader('X-WP-TotalPages', '1')
+      res.end(JSON.stringify(page === 1 ? catalogue : []))
+    })
+    await new Promise<void>(resolve => site.listen(0, '127.0.0.1', () => resolve()))
+    const sitePort = (site.address() as any).port
+    try {
+      await db.query(`UPDATE website_sync_settings SET source_url = $1, enabled = true WHERE id = 1`, [`http://127.0.0.1:${sitePort}`])
+
+      // Owners/admins only.
+      await request('GET', '/website-sync/status', attendant.accessToken, undefined, 403)
+      await request('POST', '/website-sync/run', attendant.accessToken, undefined, 403)
+
+      const first = await request('POST', '/website-sync/run', owner.accessToken)
+      assert.equal(first.fetched, 5)
+      assert.equal(first.newSeen, 5)
+      assert.equal(first.added, 2)
+      assert.equal(first.existing, 1)
+      assert.equal(first.skippedVariant, 1)
+      assert.equal(first.review, 1)
+
+      const added = (await db.query(
+        `SELECT p.name, p.selling_price, p.cost_price, p.is_dropship, c.name AS category, i.quantity
+         FROM website_products w JOIN products p ON p.id = w.product_id
+         JOIN categories c ON c.id = p.category_id JOIN inventory i ON i.product_id = p.id
+         WHERE w.status = 'imported' ORDER BY w.website_product_id`
+      )).rows
+      assert.deepEqual(added.map(row => [row.name, Number(row.selling_price), Number(row.cost_price), row.is_dropship, row.category, row.quantity]), [
+        ['Seiko Presage SRPSYNC Men’s Automatic Watch – Blue Dial', 52000, 0, true, 'Watches', 0],
+        ['Creed Sync Test Eau de Parfum 100ml – Men', 9999, 0, true, 'Perfumes', 0]
+      ])
+      const statuses = Object.fromEntries((await db.query('SELECT website_product_id, status, matched_product_id FROM website_products')).rows
+        .map(row => [String(row.website_product_id), row]))
+      assert.equal(statuses['9001'].status, 'existing')
+      assert.equal(statuses['9001'].matched_product_id, existingNamed.id)
+      assert.equal(statuses['9002'].status, 'skipped_variant')
+      assert.equal(statuses['9002'].matched_product_id, genericModel.id)
+      assert.equal(statuses['9003'].status, 'review')
+
+      // Existing products were not changed in any way.
+      const after = (await db.query('SELECT id, name, selling_price, cost_price, updated_at FROM products WHERE id = ANY($1::uuid[]) ORDER BY id', [before.map(row => row.id)])).rows
+      assert.deepEqual(after, before)
+
+      // Running again finds nothing new and adds nothing.
+      const second = await request('POST', '/website-sync/run', owner.accessToken)
+      assert.equal(second.newSeen, 0)
+      assert.equal(second.added, 0)
+
+      // Review decisions: skip one, add another; decided items cannot be decided twice.
+      catalogue = catalogue.concat([
+        // A tester listing of a perfume already in the POS is the same perfume.
+        storeProduct(9007, 'Hugo Boss Boss Bottled Oud Eau de Parfum 100ml – Men Tester', 9999, ['Perfumes']),
+        // An "Intense" edition is a different perfume: never auto-added, never silently ignored.
+        storeProduct(9006, 'Hugo Boss Boss Bottled Oud Intense Eau de Parfum 100ml – Men', 9999, ['Perfumes'])
+      ])
+      const third = await request('POST', '/website-sync/run', admin.accessToken)
+      assert.equal(third.newSeen, 2)
+      assert.equal(third.existing, 1)
+      assert.equal(third.review, 1)
+      const status = await request('GET', '/website-sync/status', owner.accessToken)
+      assert.equal(status.review.length, 2)
+      await request('POST', '/website-sync/items/9006/skip', owner.accessToken)
+      const approved = await request('POST', '/website-sync/items/9003/add', owner.accessToken)
+      assert.equal(approved.status, 'imported')
+      await request('POST', '/website-sync/items/9003/add', owner.accessToken, undefined, 409)
+      assert.equal(await count("SELECT COUNT(*) FROM products WHERE name = 'Hugo Boss Boss Bottled Elixir Eau de Parfum 100ml – Men'"), 1)
+      assert.equal(await count("SELECT COUNT(*) FROM website_products WHERE website_product_id = 9006 AND status = 'skipped'"), 1)
+      assert.ok(await count("SELECT COUNT(*) FROM audit_logs WHERE action = 'products_imported_from_website'") >= 2)
+      assert.ok(await count("SELECT COUNT(*) FROM notifications WHERE title = 'Website products updated'") >= 1)
+
+      // Switching off is saved and audited.
+      await request('PUT', '/website-sync/settings', admin.accessToken, { enabled: false })
+      assert.equal((await request('GET', '/website-sync/status', owner.accessToken)).settings.enabled, false)
+    } finally {
+      await new Promise<void>(resolve => site.close(() => resolve()))
+    }
   })
 })
 

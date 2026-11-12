@@ -5,6 +5,7 @@ import axios from 'axios'
 import { AlertTriangle, Archive, Building2, Check, CreditCard, Database, Download, Laptop, Loader2, Moon, Palette, Plus, Receipt, RefreshCcw, Save, ShieldAlert, SlidersHorizontal, Sun, Trash2, TrendingUp, Upload, X } from 'lucide-react'
 import { applyAppearance, AppearanceMode } from '../../lib/appearance'
 import { TitheSettingsSection } from './TitheSettingsSection'
+import { WebsiteSyncSection } from './WebsiteSyncSection'
 
 interface SettingsData {
   company_name: string
@@ -372,6 +373,8 @@ export function Settings() {
         </section>
 
         <TitheSettingsSection />
+
+        <WebsiteSyncSection />
 
         <section className="min-w-0 space-y-5 border-b pb-8">
           <div className="flex items-center gap-2">
