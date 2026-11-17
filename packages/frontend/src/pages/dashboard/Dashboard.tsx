@@ -1,7 +1,7 @@
 import React from 'react'
 import { useQuery } from '@tanstack/react-query'
 import axios from 'axios'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../../stores/authStore'
 import { DateRangeFilter, formatDisplayDate, presetDateRange, todayDate } from '../../components/DateRangeFilter'
@@ -524,15 +524,38 @@ function renderDailyReportPage(report: DailyWhatsappReport, preparedRows: Prepar
   return canvas
 }
 
-function downloadDailyReportImages(report: DailyWhatsappReport) {
+function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => (blob ? resolve(blob) : reject(new Error('Could not create the report image'))), 'image/png')
+  })
+}
+
+function saveBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.download = fileName
+  link.href = url
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  // Give the browser time to start the download before releasing the file.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+/**
+ * Downloads every page of the daily report. Pages are saved one after another
+ * with a short gap: browsers often drop downloads fired in the same instant,
+ * which is how attendants were ending up with only page 1.
+ */
+async function downloadDailyReportImages(report: DailyWhatsappReport): Promise<number> {
   const pageRows = paginateDailyReportRows(report.rows)
   for (let page = 0; page < pageRows.length; page += 1) {
     const canvas = renderDailyReportPage(report, pageRows[page], page + 1, pageRows.length)
-    const link = document.createElement('a')
-    link.download = `dlight-daily-report-${report.reportDate}${pageRows.length > 1 ? `-page-${page + 1}` : ''}.png`
-    link.href = canvas.toDataURL('image/png')
-    link.click()
+    const blob = await canvasToPngBlob(canvas)
+    saveBlob(blob, `dlight-daily-report-${report.reportDate}${pageRows.length > 1 ? `-page-${page + 1}-of-${pageRows.length}` : ''}.png`)
+    if (page < pageRows.length - 1) await new Promise(resolve => setTimeout(resolve, 700))
   }
+  return pageRows.length
 }
 
 function commissionStatusClass(status: string | null | undefined): string {
@@ -850,6 +873,7 @@ export function Dashboard() {
   const [commissionHistoryTo, setCommissionHistoryTo] = useState(() => today.slice(0, 7))
   const [dailyReportDate, setDailyReportDate] = useState(today)
   const [dailyReportDownloading, setDailyReportDownloading] = useState(false)
+  const [dailyReportDownloadMessage, setDailyReportDownloadMessage] = useState('')
   const [dailyReportPreviewOpen, setDailyReportPreviewOpen] = useState(false)
   const [drilldownSelection, setDrilldownSelection] = useState<DrilldownSelection | null>(null)
   const [drilldownDateFrom, setDrilldownDateFrom] = useState(today)
@@ -898,6 +922,11 @@ export function Dashboard() {
     staleTime: 0,
     refetchOnMount: 'always'
   })
+  // How many image pages the report will produce, so the button can say "Download all (3 pages)".
+  const dailyReportPageCount = useMemo(
+    () => (dailyReport?.rows.length ? paginateDailyReportRows(dailyReport.rows).length : 0),
+    [dailyReport]
+  )
 
   const { data: commissionSummary } = useQuery({
     queryKey: ['commission-own-summary', dateFrom, dateTo],
@@ -1013,9 +1042,17 @@ export function Dashboard() {
   }
   const downloadDailyReport = async () => {
     setDailyReportDownloading(true)
+    setDailyReportDownloadMessage('')
     try {
       const refreshed = await refetchDailyReport()
-      if (refreshed.data && refreshed.data.rows.length > 0) downloadDailyReportImages(refreshed.data)
+      if (refreshed.data && refreshed.data.rows.length > 0) {
+        const pages = await downloadDailyReportImages(refreshed.data)
+        setDailyReportDownloadMessage(pages > 1
+          ? `Downloaded all ${pages} pages (page 1 of ${pages} to page ${pages} of ${pages}). If your browser asks to allow multiple downloads, choose Allow and click Download all again.`
+          : '')
+      }
+    } catch {
+      setDailyReportDownloadMessage('The report image could not be created. Please try again.')
     } finally {
       setDailyReportDownloading(false)
     }
@@ -1103,7 +1140,7 @@ export function Dashboard() {
               <div className="flex flex-col gap-2 min-[430px]:flex-row min-[430px]:items-end">
                 <label className="text-xs font-medium text-muted-foreground">
                   Report date
-                  <input type="date" value={dailyReportDate} max={today} onChange={event => { setDailyReportDate(event.target.value); setDailyReportPreviewOpen(false) }} className="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground" />
+                  <input type="date" value={dailyReportDate} max={today} onChange={event => { setDailyReportDate(event.target.value); setDailyReportPreviewOpen(false); setDailyReportDownloadMessage('') }} className="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm text-foreground" />
                 </label>
                 {dailyReport?.rows.length ? (
                   <div className="flex flex-wrap gap-x-3 gap-y-1 pb-1 text-xs text-muted-foreground">
@@ -1132,10 +1169,15 @@ export function Dashboard() {
                   className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50 sm:flex-none"
                 >
                   <Download className="h-4 w-4" />
-                  {dailyReportDownloading ? 'Preparing image...' : 'Download image'}
+                  {dailyReportDownloading
+                    ? (dailyReportPageCount > 1 ? 'Preparing pages...' : 'Preparing image...')
+                    : (dailyReportPageCount > 1 ? `Download all (${dailyReportPageCount} pages)` : 'Download image')}
                 </button>
               </div>
             </div>
+            {dailyReportDownloadMessage && (
+              <div className="border-t bg-muted/40 px-4 py-2 text-xs text-muted-foreground">{dailyReportDownloadMessage}</div>
+            )}
             {dailyReportError ? (
               <div className="border-t p-4 text-sm text-destructive">The daily report could not be loaded. Please try again.</div>
             ) : dailyReportLoading ? (
